@@ -1,0 +1,15 @@
+{
+  "name": "telegram-attendance-bot",
+  "version": "1.0.0",
+  "description": "بوت تليجرام لتسجيل حضور الطلبة في الدروس الصوتية اليومية",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "pg": "^8.12.0",
+    "dotenv": "^16.4.5"
+  }
+}
