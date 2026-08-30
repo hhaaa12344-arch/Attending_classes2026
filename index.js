@@ -6,7 +6,6 @@ const {
   extractFirstUrl,
   extractHashtags,
   formatSeasonLabel,
-  hasAudioContent,
   hasLessonContent,
   looksLikeLessonMedia,
   normalizeHashtag,
@@ -25,9 +24,6 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || '')
 const LESSON_ACTIVE_HOURS = Number(process.env.LESSON_ACTIVE_HOURS || 24);
 // التقارير اليومية وحدود الغياب تُحسب بحسب توقيت بغداد افتراضيًا.
 const ATTENDANCE_TIME_ZONE = process.env.ATTENDANCE_TIME_ZONE || 'Asia/Baghdad';
-// نافذة منع التكرار: تجاهل تفعيل نفس المادة تلقائيًا مرتين خلال هذه الدقائق (منشورات متعددة لنفس الدرس)
-const DEDUPE_MINUTES = 15;
-
 if (!BOT_TOKEN) {
   console.error('خطأ: يجب ضبط متغير البيئة BOT_TOKEN');
   process.exit(1);
@@ -55,6 +51,19 @@ const bot = new Telegraf(BOT_TOKEN);
 // حالة مؤقتة في الذاكرة لكل مستخدم لإدارة خطوات الإدخال المتعددة (تسجيل، إضافة، تعديل...)
 // يعمل بشكل صحيح طالما البوت يعمل على نسخة تشغيل واحدة (الوضع الافتراضي على Railway)
 const userState = new Map();
+
+const BACK_BUTTON = '↩️ رجوع';
+const STUDENT_ACTIVITY_BUTTON = '📋 المتغيرات';
+const LEGACY_STUDENT_ACTIVITY_BUTTON = '📋 إجازاتي وإنذاراتي';
+const LEGACY_STUDENT_ACTIVITY_BUTTON_2 = '📋 إجازاتي وتنبيهاتي';
+const STUDENT_MENU_BUTTONS = new Set([
+  '📚 دروس اليوم',
+  '📊 تقريري',
+  '🌴 طلب إجازة',
+  STUDENT_ACTIVITY_BUTTON,
+  LEGACY_STUDENT_ACTIVITY_BUTTON,
+  LEGACY_STUDENT_ACTIVITY_BUTTON_2,
+]);
 
 const ADMIN_MENU_BUTTONS = new Set([
   '➕ إضافة مرحلة دراسية',
@@ -91,56 +100,88 @@ const OFFICIAL_CONFIRMATION_MESSAGE =
 // ---------------------------------------------------------------------------
 // أدوات مساعدة
 // ---------------------------------------------------------------------------
+function buttonStyle(text) {
+  const value = String(text || '');
+  if (/(❌|🗑|حذف|رفض|إلغاء|أرشفة)/.test(value)) return 'danger';
+  if (/(✅|✔|🟢|➕|موافقة|تأكيد|حفظ|تفعيل)/.test(value)) return 'success';
+  return 'primary';
+}
+
+function replyButton(text, style = buttonStyle(text)) {
+  return { text, style };
+}
+
+function callbackButton(text, data, style = buttonStyle(text)) {
+  return { ...Markup.button.callback(text, data), style };
+}
+
+function urlButton(text, url, style = 'success') {
+  return { ...Markup.button.url(text, url), style };
+}
+
 function stagesKeyboard(stages, prefix) {
   return Markup.inlineKeyboard(
-    stages.map((s) => [Markup.button.callback(limitButtonText(s.name), `${prefix}:${s.id}`)])
+    stages.map((s) => [callbackButton(limitButtonText(s.name), `${prefix}:${s.id}`)])
   );
 }
 
 function subjectsKeyboard(subjects, prefix) {
   return Markup.inlineKeyboard(
-    subjects.map((s) => [Markup.button.callback(limitButtonText(s.name), `${prefix}:${s.id}`)])
+    subjects.map((s) => [callbackButton(limitButtonText(s.name), `${prefix}:${s.id}`)])
   );
 }
 
 function studentMainMenu() {
-  return Markup.keyboard([['📚 دروس اليوم', '📊 تقريري'], ['🌴 طلب إجازة']]).resize().persistent();
+  return Markup.keyboard([
+    [replyButton('📚 دروس اليوم'), replyButton('📊 تقريري')],
+    [replyButton('🌴 طلب إجازة'), replyButton(STUDENT_ACTIVITY_BUTTON)],
+    [replyButton(BACK_BUTTON)],
+  ]).resize().persistent();
+}
+
+function backOnlyMenu() {
+  return Markup.keyboard([[replyButton(BACK_BUTTON)]]).resize().persistent();
 }
 
 function officialConfirmationKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('✅ أؤكد أنني مسجّل بصفة طالب رسمي', 'confirm_official_student')],
+    [callbackButton('✅ أؤكد أنني مسجّل بصفة طالب رسمي', 'confirm_official_student')],
   ]);
 }
 
-function sendOfficialConfirmationPrompt(ctx) {
+async function sendOfficialConfirmationPrompt(ctx) {
+  const student = await db.getStudentByTelegramId(ctx.from.id);
+  if (student) {
+    return replyStudentScreen(ctx, student, OFFICIAL_CONFIRMATION_MESSAGE, officialConfirmationKeyboard());
+  }
   return ctx.reply(OFFICIAL_CONFIRMATION_MESSAGE, officialConfirmationKeyboard());
 }
 
 function adminMainMenu() {
-  return Markup.keyboard([
+  const rows = [
     ['➕ إضافة مرحلة دراسية', '➕ إضافة مادة'],
     ['🟢 تفعيل درس يدويًا', '📊 تقرير الحضور'],
     ['🎓 إدارة الطلبة', '🔗 ربط قناة بمرحلة'],
     ['📡 القنوات المرتبطة', '🏷️ المواد والهاشتاغات'],
     ['⚙️ إدارة المراحل', '🗓️ بدء موسم جديد'],
     ['🗂️ أرشيف المواسم', '🌴 طلبات الإجازة'],
-    ['❌ إلغاء العملية'],
-  ]).resize().persistent();
+    [BACK_BUTTON, '❌ إلغاء العملية'],
+  ];
+  return Markup.keyboard(rows.map((row) => row.map((text) => replyButton(text)))).resize().persistent();
 }
 
 function studentActionsKeyboard(studentId, isActive = true) {
   const rows = [
-    [Markup.button.callback('✏️ تعديل الاسم', `stu_edit_name:${studentId}`)],
-    [Markup.button.callback('🔁 تغيير المرحلة', `stu_edit_stage:${studentId}`)],
-    [Markup.button.callback('📊 تقرير كل المواسم', `stu_report:${studentId}`)],
+    [callbackButton('✏️ تعديل الاسم', `stu_edit_name:${studentId}`)],
+    [callbackButton('🔁 تغيير المرحلة', `stu_edit_stage:${studentId}`)],
+    [callbackButton('📊 تقرير كل المواسم', `stu_report:${studentId}`)],
   ];
   if (isActive) {
-    rows.push([Markup.button.callback('🗄️ أرشفة الطالب (مع حفظ بياناته)', `stu_archive_confirm:${studentId}`)]);
+    rows.push([callbackButton('🗄️ أرشفة الطالب (مع حفظ بياناته)', `stu_archive_confirm:${studentId}`)]);
   } else {
-    rows.push([Markup.button.callback('♻️ إعادة تفعيل الطالب', `stu_restore:${studentId}`)]);
+    rows.push([callbackButton('♻️ إعادة تفعيل الطالب', `stu_restore:${studentId}`)]);
   }
-  rows.push([Markup.button.callback('🗑️ حذف نهائي (مع كل بياناته)', `stu_hard_confirm:${studentId}`)]);
+  rows.push([callbackButton('🗑️ حذف نهائي (مع كل بياناته)', `stu_hard_confirm:${studentId}`)]);
   return Markup.inlineKeyboard(rows);
 }
 
@@ -263,6 +304,63 @@ function currentDateInTimeZone(timeZone = ATTENDANCE_TIME_ZONE, now = new Date()
   return `${values.year}-${values.month}-${values.day}`;
 }
 
+async function deleteMessageQuietly(chatId, messageId) {
+  if (!chatId || !messageId) return;
+  try {
+    await bot.telegram.deleteMessage(chatId, messageId);
+  } catch (_) {
+    // قد تكون الرسالة حُذفت مسبقًا أو تجاوزت مهلة الحذف؛ لا نوقف العملية.
+  }
+}
+
+async function beginStudentScreen(ctx, student) {
+  const messageIds = await db.takeStudentUiMessages(student.id);
+  for (const messageId of messageIds) {
+    await deleteMessageQuietly(ctx.chat.id, messageId);
+  }
+  if (ctx.message && ctx.message.message_id) {
+    await deleteMessageQuietly(ctx.chat.id, ctx.message.message_id);
+  }
+}
+
+async function trackStudentUiMessage(student, message) {
+  if (message && Number.isSafeInteger(Number(message.message_id))) {
+    await db.recordStudentUiMessage(student.id, Number(message.message_id));
+  }
+  return message;
+}
+
+async function replyStudentScreen(ctx, student, text, extra = undefined, options = {}) {
+  if (options.clear !== false) await beginStudentScreen(ctx, student);
+  const message = await ctx.reply(text, extra);
+  return trackStudentUiMessage(student, message);
+}
+
+function formatStudentSeasonActivity(activity) {
+  if (!activity) return '📋 لا يوجد موسم دراسي نشط في حسابك حاليًا.';
+  const leaves = activity.leaves || [];
+  const warnings = activity.warnings || [];
+  const leaveLines = leaves.length
+    ? leaves.map(
+        (leave, index) =>
+          `${index + 1}. ${dateOnly(leave.start_date)} → ${dateOnly(leave.end_date)} (${Number(leave.days)} يومًا)`
+      )
+    : ['لا توجد إجازات معتمدة.'];
+  let text =
+    `${STUDENT_ACTIVITY_BUTTON}\n` +
+    `المرحلة: ${activity.stageName || '—'}\n` +
+    `الموسم: ${activity.seasonName || '—'}\n\n` +
+    `🌴 الإجازات المعتمدة (${leaves.length}):\n${leaveLines.join('\n')}`;
+  if (warnings.length) {
+    const notificationLines = warnings.map(
+      (warning, index) =>
+        `${index + 1}. تنبيه غياب متتالٍ حتى يوم ${dateOnly(warning.attendance_date)}`
+    );
+    text += `\n\n⚠️ التنبيهات المستلمة (${warnings.length}):\n${notificationLines.join('\n')}`;
+  }
+  return text;
+}
+
 function lessonKeyboard(lessons) {
   const rows = [];
   for (const lesson of lessons) {
@@ -270,14 +368,15 @@ function lessonKeyboard(lessons) {
     const title = `${lesson.subject_name} — الدرس ${number}`;
     const sourceUrl = clickableUrl(lesson.source_url);
     if (sourceUrl) {
-      rows.push([Markup.button.url(limitButtonText(`🎧 اضغط هنا للاستماع — ${title}`), sourceUrl)]);
+      rows.push([urlButton(limitButtonText(`📢 انتقال إلى دروس اليوم — ${title}`), sourceUrl)]);
     }
     rows.push([
       lesson.attended
-        ? Markup.button.callback(limitButtonText(`✔️ تم الاستماع — ${title}`), 'noop')
-        : Markup.button.callback(
+        ? callbackButton(limitButtonText(`✔️ تم الاستماع — ${title}`), 'noop', 'success')
+        : callbackButton(
             limitButtonText(`✅ تأشير تم الاستماع — ${title}`),
-            `attend:${lesson.lesson_id}`
+            `attend:${lesson.lesson_id}`,
+            'success'
           ),
     ]);
   }
@@ -302,16 +401,17 @@ function singleLessonKeyboard(lesson) {
   const sourceUrl = clickableUrl(lesson.source_url);
   if (sourceUrl) {
     rows.push([
-      Markup.button.url(
-        `🎧 اضغط هنا للاستماع — الدرس ${Number(lesson.lesson_number)}`,
+      urlButton(
+        `📢 انتقال إلى دروس اليوم — الدرس ${Number(lesson.lesson_number)}`,
         sourceUrl
       ),
     ]);
   }
   rows.push([
-    Markup.button.callback(
+    callbackButton(
       `✅ تم الاستماع — الدرس ${Number(lesson.lesson_number)}`,
-      `attend:${lesson.id}`
+      `attend:${lesson.id}`,
+      'success'
     ),
   ]);
   return Markup.inlineKeyboard(rows);
@@ -322,18 +422,22 @@ async function showTodayLessons(ctx, options = {}) {
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   const transition = await db.getPendingTransition(student.id);
   if (transition) {
-    await ctx.reply('يجب أولًا اختيار وضعك للموسم الجديد.');
     return showTransitionPrompt(ctx);
   }
 
   const lessons = await db.getActiveLessonsForStudent(student.stage_id, student.id);
   if (lessons.length === 0) {
-    return ctx.reply('لا توجد دروس مفعّلة حاليًا لمرحلتك. تحقق لاحقًا.', studentMainMenu());
+    return replyStudentScreen(
+      ctx,
+      student,
+      'لا توجد دروس مفعّلة حاليًا لمرحلتك. تحقق لاحقًا.',
+      studentMainMenu()
+    );
   }
 
   const heading = options.confirmation
     ? `${options.confirmation}\n\nدروس اليوم المتاحة لمرحلتك:`
-    : 'دروس اليوم المتاحة لمرحلتك:\nاضغط أولًا على رابط الاستماع، ثم أشّر «تم الاستماع».';
+    : 'دروس اليوم المتاحة لمرحلتك:\nانتقل إلى منشور الدرس في قناة مرحلتك، ثم أشّر «تم الاستماع».';
   const keyboard = lessonKeyboard(lessons);
 
   if (options.edit) {
@@ -344,7 +448,7 @@ async function showTodayLessons(ctx, options = {}) {
       return undefined;
     }
   }
-  return ctx.reply(heading, keyboard);
+  return replyStudentScreen(ctx, student, heading, keyboard);
 }
 
 async function answerIfCallback(ctx, text) {
@@ -461,17 +565,22 @@ function buildStageSeasonCsv(rows) {
   return '\uFEFF' + lines.join('\n');
 }
 
-async function sendStudentReportMessages(ctx, studentId, stageSeasonId = null) {
+async function sendStudentReportMessages(ctx, studentId, stageSeasonId = null, options = {}) {
   const rows = await db.getStudentSeasonReport(studentId, stageSeasonId);
-  for (const message of formatStudentReport(rows)) await ctx.reply(message);
+  const student = options.cleanUi === false ? null : options.student || (await db.getStudentById(studentId));
+  if (student) await beginStudentScreen(ctx, student);
+  for (const text of formatStudentReport(rows)) {
+    const message = await ctx.reply(text);
+    if (student) await trackStudentUiMessage(student, message);
+  }
   return rows;
 }
 
 function transitionKeyboard(transition) {
-  const rows = [[Markup.button.callback(`🔁 إعادة ${transition.source_stage_name}`, 'season_choice:repeat')]];
+  const rows = [[callbackButton(`🔁 إعادة ${transition.source_stage_name}`, 'season_choice:repeat')]];
   if (transition.next_stage_id) {
     rows.push([
-      Markup.button.callback(`✅ نجحت — الانتقال إلى ${transition.next_stage_name}`, 'season_choice:promote'),
+      callbackButton(`✅ نجحت — الانتقال إلى ${transition.next_stage_name}`, 'season_choice:promote'),
     ]);
   }
   return Markup.inlineKeyboard(rows);
@@ -481,24 +590,31 @@ async function showTransitionPrompt(ctx, options = {}) {
   const student = await db.getStudentByTelegramId(ctx.from.id);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   const transition = await db.getPendingTransition(student.id);
-  if (!transition) return ctx.reply('لا يوجد اختيار موسم جديد مطلوب منك حاليًا.', studentMainMenu());
+  if (!transition) {
+    return replyStudentScreen(
+      ctx,
+      student,
+      'لا يوجد اختيار موسم جديد مطلوب منك حاليًا.',
+      studentMainMenu()
+    );
+  }
   const text =
     `🆕 بدأ موسم «${transition.repeat_season_name}» للمرحلة «${transition.source_stage_name}».\n` +
     'اختر حالتك بدقة؛ سيُحفظ تقرير موسمك السابق كما هو:';
   if (options.edit) return ctx.editMessageText(text, transitionKeyboard(transition));
-  return ctx.reply(text, transitionKeyboard(transition));
+  return replyStudentScreen(ctx, student, text, transitionKeyboard(transition));
 }
 
 function seasonSelectionKeyboard(stages, selectedIds) {
   const selected = new Set(selectedIds.map(Number));
   const rows = stages.map((stage) => [
-    Markup.button.callback(
+    callbackButton(
       `${selected.has(stage.id) ? '✅' : '◻️'} ${limitButtonText(stage.name, 50)}`,
       `season_toggle:${stage.id}`
     ),
   ]);
-  rows.push([Markup.button.callback('🚀 بدء الموسم للمراحل المحددة', 'season_confirm')]);
-  rows.push([Markup.button.callback('إلغاء', 'season_cancel')]);
+  rows.push([callbackButton('🚀 بدء الموسم للمراحل المحددة', 'season_confirm', 'success')]);
+  rows.push([callbackButton('إلغاء', 'season_cancel')]);
   return Markup.inlineKeyboard(rows);
 }
 
@@ -513,13 +629,13 @@ bot.start(async (ctx) => {
       return ctx.reply('حسابك مؤرشف حاليًا. تواصل مع الأدمن إذا كنت تريد العودة للدراسة.');
     }
     if (!student.official_confirmed_at) return sendOfficialConfirmationPrompt(ctx);
-    await ctx.reply(`أهلًا بعودتك ${student.full_name} 👋`, studentMainMenu());
+    await replyStudentScreen(ctx, student, `أهلًا بعودتك ${student.full_name} 👋`, studentMainMenu());
     const transition = await db.getPendingTransition(student.id);
     if (transition) return showTransitionPrompt(ctx);
     return undefined;
   }
   userState.set(ctx.from.id, { action: 'awaiting_full_name' });
-  return ctx.reply('أهلًا بك 👋\nالرجاء إدخال اسمك الرباعي الكامل:');
+  return ctx.reply('أهلًا بك 👋\nالرجاء إدخال اسمك الرباعي الكامل:', backOnlyMenu());
 });
 
 // لا يستطيع الطالب استعمال وظائف البوت قبل الضغط على تأكيد التسجيل الرسمي.
@@ -555,7 +671,10 @@ bot.action('confirm_official_student', async (ctx) => {
   } catch (err) {
     if (!String(err.description || err.message).includes('message is not modified')) throw err;
   }
-  return ctx.reply(`أهلًا بك ${student.full_name} 👋`, studentMainMenu());
+  if (ctx.callbackQuery && ctx.callbackQuery.message) {
+    await deleteMessageQuietly(ctx.callbackQuery.message.chat.id, ctx.callbackQuery.message.message_id);
+  }
+  return replyStudentScreen(ctx, student, `أهلًا بك ${student.full_name} 👋`, studentMainMenu());
 });
 
 bot.command('admin', async (ctx) => {
@@ -571,6 +690,17 @@ bot.on('message', async (ctx, next) => {
   const state = userState.get(ctx.from.id);
   if (state && state.action === 'admin_awaiting_channel_forward' && isAdmin(ctx)) {
     const msg = ctx.message;
+    const inputText = typeof msg.text === 'string' ? msg.text.trim() : '';
+    // أزرار لوحة الأدمن والإلغاء ليست رسائل قناة محوَّلة؛ مرّرها لمعالج النصوص
+    // كي يلغي الحالة السابقة ثم ينفذ الخيار الجديد بصورة طبيعية.
+    if (
+      inputText === '❌ إلغاء العملية' ||
+      inputText === BACK_BUTTON ||
+      ADMIN_MENU_BUTTONS.has(inputText) ||
+      STUDENT_MENU_BUTTONS.has(inputText)
+    ) {
+      return next();
+    }
     const forwardChat =
       (msg.forward_from_chat && msg.forward_from_chat) ||
       (msg.forward_origin && msg.forward_origin.chat) ||
@@ -599,6 +729,21 @@ bot.on('message', async (ctx, next) => {
 bot.on('text', async (ctx, next) => {
   const inputText = ctx.message.text.trim();
 
+  if (inputText === BACK_BUTTON) {
+    const hadStep = userState.delete(ctx.from.id);
+    if (isAdmin(ctx)) {
+      return ctx.reply(hadStep ? 'تم الرجوع عن الخطوة الحالية.' : 'أنت في القائمة الرئيسية.', adminMainMenu());
+    }
+    const student = await db.getStudentByTelegramId(ctx.from.id);
+    if (!student) return ctx.reply('تم الرجوع. أرسل /start لبدء التسجيل من جديد.');
+    return replyStudentScreen(
+      ctx,
+      student,
+      hadStep ? 'تم الرجوع عن الخطوة الحالية.' : 'أنت في القائمة الرئيسية.',
+      studentMainMenu()
+    );
+  }
+
   if (inputText === '❌ إلغاء العملية' && isAdmin(ctx)) {
     userState.delete(ctx.from.id);
     return ctx.reply('تم إلغاء العملية الحالية.', adminMainMenu());
@@ -607,7 +752,7 @@ bot.on('text', async (ctx, next) => {
   // الضغط على زر رئيسي يجب أن يلغي أي إدخال قديم، لا أن يُسجَّل كاسم مرحلة أو مادة.
   if (
     ADMIN_MENU_BUTTONS.has(inputText) ||
-    ['📚 دروس اليوم', '📊 تقريري', '🌴 طلب إجازة'].includes(inputText)
+    STUDENT_MENU_BUTTONS.has(inputText)
   ) {
     userState.delete(ctx.from.id);
     return next();
@@ -620,7 +765,7 @@ bot.on('text', async (ctx, next) => {
   if (state.action === 'awaiting_full_name') {
     const fullName = ctx.message.text.trim();
     if (fullName.split(/\s+/).length < 4) {
-      return ctx.reply('الرجاء إدخال الاسم الرباعي كاملًا (أربعة أسماء على الأقل).');
+      return ctx.reply('الرجاء إدخال الاسم الرباعي كاملًا (أربعة أسماء على الأقل).', backOnlyMenu());
     }
     const stages = await db.listStages();
     if (stages.length === 0) {
@@ -635,7 +780,14 @@ bot.on('text', async (ctx, next) => {
   if (state.action === 'leave_awaiting_days') {
     const days = parseLeaveDays(ctx.message.text);
     if (days === null) {
-      return ctx.reply('أرسل عدد أيام الإجازة فقط، مثال: 1 أو ١. يجب أن يكون العدد بين 1 و60.');
+      const student = await db.getStudentByTelegramId(ctx.from.id);
+      if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
+      return replyStudentScreen(
+        ctx,
+        student,
+        `أرسل عدد أيام الإجازة فقط، مثال: 1 أو ١. يجب أن يكون العدد بين 1 و60.\nللرجوع اضغط «${BACK_BUTTON}».`,
+        studentMainMenu()
+      );
     }
     const student = await db.getStudentByTelegramId(ctx.from.id);
     if (!student) {
@@ -650,7 +802,9 @@ bot.on('text', async (ctx, next) => {
         null
       );
       userState.delete(ctx.from.id);
-      await ctx.reply(
+      await replyStudentScreen(
+        ctx,
+        student,
         `تم إرسال طلب إجازتك ✅\nمن ${leave.start_date.toISOString().slice(0, 10)} ` +
           `إلى ${leave.end_date.toISOString().slice(0, 10)} (${days} يومًا).\n` +
           'سيصلك إشعار عند قبول الأدمن للطلب. عند الموافقة لا تُحسب أيام الإجازة غيابًا، ' +
@@ -665,15 +819,15 @@ bot.on('text', async (ctx, next) => {
             .slice(0, 10)})`,
         Markup.inlineKeyboard([
           [
-            Markup.button.callback('✅ موافقة', `leave_approve:${leave.id}`),
-            Markup.button.callback('❌ رفض', `leave_reject:${leave.id}`),
+            callbackButton('✅ موافقة', `leave_approve:${leave.id}`),
+            callbackButton('❌ رفض', `leave_reject:${leave.id}`),
           ],
         ])
       );
       return undefined;
     } catch (err) {
       userState.delete(ctx.from.id);
-      return ctx.reply(`تعذّر تسجيل الإجازة: ${err.message}`, studentMainMenu());
+      return replyStudentScreen(ctx, student, `تعذّر تسجيل الإجازة: ${err.message}`, studentMainMenu());
     }
   }
 
@@ -773,7 +927,7 @@ bot.on('text', async (ctx, next) => {
     userState.delete(ctx.from.id);
     if (results.length === 0) return ctx.reply('لا توجد نتائج مطابقة.', adminMainMenu());
     const rows = results.map((s) => [
-      Markup.button.callback(
+      callbackButton(
         limitButtonText(`${s.is_active ? '' : '🗄️ '}${s.full_name} — ${s.stage_name}`),
         `stu_select:${s.id}`
       ),
@@ -803,6 +957,9 @@ bot.action(/reg_stage:(\d+)/, async (ctx) => {
   userState.delete(ctx.from.id);
   await ctx.answerCbQuery('تم حفظ بيانات التسجيل');
   await ctx.editMessageText('تم حفظ اسمك ومرحلتك بنجاح ✅');
+  if (ctx.callbackQuery && ctx.callbackQuery.message) {
+    await deleteMessageQuietly(ctx.callbackQuery.message.chat.id, ctx.callbackQuery.message.message_id);
+  }
   return sendOfficialConfirmationPrompt(ctx);
 });
 
@@ -820,18 +977,18 @@ async function openMyReport(ctx) {
   const student = await db.getStudentByTelegramId(ctx.from.id);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   const seasons = await db.listStudentSeasons(student.id);
-  if (seasons.length === 0) return ctx.reply('لا توجد بيانات دراسية مسجلة حتى الآن.');
+  if (seasons.length === 0) return replyStudentScreen(ctx, student, 'لا توجد بيانات دراسية مسجلة حتى الآن.');
   if (seasons.length === 1) {
-    await sendStudentReportMessages(ctx, student.id, seasons[0].id);
+    await sendStudentReportMessages(ctx, student.id, seasons[0].id, { student });
     return undefined;
   }
   const rows = seasons.map((season) => [
-    Markup.button.callback(
+    callbackButton(
       `${season.is_active ? '🟢' : '📘'} ${season.stage_name} — ${limitButtonText(formatSeasonLabel(season), 40)}`,
       `my_report_season:${season.id}`
     ),
   ]);
-  return ctx.reply('اختر الموسم الذي تريد عرض تقريره:', Markup.inlineKeyboard(rows));
+  return replyStudentScreen(ctx, student, 'اختر الموسم الذي تريد عرض تقريره:', Markup.inlineKeyboard(rows));
 }
 
 bot.hears('📊 تقريري', openMyReport);
@@ -840,10 +997,22 @@ bot.action(/my_report_season:(\d+)/, async (ctx) => {
   const student = await db.getStudentByTelegramId(ctx.from.id);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   await ctx.answerCbQuery();
-  const rows = await sendStudentReportMessages(ctx, student.id, Number(ctx.match[1]));
-  if (rows.length === 0) return ctx.reply('لا توجد بيانات لهذا الموسم.');
+  const rows = await sendStudentReportMessages(ctx, student.id, Number(ctx.match[1]), { student });
+  if (rows.length === 0) return replyStudentScreen(ctx, student, 'لا توجد بيانات لهذا الموسم.');
   return undefined;
 });
+
+async function openStudentSeasonActivity(ctx) {
+  const student = await db.getStudentByTelegramId(ctx.from.id);
+  if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
+  const activity = await db.getStudentCurrentSeasonActivity(student.id);
+  return replyStudentScreen(ctx, student, formatStudentSeasonActivity(activity), studentMainMenu());
+}
+
+bot.hears(STUDENT_ACTIVITY_BUTTON, openStudentSeasonActivity);
+// توافق مؤقت مع لوحة المفاتيح القديمة؛ بعد أول ضغط تظهر تسمية «المتغيرات» الجديدة.
+bot.hears(LEGACY_STUDENT_ACTIVITY_BUTTON, openStudentSeasonActivity);
+bot.hears(LEGACY_STUDENT_ACTIVITY_BUTTON_2, openStudentSeasonActivity);
 
 // ---------------------------------------------------------------------------
 // الطالب — طلب إجازة / إلغاؤها
@@ -856,24 +1025,31 @@ async function openLeaveRequest(ctx) {
   const active = await db.getActiveOrUpcomingLeave(student.id);
   const pending = await db.getPendingLeave(student.id);
   if (active) {
-    return ctx.reply(
+    return replyStudentScreen(
+      ctx,
+      student,
       `لديك إجازة معتمدة من ${active.start_date.toISOString().slice(0, 10)} ` +
         `إلى ${active.end_date.toISOString().slice(0, 10)}.`,
-      Markup.inlineKeyboard([[Markup.button.callback('إلغاء الإجازة والعودة للدروس', `leave_cancel:${active.id}`)]])
+      Markup.inlineKeyboard([[callbackButton('إلغاء الإجازة والعودة للدروس', `leave_cancel:${active.id}`, 'danger')]])
     );
   }
   if (pending) {
-    return ctx.reply(
+    return replyStudentScreen(
+      ctx,
+      student,
       `لديك طلب إجازة قيد المراجعة من ${pending.start_date.toISOString().slice(0, 10)} ` +
         `إلى ${pending.end_date.toISOString().slice(0, 10)}.`,
-      Markup.inlineKeyboard([[Markup.button.callback('سحب الطلب', `leave_cancel:${pending.id}`)]])
+      Markup.inlineKeyboard([[callbackButton('سحب الطلب', `leave_cancel:${pending.id}`, 'danger')]])
     );
   }
   userState.set(ctx.from.id, { action: 'leave_awaiting_days' });
-  return ctx.reply(
+  return replyStudentScreen(
+    ctx,
+    student,
     'طلب إجازة 🌴\nأرسل عدد أيام الإجازة المطلوبة، مثال: 1 أو ١.\n' +
       'ستبدأ الإجازة تلقائيًا من اليوم بعد موافقة الأدمن.\n' +
-      'لإلغاء العملية أرسل /start.'
+      `للرجوع اضغط «${BACK_BUTTON}».`,
+    studentMainMenu()
   );
 }
 
@@ -906,8 +1082,8 @@ async function openLeaveRequests(ctx) {
           .slice(0, 10)})`,
       Markup.inlineKeyboard([
         [
-          Markup.button.callback('✅ موافقة', `leave_approve:${leave.id}`),
-          Markup.button.callback('❌ رفض', `leave_reject:${leave.id}`),
+          callbackButton('✅ موافقة', `leave_approve:${leave.id}`),
+          callbackButton('❌ رفض', `leave_reject:${leave.id}`),
         ],
       ])
     );
@@ -970,9 +1146,12 @@ bot.action(/season_choice:(repeat|promote)/, async (ctx) => {
         ? `تم تسجيلك لإعادة المرحلة «${updated.stage_name}» في موسمها الجديد ✅`
         : `تهانينا، تم نقلك إلى المرحلة «${updated.stage_name}» ✅`
     );
-    return ctx.reply('قائمتك الدراسية جاهزة:', studentMainMenu());
+    if (ctx.callbackQuery && ctx.callbackQuery.message) {
+      await deleteMessageQuietly(ctx.callbackQuery.message.chat.id, ctx.callbackQuery.message.message_id);
+    }
+    return replyStudentScreen(ctx, updated, 'قائمتك الدراسية جاهزة:', studentMainMenu());
   } catch (err) {
-    return ctx.reply(`تعذر حفظ الاختيار: ${err.message}`);
+    return replyStudentScreen(ctx, student, `تعذر حفظ الاختيار: ${err.message}`);
   }
 });
 
@@ -1021,7 +1200,7 @@ async function openStageManagement(ctx) {
   await answerIfCallback(ctx);
   if (stages.length === 0) return ctx.reply('لا توجد مراحل بعد.');
   const rows = stages.map((stage) => [
-    Markup.button.callback(
+    callbackButton(
       `${stage.is_active ? '✅' : '🗄️'} ${limitButtonText(stage.name, 48)}`,
       `admin_stage:${stage.id}`
     ),
@@ -1037,15 +1216,15 @@ bot.action(/admin_stage:(\d+)/, async (ctx) => {
   await ctx.answerCbQuery();
   if (!stage) return ctx.reply('المرحلة غير موجودة.');
   const rows = [
-    [Markup.button.callback('✏️ تعديل اسم المرحلة', `admin_stage_rename:${stage.id}`)],
-    [Markup.button.callback('⬆️ تحديد المرحلة الأعلى', `admin_stage_next:${stage.id}`)],
-    [Markup.button.callback('📊 مواسم وتقارير المرحلة', `admin_report_stage:${stage.id}`)],
+    [callbackButton('✏️ تعديل اسم المرحلة', `admin_stage_rename:${stage.id}`)],
+    [callbackButton('⬆️ تحديد المرحلة الأعلى', `admin_stage_next:${stage.id}`)],
+    [callbackButton('📊 مواسم وتقارير المرحلة', `admin_report_stage:${stage.id}`)],
     [
       stage.is_active
-        ? Markup.button.callback('🗄️ أرشفة المرحلة (مع حفظ بياناتها)', `admin_stage_archive:${stage.id}`)
-        : Markup.button.callback('♻️ استعادة المرحلة', `admin_stage_restore:${stage.id}`),
+        ? callbackButton('🗄️ أرشفة المرحلة (مع حفظ بياناتها)', `admin_stage_archive:${stage.id}`)
+        : callbackButton('♻️ استعادة المرحلة', `admin_stage_restore:${stage.id}`),
     ],
-    [Markup.button.callback('🗑️ حذف نهائي (المرحلة وكل بياناتها)', `admin_stage_hard:${stage.id}`)],
+    [callbackButton('🗑️ حذف نهائي (المرحلة وكل بياناتها)', `admin_stage_hard:${stage.id}`)],
   ];
   return ctx.reply(
     `المرحلة: ${stage.name}\nالحالة: ${stage.is_active ? 'نشطة' : 'مؤرشفة'}\n` +
@@ -1070,9 +1249,9 @@ bot.action(/admin_stage_next:(\d+)/, async (ctx) => {
   const stages = (await db.listStages()).filter((stage) => stage.id !== sourceId);
   await ctx.answerCbQuery();
   const rows = stages.map((stage) => [
-    Markup.button.callback(limitButtonText(stage.name), `admin_stage_next_pick:${sourceId}:${stage.id}`),
+    callbackButton(limitButtonText(stage.name), `admin_stage_next_pick:${sourceId}:${stage.id}`),
   ]);
-  rows.push([Markup.button.callback('بدون مرحلة أعلى', `admin_stage_next_pick:${sourceId}:0`)]);
+  rows.push([callbackButton('بدون مرحلة أعلى', `admin_stage_next_pick:${sourceId}:0`)]);
   return ctx.reply('اختر المرحلة التي ينتقل إليها الطالب عند النجاح:', Markup.inlineKeyboard(rows));
 });
 
@@ -1098,8 +1277,8 @@ bot.action(/admin_stage_archive:(\d+)/, async (ctx) => {
     `سيتم إخفاء «${stage.name}» من التسجيل وبدء المواسم الجديدة، مع الاحتفاظ بكل تقاريرها السابقة. ` +
       `يوجد حاليًا ${Number(stage.student_count)} طالب مرتبط بها. هل تريد المتابعة؟`,
     Markup.inlineKeyboard([
-      [Markup.button.callback('نعم، أرشف المرحلة', `admin_stage_archive_confirm:${stage.id}`)],
-      [Markup.button.callback('إلغاء', 'admin_cancel_noop')],
+      [callbackButton('نعم، أرشف المرحلة', `admin_stage_archive_confirm:${stage.id}`, 'danger')],
+      [callbackButton('إلغاء', 'admin_cancel_noop')],
     ])
   );
 });
@@ -1128,8 +1307,8 @@ bot.action(/admin_stage_hard:(\d+)/, async (ctx) => {
       `سيُمحى نهائيًا كل ما يتعلق بها: طلبتها (${Number(stage.student_count)})، موادها ودروسها وحضورها، ` +
       'ومواسمها وتقاريرها، وقنواتها المرتبطة. لا يمكن التراجع.\nهل أنت متأكد؟',
     Markup.inlineKeyboard([
-      [Markup.button.callback('🗑️ نعم، احذف المرحلة نهائيًا', `admin_stage_hard_confirm:${stage.id}`)],
-      [Markup.button.callback('إلغاء', 'admin_cancel_noop')],
+      [callbackButton('🗑️ نعم، احذف المرحلة نهائيًا', `admin_stage_hard_confirm:${stage.id}`)],
+      [callbackButton('إلغاء', 'admin_cancel_noop')],
     ])
   );
 });
@@ -1201,7 +1380,7 @@ bot.action('season_confirm', async (ctx) => {
         stage.stageId,
         `🆕 بدأ موسم «${result.season.name}» لمرحلتك «${stage.stageName}».\n` +
           'اضغط الزر أدناه ثم اختر: إعادة المرحلة، أو الانتقال إلى المرحلة الأعلى عند النجاح.',
-        Markup.inlineKeyboard([[Markup.button.callback('اختيار وضعي للموسم الجديد', 'season_open')]])
+        Markup.inlineKeyboard([[callbackButton('اختيار وضعي للموسم الجديد', 'season_open')]])
       );
     }
     return ctx.reply('يمكنك متابعة العمل من لوحة الأدمن:', adminMainMenu());
@@ -1255,7 +1434,7 @@ bot.action(/admin_tags_stage:(\d+)/, async (ctx) => {
   await ctx.answerCbQuery();
   if (subjects.length === 0) return ctx.reply('لا توجد مواد في هذه المرحلة.');
   const rows = subjects.map((subject) => [
-    Markup.button.callback(
+    callbackButton(
       limitButtonText(`${subject.name} — #${subject.hashtag || normalizeHashtag(subject.name)}`),
       `admin_subject_menu:${subject.id}`
     ),
@@ -1271,8 +1450,8 @@ bot.action(/admin_subject_menu:(\d+)/, async (ctx) => {
   return ctx.reply(
     `المادة: ${subject.name}\nالهاشتاغ: #${subject.hashtag || normalizeHashtag(subject.name)}`,
     Markup.inlineKeyboard([
-      [Markup.button.callback('🏷️ تعديل الهاشتاغ', `admin_edit_tag:${subject.id}`)],
-      [Markup.button.callback('🗑️ حذف المادة نهائيًا (مع دروسها وحضورها)', `admin_subject_hard:${subject.id}`)],
+      [callbackButton('🏷️ تعديل الهاشتاغ', `admin_edit_tag:${subject.id}`)],
+      [callbackButton('🗑️ حذف المادة نهائيًا (مع دروسها وحضورها)', `admin_subject_hard:${subject.id}`)],
     ])
   );
 });
@@ -1285,8 +1464,8 @@ bot.action(/admin_subject_hard:(\d+)/, async (ctx) => {
   return ctx.reply(
     `⚠️ حذف نهائي لمادة «${subject.name}» مع كل دروسها وسجل حضورها. لا يمكن التراجع.\nهل أنت متأكد؟`,
     Markup.inlineKeyboard([
-      [Markup.button.callback('🗑️ نعم، احذف المادة نهائيًا', `admin_subject_hard_confirm:${subject.id}`)],
-      [Markup.button.callback('إلغاء', 'admin_cancel_noop')],
+      [callbackButton('🗑️ نعم، احذف المادة نهائيًا', `admin_subject_hard_confirm:${subject.id}`)],
+      [callbackButton('إلغاء', 'admin_cancel_noop')],
     ])
   );
 });
@@ -1363,7 +1542,7 @@ async function openReports(ctx) {
   await answerIfCallback(ctx);
   if (stages.length === 0) return ctx.reply('لا توجد مراحل بعد.');
   const rows = stages.map((stage) => [
-    Markup.button.callback(
+    callbackButton(
       `${stage.is_active ? '✅' : '🗄️'} ${limitButtonText(stage.name, 48)}`,
       `admin_report_stage:${stage.id}`
     ),
@@ -1382,7 +1561,7 @@ bot.action(/admin_report_stage:(\d+)/, async (ctx) => {
   await ctx.answerCbQuery();
   if (!stage || seasons.length === 0) return ctx.reply('لا توجد مواسم مسجلة لهذه المرحلة.');
   const buttons = seasons.map((season) => [
-    Markup.button.callback(
+    callbackButton(
       `${season.is_active ? '🟢' : '📘'} ${limitButtonText(formatSeasonLabel(season), 46)} — ${Number(
         season.student_count
       )} طالب`,
@@ -1413,7 +1592,7 @@ async function openSeasonArchive(ctx) {
   await answerIfCallback(ctx);
   if (stages.length === 0) return ctx.reply('لا توجد مراحل بعد.');
   const rows = stages.map((stage) => [
-    Markup.button.callback(
+    callbackButton(
       `${stage.is_active ? '✅' : '🗄️'} ${limitButtonText(stage.name, 48)}`,
       `admin_archive_stage:${stage.id}`
     ),
@@ -1436,7 +1615,7 @@ bot.action(/admin_archive_stage:(\d+)/, async (ctx) => {
       `${Number(season.student_count)} طالب، ${Number(season.lesson_count)} درس`
   );
   const buttons = seasons.map((season) => [
-    Markup.button.callback(
+    callbackButton(
       `📥 تقرير ${limitButtonText(formatSeasonLabel(season), 42)}`,
       `admin_report_season:${season.id}`
     ),
@@ -1485,7 +1664,7 @@ bot.action(/stu_report:(\d+)/, async (ctx) => {
   const student = await db.getStudentById(studentId);
   await ctx.answerCbQuery('جاري تجهيز التقرير...');
   if (!student) return ctx.reply('الطالب غير موجود.');
-  const rows = await sendStudentReportMessages(ctx, studentId);
+  const rows = await sendStudentReportMessages(ctx, studentId, null, { cleanUi: false });
   if (rows.length === 0) return undefined;
   const csv = buildStudentReportCsv(rows);
   return ctx.replyWithDocument({
@@ -1527,8 +1706,8 @@ bot.action(/stu_archive_confirm:(\d+)/, async (ctx) => {
   return ctx.reply(
     'أرشفة الطالب: يُمنع من الدخول وتبقى كل تقارير مواسمه وحضوره محفوظة، ويمكن إعادة تفعيله لاحقًا.\nهل تريد المتابعة؟',
     Markup.inlineKeyboard([
-      [Markup.button.callback('✅ نعم، أرشف مع حفظ البيانات', `stu_archive:${studentId}`)],
-      [Markup.button.callback('إلغاء', 'admin_cancel_noop')],
+      [callbackButton('✅ نعم، أرشف مع حفظ البيانات', `stu_archive:${studentId}`, 'danger')],
+      [callbackButton('إلغاء', 'admin_cancel_noop')],
     ])
   );
 });
@@ -1549,8 +1728,8 @@ bot.action(/stu_hard_confirm:(\d+)/, async (ctx) => {
     `⚠️ حذف نهائي للطالب «${student ? student.full_name : ''}».\n` +
       'سيُمحى نهائيًا مع كل تسجيلاته وحضوره وإجازاته، ولا يمكن التراجع.\nهل أنت متأكد؟',
     Markup.inlineKeyboard([
-      [Markup.button.callback('🗑️ نعم، احذف نهائيًا', `stu_hard:${studentId}`)],
-      [Markup.button.callback('إلغاء', 'admin_cancel_noop')],
+      [callbackButton('🗑️ نعم، احذف نهائيًا', `stu_hard:${studentId}`)],
+      [callbackButton('إلغاء', 'admin_cancel_noop')],
     ])
   );
 });
@@ -1655,25 +1834,10 @@ async function handleChannelLesson(ctx) {
     const existing = await db.getLessonBySource(chatId, message.message_id);
     if (existing) return;
 
-    // منع تكرار تفعيل نفس الدرس عند نشره بأكثر من منشور (صوت + رابط مثلًا).
-    // لا يُهمَل المنشور بصمت: يُبلَّغ الأدمن حتى لا يضيع درس مستقل نُشر بعد الأول مباشرة.
-    const recent = await db.getRecentLessonForSubject(subject.id, DEDUPE_MINUTES);
-    if (recent) {
-      await notifyAdmins(
-        `⚠️ لم يُفعَّل منشور جديد لمادة «${subject.name}» في قناة «${channel.title || chatId}»، ` +
-          `لأن درسًا لنفس المادة فُعّل قبل أقل من ${DEDUPE_MINUTES} دقيقة.\n` +
-          `إن كان المنشوران لدرس واحد فتجاهل هذه الرسالة. ` +
-          `وإن كان درسًا مستقلًا فعّله من «🟢 تفعيل درس يدويًا»، أو أعد نشره بعد ${DEDUPE_MINUTES} دقيقة.`
-      );
-      return;
-    }
-
     const postLink = telegramMessageLink(message);
     const externalUrl = extractFirstUrl(message);
-    const sourceUrl =
-      (hasAudioContent(message) || message.video || message.video_note ? postLink : externalUrl) ||
-      externalUrl ||
-      postLink;
+    // وجهة الطالب هي منشور الدرس نفسه داخل قناة مرحلته، حتى إن احتوى المنشور رابطًا خارجيًا.
+    const sourceUrl = postLink || externalUrl;
     const activated = await db.activateLesson(
       subject.id,
       LESSON_ACTIVE_HOURS,
@@ -1691,7 +1855,7 @@ async function handleChannelLesson(ctx) {
     const delivery = await sendToStageStudents(
       channel.stage_id,
       `📢 تم نشر درس جديد في مادة «${subject.name}» — الدرس رقم ${Number(lesson.lesson_number)}.\n` +
-        `${sourceUrl ? 'اضغط الزر أدناه للاستماع، ثم أشّر «تم الاستماع».' : 'افتح «📚 دروس اليوم» ثم أشّر «تم الاستماع».'}\n` +
+        `${sourceUrl ? 'اضغط «انتقال إلى دروس اليوم» لفتح منشور الدرس في قناة مرحلتك، ثم أشّر «تم الاستماع».' : 'افتح «📚 دروس اليوم» ثم أشّر «تم الاستماع».'}\n` +
         `متاح لمدة ${LESSON_ACTIVE_HOURS} ساعة من الآن.`,
       singleLessonKeyboard(lesson),
       { skipOnLeave: true }
@@ -1826,4 +1990,8 @@ module.exports = {
   parseLeaveDays,
   currentDateInTimeZone,
   buildAdminAbsenceMessages,
+  lessonKeyboard,
+  singleLessonKeyboard,
+  formatStudentSeasonActivity,
+  buttonStyle,
 };

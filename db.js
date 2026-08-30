@@ -137,6 +137,14 @@ async function initSchema() {
       backlog_notified BOOLEAN NOT NULL DEFAULT false
     );
 
+    -- تُحفظ فقط رسائل واجهة الطالب القابلة للتنظيف؛ التنبيهات المهمة لا تُسجل هنا.
+    CREATE TABLE IF NOT EXISTS student_ui_messages (
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      message_id BIGINT NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT now(),
+      PRIMARY KEY(student_id, message_id)
+    );
+
     CREATE UNIQUE INDEX IF NOT EXISTS idx_stage_seasons_one_active
       ON stage_seasons(stage_id) WHERE is_active=true;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_enrollments_one_active
@@ -147,6 +155,8 @@ async function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_transitions_student ON student_transitions(student_id);
     CREATE INDEX IF NOT EXISTS idx_leaves_student ON student_leaves(student_id);
     CREATE INDEX IF NOT EXISTS idx_leaves_status ON student_leaves(status);
+    CREATE INDEX IF NOT EXISTS idx_student_ui_messages_created
+      ON student_ui_messages(student_id, created_at);
   `);
 
   // تحويل البيانات القديمة إلى موسم تأسيسي واحد من دون فقد أي درس أو حضور.
@@ -912,18 +922,6 @@ const getLessonBySource = (chatId, messageId) =>
     )
     .then((r) => r.rows[0]);
 
-// للتحقق من عدم تفعيل نفس المادة مرتين خلال فترة قصيرة (منشورات متعددة لنفس الدرس)
-const getRecentLessonForSubject = (subjectId, minutes = 15) =>
-  pool
-    .query(
-      `SELECT l.* FROM lessons l
-       JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true
-       WHERE l.subject_id=$1 AND l.activated_at > now() - ($2 || ' minutes')::interval
-       ORDER BY l.activated_at DESC LIMIT 1`,
-      [subjectId, minutes]
-    )
-    .then((r) => r.rows[0]);
-
 const getActiveLessonsForStudent = (stageId, studentId) =>
   pool
     .query(
@@ -1301,6 +1299,69 @@ const markAdminAbsenceAlertsSent = (attendanceDayIds) => {
   );
 };
 
+// ---------- واجهة الطالب وسجل الموسم الحالي ----------
+const recordStudentUiMessage = (studentId, messageId) =>
+  pool.query(
+    `INSERT INTO student_ui_messages(student_id, message_id) VALUES($1,$2)
+     ON CONFLICT (student_id, message_id) DO NOTHING`,
+    [studentId, messageId]
+  );
+
+// حذف السجل وإرجاع المعرفات في عملية واحدة؛ حتى لا تتراكم محاولات حذف رسالة تعذر حذفها.
+const takeStudentUiMessages = (studentId) =>
+  pool
+    .query(
+      `DELETE FROM student_ui_messages WHERE student_id=$1
+       RETURNING message_id`,
+      [studentId]
+    )
+    .then((r) => r.rows.map((row) => Number(row.message_id)).filter(Number.isSafeInteger));
+
+async function getStudentCurrentSeasonActivity(studentId) {
+  const currentResult = await pool.query(
+    `SELECT e.stage_season_id, e.started_at, e.ended_at,
+            COALESCE(ss.stage_name_snapshot, st.name) AS stage_name,
+            se.name AS season_name
+     FROM enrollments e
+     JOIN stage_seasons ss ON ss.id=e.stage_season_id
+     JOIN stages st ON st.id=ss.stage_id
+     JOIN seasons se ON se.id=ss.season_id
+     WHERE e.student_id=$1 AND e.status='active'
+     ORDER BY e.started_at DESC LIMIT 1`,
+    [studentId]
+  );
+  const current = currentResult.rows[0];
+  if (!current) return null;
+
+  const [leaveResult, warningResult] = await Promise.all([
+    pool.query(
+      `SELECT sl.id, sl.start_date, sl.end_date, sl.days
+       FROM student_leaves sl
+       WHERE sl.student_id=$1 AND sl.status='approved'
+         AND sl.end_date >= $2::date
+         AND sl.start_date <= COALESCE($3::date, CURRENT_DATE)
+       ORDER BY sl.start_date DESC, sl.id DESC`,
+      [studentId, current.started_at, current.ended_at]
+    ),
+    pool.query(
+      `SELECT d.id, d.attendance_date, d.student_alert_sent_at
+       FROM student_attendance_days d
+       WHERE d.student_id=$1 AND d.stage_season_id=$2
+         AND d.student_alert_sent_at IS NOT NULL
+       ORDER BY d.attendance_date DESC, d.id DESC`,
+      [studentId, current.stage_season_id]
+    ),
+  ]);
+
+  return {
+    stageSeasonId: Number(current.stage_season_id),
+    stageName: current.stage_name,
+    seasonName: current.season_name,
+    leaves: leaveResult.rows,
+    warnings: warningResult.rows,
+  };
+}
+
 // ---------- التقارير التاريخية ----------
 const getStageSeasonReport = (stageSeasonId) =>
   pool
@@ -1394,7 +1455,6 @@ module.exports = {
   unlinkChannel,
   activateLesson,
   getLessonBySource,
-  getRecentLessonForSubject,
   getActiveLessonsForStudent,
   getLessonById,
   markAttendance,
@@ -1407,6 +1467,9 @@ module.exports = {
   getAdminAbsenceAlertCandidates,
   markStudentAbsenceAlertSent,
   markAdminAbsenceAlertsSent,
+  recordStudentUiMessage,
+  takeStudentUiMessages,
+  getStudentCurrentSeasonActivity,
   requestLeave,
   getLeaveById,
   decideLeave,
