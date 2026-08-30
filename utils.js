@@ -113,9 +113,9 @@ function telegramMessageLink(message = {}) {
 // ---------------------------------------------------------------------------
 // تسمية مواسم المرحلة:
 // - اسم الموسم يكتبه الأدمن كاملًا (مثل «الموسم الأول 2026»)، ويُحفظ كما هو.
-// - البوت يضيف عند العرض فقط: وسمًا نسبيًا (الحالي/السابق) والتاريخ.
+// - البوت يضيف عند العرض فقط وسمًا نسبيًا (الحالي/السابق)، بلا أي تاريخ.
 // - «الحالي» للموسم النشط، و«السابق» للموسم الذي أُغلق قبله مباشرة فقط.
-//   المواسم الأقدم تُعرض باسمها وتاريخها دون وسم نسبي قد يلتبس بمرور السنين.
+//   المواسم الأقدم تُعرض باسمها فقط دون وسم نسبي قد يلتبس بمرور السنين.
 // ---------------------------------------------------------------------------
 const SEASON_ORDINALS = [
   'الأول', 'الثاني', 'الثالث', 'الرابع', 'الخامس',
@@ -129,21 +129,11 @@ function ordinalSeasonName(seasonNumber) {
   return SEASON_ORDINALS[n - 1] ? `الموسم ${SEASON_ORDINALS[n - 1]}` : `الموسم رقم ${n}`;
 }
 
-function formatDate(value) {
-  if (!value) return '';
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toISOString().slice(0, 10);
-}
-
-// row: { season_name, is_active, recency_rank, started_at, ended_at }
+// row: { season_name, is_active, recency_rank }
 function formatSeasonLabel(row = {}) {
   const name = (row.season_name || '').trim() || 'موسم';
   const status = row.is_active ? ' (الحالي)' : Number(row.recency_rank) === 2 ? ' (السابق)' : '';
-  const range = row.ended_at
-    ? `${formatDate(row.started_at)} → ${formatDate(row.ended_at)}`
-    : `منذ ${formatDate(row.started_at)}`;
-  return `${name}${status} — ${range}`;
+  return `${name}${status}`;
 }
 
 module.exports = {

@@ -238,23 +238,29 @@ function buildAdminAbsenceMessages(candidates, maxLength = 3600) {
   return messages;
 }
 
-// تحويل تاريخ مُدخل إلى صيغة ISO (YYYY-MM-DD) والتحقق من صحته وأنه ليس في الماضي البعيد.
-function parseLeaveDate(input) {
-  const text = (input || '').trim().replace(/\//g, '-').replace(/\s+/g, '');
-  const match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (!match) return null;
-  const [, y, m, d] = match;
-  const month = Number(m);
-  const day = Number(d);
-  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  const iso = `${y}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-  const date = new Date(`${iso}T00:00:00Z`);
-  if (Number.isNaN(date.getTime())) return null;
-  // لا نقبل تاريخًا أقدم من اليوم بأكثر من يوم (نسمح باليوم الحالي)
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
-  if (date < today) return null;
-  return iso;
+function normalizeArabicDigits(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 0x06f0));
+}
+
+function parseLeaveDays(value) {
+  const normalized = normalizeArabicDigits(value);
+  if (!/^\d+$/.test(normalized)) return null;
+  const days = Number(normalized);
+  return Number.isInteger(days) && days >= 1 && days <= 60 ? days : null;
+}
+
+function currentDateInTimeZone(timeZone = ATTENDANCE_TIME_ZONE, now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 function lessonKeyboard(lessons) {
@@ -625,22 +631,11 @@ bot.on('text', async (ctx, next) => {
     return ctx.reply('اختر مرحلتك الدراسية:', stagesKeyboard(stages, 'reg_stage'));
   }
 
-  // -------- طلب إجازة: إدخال تاريخ البداية --------
-  if (state.action === 'leave_awaiting_date') {
-    const raw = ctx.message.text.trim();
-    const iso = parseLeaveDate(raw);
-    if (!iso) {
-      return ctx.reply('صيغة التاريخ غير صحيحة. أدخل التاريخ هكذا: YYYY-MM-DD (مثال: 2026-09-15).');
-    }
-    userState.set(ctx.from.id, { action: 'leave_awaiting_days', startDate: iso });
-    return ctx.reply(`تاريخ البداية: ${iso}\nكم عدد أيام الإجازة؟ (أرسل رقمًا، مثال: 3)`);
-  }
-
   // -------- طلب إجازة: إدخال عدد الأيام --------
   if (state.action === 'leave_awaiting_days') {
-    const days = Number(ctx.message.text.trim());
-    if (!Number.isInteger(days) || days < 1 || days > 60) {
-      return ctx.reply('أدخل عدد أيام صحيحًا بين 1 و60.');
+    const days = parseLeaveDays(ctx.message.text);
+    if (days === null) {
+      return ctx.reply('أرسل عدد أيام الإجازة فقط، مثال: 1 أو ١. يجب أن يكون العدد بين 1 و60.');
     }
     const student = await db.getStudentByTelegramId(ctx.from.id);
     if (!student) {
@@ -648,7 +643,12 @@ bot.on('text', async (ctx, next) => {
       return ctx.reply('الرجاء التسجيل أولًا عبر /start');
     }
     try {
-      const leave = await db.requestLeave(student.id, state.startDate, days, null);
+      const leave = await db.requestLeave(
+        student.id,
+        currentDateInTimeZone(ATTENDANCE_TIME_ZONE),
+        days,
+        null
+      );
       userState.delete(ctx.from.id);
       await ctx.reply(
         `تم إرسال طلب إجازتك ✅\nمن ${leave.start_date.toISOString().slice(0, 10)} ` +
@@ -869,9 +869,10 @@ async function openLeaveRequest(ctx) {
       Markup.inlineKeyboard([[Markup.button.callback('سحب الطلب', `leave_cancel:${pending.id}`)]])
     );
   }
-  userState.set(ctx.from.id, { action: 'leave_awaiting_date' });
+  userState.set(ctx.from.id, { action: 'leave_awaiting_days' });
   return ctx.reply(
-    'طلب إجازة 🌴\nأرسل تاريخ بداية الإجازة بصيغة YYYY-MM-DD (مثال: 2026-09-15).\n' +
+    'طلب إجازة 🌴\nأرسل عدد أيام الإجازة المطلوبة، مثال: 1 أو ١.\n' +
+      'ستبدأ الإجازة تلقائيًا من اليوم بعد موافقة الأدمن.\n' +
       'لإلغاء العملية أرسل /start.'
   );
 }
@@ -1822,6 +1823,7 @@ module.exports = {
   buildStudentReportCsv,
   formatStudentReport,
   groupStudentReport,
-  parseLeaveDate,
+  parseLeaveDays,
+  currentDateInTimeZone,
   buildAdminAbsenceMessages,
 };

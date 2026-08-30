@@ -1,6 +1,6 @@
 {
   "name": "telegram-attendance-bot",
-  "version": "2.3.1",
+  "version": "2.3.3",
   "description": "بوت تليجرام لإدارة مواسم الدراسة وحضور الطلبة في الدروس اليومية",
   "main": "index.js",
   "type": "commonjs",
