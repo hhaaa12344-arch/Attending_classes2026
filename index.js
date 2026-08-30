@@ -24,6 +24,7 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || '')
 const LESSON_ACTIVE_HOURS = Number(process.env.LESSON_ACTIVE_HOURS || 24);
 // التقارير اليومية وحدود الغياب تُحسب بحسب توقيت بغداد افتراضيًا.
 const ATTENDANCE_TIME_ZONE = process.env.ATTENDANCE_TIME_ZONE || 'Asia/Baghdad';
+const MAX_LEAVE_DAYS_PER_SEASON = 10;
 if (!BOT_TOKEN) {
   console.error('خطأ: يجب ضبط متغير البيئة BOT_TOKEN');
   process.exit(1);
@@ -317,7 +318,7 @@ function parseLeaveDays(value) {
   const normalized = normalizeArabicDigits(value);
   if (!/^\d+$/.test(normalized)) return null;
   const days = Number(normalized);
-  return Number.isInteger(days) && days >= 1 && days <= 60 ? days : null;
+  return Number.isInteger(days) && days >= 1 && days <= MAX_LEAVE_DAYS_PER_SEASON ? days : null;
 }
 
 function currentDateInTimeZone(timeZone = ATTENDANCE_TIME_ZONE, now = new Date()) {
@@ -382,11 +383,20 @@ function formatStudentSeasonActivity(activity) {
           `${index + 1}. ${dateOnly(leave.start_date)} → ${dateOnly(leave.end_date)} (${Number(leave.days)} يومًا)`
       )
     : ['لا توجد إجازات معتمدة.'];
+  const approvedLeaveDays = Number.isFinite(Number(activity.approvedLeaveDays))
+    ? Number(activity.approvedLeaveDays)
+    : leaves.reduce((sum, leave) => sum + Number(leave.days), 0);
+  const maxLeaveDays = Number(activity.maxLeaveDays || MAX_LEAVE_DAYS_PER_SEASON);
   let text =
     `${STUDENT_ACTIVITY_BUTTON}\n` +
     `المرحلة: ${activity.stageName || '—'}\n` +
     `الموسم: ${activity.seasonName || '—'}\n\n` +
-    `🌴 الإجازات المعتمدة (${leaves.length}):\n${leaveLines.join('\n')}`;
+    `🌴 الإجازات المعتمدة (${leaves.length}):\n` +
+    `الأيام المستخدمة: ${approvedLeaveDays} من ${maxLeaveDays} — المتبقي: ${Math.max(
+      0,
+      maxLeaveDays - approvedLeaveDays
+    )}\n` +
+    leaveLines.join('\n');
   if (warnings.length) {
     const notificationLines = warnings.map(
       (warning, index) =>
@@ -394,6 +404,30 @@ function formatStudentSeasonActivity(activity) {
     );
     text += `\n\n⚠️ التنبيهات المستلمة (${warnings.length}):\n${notificationLines.join('\n')}`;
   }
+  return text;
+}
+
+function formatAdminStudentDetails(student, activity, attendanceRows = []) {
+  let text =
+    `الطالب: ${student.full_name}\n` +
+    `المرحلة: ${student.stage_name}\n` +
+    `الحالة: ${student.is_active ? 'نشط' : 'مؤرشف'}`;
+  if (!activity) return `${text}\nالموسم الحالي: لا يوجد تسجيل نشط.`;
+
+  const approvedLeaveDays = Number(activity.approvedLeaveDays || 0);
+  const leaveLines = (activity.leaves || []).map(
+    (leave) =>
+      `• ${dateOnly(leave.start_date)} → ${dateOnly(leave.end_date)} (${Number(leave.days)} يومًا)`
+  );
+  const attendanceLines = attendanceRows.map(
+    (row) => `• ${row.subject_name}: ${Number(row.attended_lessons)} من ${Number(row.total_lessons)}`
+  );
+  text +=
+    `\nالموسم: ${activity.seasonName || '—'}` +
+    `\n\n📊 الحضور:\n${attendanceLines.length ? attendanceLines.join('\n') : 'لا توجد دروس مسجلة.'}` +
+    `\n\n🌴 الإجازات المعتمدة: ${approvedLeaveDays} من ${MAX_LEAVE_DAYS_PER_SEASON} أيام` +
+    `\nالمتبقي: ${Math.max(0, MAX_LEAVE_DAYS_PER_SEASON - approvedLeaveDays)} أيام` +
+    `\n${leaveLines.length ? leaveLines.join('\n') : 'لا توجد إجازات معتمدة.'}`;
   return text;
 }
 
@@ -533,6 +567,8 @@ function groupStudentReport(rows) {
       groups.set(row.stage_season_id, {
         seasonName: formatSeasonLabel(row),
         stageName: row.stage_name,
+        approvedLeaveDays: Number(row.approved_leave_days || 0),
+        approvedLeavePeriods: row.approved_leave_periods || '',
         subjects: [],
       });
     }
@@ -551,7 +587,10 @@ function formatStudentReport(rows) {
     const subjectLines = group.subjects.map(
       (subject) => `• ${subject.name}: ${subject.attended} حضور من ${subject.total} درس`
     );
-    return `📘 ${group.seasonName}\nالمرحلة: ${group.stageName}\n${subjectLines.join('\n')}`;
+    const leaveText = group.approvedLeavePeriods
+      ? `الإجازات المعتمدة: ${group.approvedLeaveDays} من ${MAX_LEAVE_DAYS_PER_SEASON} أيام\n${group.approvedLeavePeriods}\n`
+      : `الإجازات المعتمدة: 0 من ${MAX_LEAVE_DAYS_PER_SEASON} أيام\n`;
+    return `📘 ${group.seasonName}\nالمرحلة: ${group.stageName}\n${leaveText}${subjectLines.join('\n')}`;
   });
 
   const messages = [];
@@ -568,7 +607,16 @@ function formatStudentReport(rows) {
 }
 
 function buildStudentReportCsv(rows) {
-  const header = ['الموسم', 'المرحلة', 'المادة', 'الحضور', 'إجمالي الدروس'];
+  const header = [
+    'الموسم',
+    'المرحلة',
+    'المادة',
+    'الحضور',
+    'إجمالي الدروس',
+    'تاريخ ووقت كل تسجيل حضور',
+    'أيام الإجازة المعتمدة',
+    'تواريخ الإجازات المعتمدة',
+  ];
   return (
     '\uFEFF' +
     [
@@ -579,6 +627,9 @@ function buildStudentReportCsv(rows) {
         row.subject_name,
         Number(row.attended_lessons),
         Number(row.total_lessons),
+        row.attendance_dates || '',
+        Number(row.approved_leave_days || 0),
+        row.approved_leave_periods || '',
       ]),
     ]
       .map((line) => line.map(csvCell).join(','))
@@ -590,12 +641,18 @@ function buildStageSeasonCsv(rows) {
   const byStudent = new Map();
   for (const row of rows) {
     if (!byStudent.has(row.student_id)) {
-      byStudent.set(row.student_id, { name: row.full_name, subjects: [] });
+      byStudent.set(row.student_id, {
+        name: row.full_name,
+        approvedLeaveDays: Number(row.approved_leave_days || 0),
+        approvedLeavePeriods: row.approved_leave_periods || '',
+        subjects: [],
+      });
     }
     byStudent.get(row.student_id).subjects.push({
       name: row.subject_name,
       total: Number(row.total_lessons),
       attended: Number(row.attended_lessons),
+      attendanceDates: row.attendance_dates || '',
     });
   }
   const subjectNames = [...new Set(rows.map((row) => row.subject_name))];
@@ -604,15 +661,32 @@ function buildStageSeasonCsv(rows) {
     'اسم الطالب',
     'الموسم',
     'المرحلة',
-    ...subjectNames.flatMap((name) => [`${name} - حضر`, `${name} - الإجمالي`]),
+    'أيام الإجازة المعتمدة',
+    'تواريخ الإجازات المعتمدة',
+    ...subjectNames.flatMap((name) => [
+      `${name} - حضر`,
+      `${name} - الإجمالي`,
+      `${name} - تواريخ وأوقات الحضور`,
+    ]),
   ];
   const lines = [header.map(csvCell).join(',')];
   let index = 1;
-  for (const { name, subjects } of byStudent.values()) {
-    const cells = [index++, name, formatSeasonLabel(rows[0]), rows[0].stage_name];
+  for (const { name, approvedLeaveDays, approvedLeavePeriods, subjects } of byStudent.values()) {
+    const cells = [
+      index++,
+      name,
+      formatSeasonLabel(rows[0]),
+      rows[0].stage_name,
+      approvedLeaveDays,
+      approvedLeavePeriods,
+    ];
     for (const subjectName of subjectNames) {
       const found = subjects.find((subject) => subject.name === subjectName);
-      cells.push(found ? found.attended : 0, found ? found.total : 0);
+      cells.push(
+        found ? found.attended : 0,
+        found ? found.total : 0,
+        found ? found.attendanceDates : ''
+      );
     }
     lines.push(cells.map(csvCell).join(','));
   }
@@ -620,7 +694,7 @@ function buildStageSeasonCsv(rows) {
 }
 
 async function sendStudentReportMessages(ctx, studentId, stageSeasonId = null, options = {}) {
-  const rows = await db.getStudentSeasonReport(studentId, stageSeasonId);
+  const rows = await db.getStudentSeasonReport(studentId, stageSeasonId, ATTENDANCE_TIME_ZONE);
   const student = options.cleanUi === false ? null : options.student || (await db.getStudentById(studentId));
   if (student) await beginStudentScreen(ctx, student);
   for (const text of formatStudentReport(rows)) {
@@ -839,7 +913,8 @@ bot.on('text', async (ctx, next) => {
       return replyStudentScreen(
         ctx,
         student,
-        `أرسل عدد أيام الإجازة فقط، مثال: 1 أو ١. يجب أن يكون العدد بين 1 و60.\nللرجوع اضغط «${BACK_BUTTON}».`,
+        `أرسل عدد أيام الإجازة فقط، مثال: 1 أو ١. يجب أن يكون العدد بين 1 و${MAX_LEAVE_DAYS_PER_SEASON}.\n` +
+          `للرجوع اضغط «${BACK_BUTTON}».`,
         studentMainMenu()
       );
     }
@@ -861,6 +936,7 @@ bot.on('text', async (ctx, next) => {
         student,
         `تم إرسال طلب إجازتك ✅\nمن ${leave.start_date.toISOString().slice(0, 10)} ` +
           `إلى ${leave.end_date.toISOString().slice(0, 10)} (${days} يومًا).\n` +
+          `الرصيد المتبقي في هذا الموسم: ${Number(leave.remaining_days)} من ${Number(leave.max_days)} أيام.\n` +
           'سيصلك إشعار عند قبول الأدمن للطلب. عند الموافقة لا تُحسب أيام الإجازة غيابًا، ' +
           'ويبقى التأشير ممكنًا خلال مهلة كل درس فقط.',
         studentMainMenu()
@@ -870,7 +946,8 @@ bot.on('text', async (ctx, next) => {
         `🌴 طلب إجازة جديد\nالطالب: ${student.full_name}\nالمرحلة: ${student.stage_name || '—'}\n` +
           `المدة: ${days} يومًا (${leave.start_date.toISOString().slice(0, 10)} → ${leave.end_date
             .toISOString()
-            .slice(0, 10)})`,
+            .slice(0, 10)})\n` +
+          `الرصيد المحجوز بعد الطلب: ${Number(leave.used_days)} من ${Number(leave.max_days)} أيام`,
         Markup.inlineKeyboard([
           [
             callbackButton('✅ موافقة', `leave_approve:${leave.id}`),
@@ -1086,17 +1163,27 @@ async function openLeaveRequest(ctx) {
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   if (!student.is_active) return ctx.reply('حسابك مؤرشف حاليًا.');
 
-  const active = await db.getActiveOrUpcomingLeave(
-    student.id,
-    currentDateInTimeZone(ATTENDANCE_TIME_ZONE)
-  );
-  const pending = await db.getPendingLeave(student.id);
+  const today = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
+  const [active, pending, usage] = await Promise.all([
+    db.getActiveOrUpcomingLeave(student.id, today),
+    db.getPendingLeave(student.id),
+    db.getCurrentSeasonLeaveUsage(student.id),
+  ]);
+  if (!usage) {
+    return replyStudentScreen(
+      ctx,
+      student,
+      'لا يوجد موسم دراسي نشط في حسابك حاليًا، لذلك لا يمكن تقديم طلب إجازة.',
+      studentMainMenu()
+    );
+  }
   if (active) {
     return replyStudentScreen(
       ctx,
       student,
       `لديك إجازة معتمدة من ${active.start_date.toISOString().slice(0, 10)} ` +
-        `إلى ${active.end_date.toISOString().slice(0, 10)}.`,
+        `إلى ${active.end_date.toISOString().slice(0, 10)}.\n` +
+        `الرصيد المتبقي في الموسم: ${usage.remainingDays} من ${usage.maxDays} أيام.`,
       Markup.inlineKeyboard([[callbackButton('إلغاء الإجازة والعودة للدروس', `leave_cancel:${active.id}`, 'danger')]])
     );
   }
@@ -1105,8 +1192,17 @@ async function openLeaveRequest(ctx) {
       ctx,
       student,
       `لديك طلب إجازة قيد المراجعة من ${pending.start_date.toISOString().slice(0, 10)} ` +
-        `إلى ${pending.end_date.toISOString().slice(0, 10)}.`,
+        `إلى ${pending.end_date.toISOString().slice(0, 10)}.\n` +
+        `الرصيد المتبقي بعد احتساب الطلب المعلّق: ${usage.remainingDays} من ${usage.maxDays} أيام.`,
       Markup.inlineKeyboard([[callbackButton('سحب الطلب', `leave_cancel:${pending.id}`, 'danger')]])
+    );
+  }
+  if (usage.remainingDays <= 0) {
+    return replyStudentScreen(
+      ctx,
+      student,
+      `استنفدت رصيد الإجازات للموسم الحالي (${usage.maxDays} أيام)، ولا يمكن تقديم طلب جديد حتى الموسم القادم.`,
+      studentMainMenu()
     );
   }
   userState.set(ctx.from.id, { action: 'leave_awaiting_days' });
@@ -1114,6 +1210,7 @@ async function openLeaveRequest(ctx) {
     ctx,
     student,
     'طلب إجازة 🌴\nأرسل عدد أيام الإجازة المطلوبة، مثال: 1 أو ١.\n' +
+      `المتبقي لك في هذا الموسم: ${usage.remainingDays} من ${usage.maxDays} أيام.\n` +
       'ستبدأ الإجازة تلقائيًا من اليوم بعد موافقة الأدمن.\n' +
       `للرجوع اضغط «${BACK_BUTTON}».`,
     studentMainMenu()
@@ -1125,7 +1222,11 @@ bot.hears('🌴 طلب إجازة', openLeaveRequest);
 bot.action(/leave_cancel:(\d+)/, async (ctx) => {
   const student = await db.getStudentByTelegramId(ctx.from.id);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
-  const cancelled = await db.cancelLeave(student.id, Number(ctx.match[1]));
+  const cancelled = await db.cancelLeave(
+    student.id,
+    Number(ctx.match[1]),
+    currentDateInTimeZone(ATTENDANCE_TIME_ZONE)
+  );
   if (!cancelled) return ctx.answerCbQuery('لا توجد إجازة قابلة للإلغاء.');
   await ctx.answerCbQuery('تم الإلغاء ✅');
   await ctx.editMessageText('تم إلغاء الإجازة. ستعود إليك إشعارات الدروس من جديد.');
@@ -1654,7 +1755,7 @@ bot.action(/admin_report_stage:(\d+)/, async (ctx) => {
 bot.action(/admin_report_season:(\d+)/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
   const stageSeasonId = Number(ctx.match[1]);
-  const rows = await db.getStageSeasonReport(stageSeasonId);
+  const rows = await db.getStageSeasonReport(stageSeasonId, ATTENDANCE_TIME_ZONE);
   await ctx.answerCbQuery();
   if (rows.length === 0) {
     return ctx.reply('لا توجد بيانات كافية لهذا الموسم (تأكد من وجود طلبة ومواد).');
@@ -1722,10 +1823,15 @@ bot.action(/stu_select:(\d+)/, async (ctx) => {
   const student = await db.getStudentById(studentId);
   await ctx.answerCbQuery();
   if (!student) return ctx.reply('الطالب غير موجود (ربما حُذف).');
+  const activity = await db.getStudentCurrentSeasonActivity(
+    studentId,
+    currentDateInTimeZone(ATTENDANCE_TIME_ZONE)
+  );
+  const attendanceRows = activity
+    ? await db.getStudentSeasonReport(studentId, activity.stageSeasonId, ATTENDANCE_TIME_ZONE)
+    : [];
   return ctx.reply(
-    `الطالب: ${student.full_name}\nالمرحلة: ${student.stage_name}\nالحالة: ${
-      student.is_active ? 'نشط' : 'مؤرشف'
-    }`,
+    formatAdminStudentDetails(student, activity, attendanceRows),
     studentActionsKeyboard(studentId, student.is_active)
   );
 });
@@ -2087,6 +2193,7 @@ module.exports = {
   dailyLessonNotificationText,
   sendToStageStudents,
   formatStudentSeasonActivity,
+  formatAdminStudentDetails,
   buttonStyle,
   studentUiMessageKind,
 };

@@ -2,6 +2,8 @@
 const { Pool } = require('pg');
 const { normalizeHashtag } = require('./utils');
 
+const MAX_LEAVE_DAYS_PER_SEASON = 10;
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   // تُحفظ أعمدة الوقت القديمة بصيغة TIMESTAMP؛ تثبيت جلسة PostgreSQL على UTC
@@ -126,6 +128,7 @@ async function initSchema() {
     CREATE TABLE IF NOT EXISTS student_leaves (
       id SERIAL PRIMARY KEY,
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      stage_season_id INTEGER REFERENCES stage_seasons(id) ON DELETE SET NULL,
       start_date DATE NOT NULL,
       end_date DATE NOT NULL,
       days INTEGER NOT NULL,
@@ -158,6 +161,8 @@ async function initSchema() {
     -- عند الترقية من 2.4.1 نعامل الرسائل القديمة كرسائل قائمة حتى لا تختفي
     -- لوحة الطالب في أول ضغط بعد التحديث. الجداول الجديدة تبدأ بنوع screen أعلاه.
     ALTER TABLE student_ui_messages ADD COLUMN IF NOT EXISTS message_kind TEXT;
+    ALTER TABLE student_leaves
+      ADD COLUMN IF NOT EXISTS stage_season_id INTEGER REFERENCES stage_seasons(id) ON DELETE SET NULL;
     UPDATE student_ui_messages SET message_kind='menu' WHERE message_kind IS NULL;
     ALTER TABLE student_ui_messages ALTER COLUMN message_kind SET DEFAULT 'screen';
     ALTER TABLE student_ui_messages ALTER COLUMN message_kind SET NOT NULL;
@@ -172,6 +177,8 @@ async function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_transitions_student ON student_transitions(student_id);
     CREATE INDEX IF NOT EXISTS idx_leaves_student ON student_leaves(student_id);
     CREATE INDEX IF NOT EXISTS idx_leaves_status ON student_leaves(status);
+    CREATE INDEX IF NOT EXISTS idx_leaves_stage_season
+      ON student_leaves(student_id, stage_season_id, status);
     CREATE INDEX IF NOT EXISTS idx_student_ui_messages_created
       ON student_ui_messages(student_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_daily_lesson_notifications_date
@@ -228,6 +235,25 @@ async function initSchema() {
     FROM students st
     JOIN stage_seasons ss ON ss.stage_id=st.stage_id AND ss.is_active=true
     WHERE NOT EXISTS (SELECT 1 FROM enrollments e WHERE e.student_id=st.id);
+
+    -- ربط الإجازات القديمة بالموسم الذي كان الطالب مسجلًا فيه وقت تقديمها.
+    UPDATE student_leaves sl
+    SET stage_season_id = (
+      SELECT e.stage_season_id
+      FROM enrollments e
+      WHERE e.student_id=sl.student_id
+        AND sl.requested_at >= e.started_at
+        AND sl.requested_at <= COALESCE(e.ended_at, 'infinity'::timestamp)
+      ORDER BY e.started_at DESC, e.id DESC
+      LIMIT 1
+    )
+    WHERE sl.stage_season_id IS NULL
+      AND EXISTS (
+        SELECT 1 FROM enrollments e
+        WHERE e.student_id=sl.student_id
+          AND sl.requested_at >= e.started_at
+          AND sl.requested_at <= COALESCE(e.ended_at, 'infinity'::timestamp)
+      );
   `);
 
   await pool.query(`
@@ -281,7 +307,7 @@ async function initSchema() {
     SET is_excused_leave=true, is_full_absence=false
     WHERE EXISTS (
       SELECT 1 FROM student_leaves sl
-      WHERE sl.student_id=d.student_id AND sl.status='approved'
+      WHERE sl.student_id=d.student_id AND sl.status IN ('approved','ended')
         AND d.attendance_date BETWEEN sl.start_date AND sl.end_date
     );
   `);
@@ -620,7 +646,7 @@ async function archiveStudent(id) {
     );
     await client.query(
       `UPDATE student_leaves SET status='cancelled', decided_at=now()
-       WHERE student_id=$1 AND status IN ('pending','approved')`,
+       WHERE student_id=$1 AND status='pending'`,
       [id]
     );
     await client.query('COMMIT');
@@ -1023,31 +1049,114 @@ const canStudentAttendLesson = (studentId, lessonId) =>
     .then((r) => Boolean(r.rows[0]));
 
 // ---------- الإجازات ----------
-// الطالب يحدد تاريخ البداية وعدد الأيام؛ الطلب يبدأ «pending» بانتظار موافقة الأدمن.
+// الطالب يحدد تاريخ البداية وعدد الأيام؛ مجموع الموافق عليه والمعلّق لا يتجاوز 10 أيام في الموسم.
 async function requestLeave(studentId, startDate, days, reason) {
   const d = Number(days);
   if (!Number.isInteger(d) || d < 1) throw new Error('عدد أيام الإجازة يجب أن يكون رقمًا صحيحًا موجبًا.');
-  // منع تداخل طلب جديد مع إجازة قائمة (معلّقة أو موافق عليها) لم تنتهِ بعد
-  const overlap = await pool.query(
-    `SELECT 1 FROM student_leaves
-     WHERE student_id=$1 AND status IN ('pending','approved')
-       AND end_date >= $2::date LIMIT 1`,
-    [studentId, startDate]
-  );
-  if (overlap.rows[0]) {
-    const err = new Error('لديك إجازة قائمة أو طلب معلّق يتداخل مع هذا التاريخ.');
-    err.code = 'LEAVE_OVERLAP';
-    throw err;
-  }
-  return pool
-    .query(
-      `INSERT INTO student_leaves(student_id, start_date, end_date, days, reason, status)
-       VALUES($1, $2::date, ($2::date + ($3 - 1) * interval '1 day')::date, $3, $4, 'pending')
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // قفل صف الطالب يجعل فحص الرصيد وإضافة الطلب عملية ذرية حتى مع طلبين متزامنين.
+    const student = await client.query('SELECT id FROM students WHERE id=$1 FOR UPDATE', [studentId]);
+    if (!student.rows[0]) throw new Error('الطالب غير موجود.');
+
+    const enrollment = await client.query(
+      `SELECT e.stage_season_id
+       FROM enrollments e
+       WHERE e.student_id=$1 AND e.status='active'
+       ORDER BY e.started_at DESC, e.id DESC LIMIT 1`,
+      [studentId]
+    );
+    if (!enrollment.rows[0]) {
+      const err = new Error('لا يوجد موسم دراسي نشط في حسابك حاليًا.');
+      err.code = 'NO_ACTIVE_SEASON';
+      throw err;
+    }
+    const stageSeasonId = Number(enrollment.rows[0].stage_season_id);
+    const usage = await client.query(
+      `SELECT COALESCE(SUM(days), 0)::integer AS used_days
+       FROM student_leaves
+       WHERE student_id=$1 AND stage_season_id=$2 AND status IN ('pending','approved','ended')`,
+      [studentId, stageSeasonId]
+    );
+    const usedDays = Number(usage.rows[0].used_days);
+    const remainingDays = Math.max(0, MAX_LEAVE_DAYS_PER_SEASON - usedDays);
+    if (d > remainingDays) {
+      const err = new Error(
+        remainingDays === 0
+          ? `استنفدت رصيد الإجازات للموسم الحالي (${MAX_LEAVE_DAYS_PER_SEASON} أيام).`
+          : `المتبقي من رصيد إجازاتك في هذا الموسم ${remainingDays} يوم فقط من أصل ${MAX_LEAVE_DAYS_PER_SEASON}.`
+      );
+      err.code = 'LEAVE_SEASON_LIMIT';
+      err.usedDays = usedDays;
+      err.remainingDays = remainingDays;
+      throw err;
+    }
+
+    // منع تداخل طلب جديد مع إجازة قائمة (معلّقة أو موافق عليها) لم تنتهِ بعد.
+    const overlap = await client.query(
+      `SELECT 1 FROM student_leaves
+       WHERE student_id=$1 AND status IN ('pending','approved')
+         AND end_date >= $2::date LIMIT 1`,
+      [studentId, startDate]
+    );
+    if (overlap.rows[0]) {
+      const err = new Error('لديك إجازة قائمة أو طلب معلّق يتداخل مع هذا التاريخ.');
+      err.code = 'LEAVE_OVERLAP';
+      throw err;
+    }
+
+    const result = await client.query(
+      `INSERT INTO student_leaves(
+         student_id, stage_season_id, start_date, end_date, days, reason, status
+       )
+       VALUES($1, $2, $3::date, ($3::date + ($4 - 1) * interval '1 day')::date, $4, $5, 'pending')
        RETURNING *`,
-      [studentId, startDate, d, reason || null]
-    )
-    .then((r) => r.rows[0]);
+      [studentId, stageSeasonId, startDate, d, reason || null]
+    );
+    await client.query('COMMIT');
+    return {
+      ...result.rows[0],
+      used_days: usedDays + d,
+      remaining_days: remainingDays - d,
+      max_days: MAX_LEAVE_DAYS_PER_SEASON,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
+
+const getCurrentSeasonLeaveUsage = (studentId) =>
+  pool
+    .query(
+      `SELECT e.stage_season_id,
+              COALESCE(SUM(sl.days) FILTER (WHERE sl.status IN ('approved','ended')), 0)::integer AS approved_days,
+              COALESCE(SUM(sl.days) FILTER (WHERE sl.status='pending'), 0)::integer AS pending_days
+       FROM enrollments e
+       LEFT JOIN student_leaves sl
+         ON sl.student_id=e.student_id AND sl.stage_season_id=e.stage_season_id
+       WHERE e.student_id=$1 AND e.status='active'
+       GROUP BY e.stage_season_id
+       ORDER BY MAX(e.started_at) DESC LIMIT 1`,
+      [studentId]
+    )
+    .then((r) => {
+      const row = r.rows[0];
+      if (!row) return null;
+      const approvedDays = Number(row.approved_days);
+      const pendingDays = Number(row.pending_days);
+      return {
+        stageSeasonId: Number(row.stage_season_id),
+        approvedDays,
+        pendingDays,
+        reservedDays: approvedDays + pendingDays,
+        remainingDays: Math.max(0, MAX_LEAVE_DAYS_PER_SEASON - approvedDays - pendingDays),
+        maxDays: MAX_LEAVE_DAYS_PER_SEASON,
+      };
+    });
 
 const getLeaveById = (leaveId) =>
   pool
@@ -1091,14 +1200,54 @@ async function decideLeave(leaveId, approve, adminTelegramId) {
   }
 }
 
-const cancelLeave = (studentId, leaveId) =>
-  pool
-    .query(
-      `UPDATE student_leaves SET status='cancelled', decided_at=now()
-       WHERE id=$1 AND student_id=$2 AND status IN ('pending','approved') RETURNING *`,
+async function cancelLeave(studentId, leaveId, returnDate = null) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const found = await client.query(
+      `SELECT * FROM student_leaves
+       WHERE id=$1 AND student_id=$2 AND status IN ('pending','approved') FOR UPDATE`,
       [leaveId, studentId]
-    )
-    .then((r) => r.rows[0]);
+    );
+    const leave = found.rows[0];
+    if (!leave) {
+      await client.query('COMMIT');
+      return undefined;
+    }
+    let result;
+    if (leave.status === 'pending') {
+      result = await client.query(
+        `UPDATE student_leaves SET status='cancelled', decided_at=now()
+         WHERE id=$1 RETURNING *`,
+        [leaveId]
+      );
+    } else {
+      const effectiveReturnDate = returnDate || new Date().toISOString().slice(0, 10);
+      result = await client.query(
+        `UPDATE student_leaves
+         SET status='ended',
+             end_date=CASE
+               WHEN $2::date <= start_date THEN start_date
+               ELSE LEAST(end_date, ($2::date - interval '1 day')::date)
+             END,
+             days=CASE
+               WHEN $2::date <= start_date THEN 1
+               ELSE (LEAST(end_date, ($2::date - interval '1 day')::date) - start_date + 1)
+             END,
+             decided_at=now()
+         WHERE id=$1 RETURNING *`,
+        [leaveId, effectiveReturnDate]
+      );
+    }
+    await client.query('COMMIT');
+    return result.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 // هل الطالب في إجازة مفعّلة (موافق عليها) في هذا التاريخ؟
 const isStudentOnLeave = (studentId, onDate) =>
@@ -1141,7 +1290,7 @@ const getStudentsReturningFromLeave = (stageId, onDate = null) =>
        FROM student_leaves sl
        JOIN students st ON st.id=sl.student_id
        WHERE st.stage_id=$1 AND st.is_active=true
-         AND sl.status='approved' AND sl.backlog_notified=false
+         AND sl.status IN ('approved','ended') AND sl.backlog_notified=false
          AND sl.end_date < COALESCE($2::date, CURRENT_DATE)`,
       [stageId, onDate]
     )
@@ -1228,7 +1377,7 @@ const processCompletedAttendanceDays = (timeZone = 'Asia/Baghdad') =>
                   AS attended_on_time_count,
                 EXISTS (
                   SELECT 1 FROM student_leaves sl
-                  WHERE sl.student_id=e.student_id AND sl.status='approved'
+                  WHERE sl.student_id=e.student_id AND sl.status IN ('approved','ended')
                     AND lesson_day.attendance_date BETWEEN sl.start_date AND sl.end_date
                 ) AS is_excused_leave
          FROM students st
@@ -1388,11 +1537,17 @@ async function getStudentCurrentSeasonActivity(studentId, onDate = null) {
     pool.query(
       `SELECT sl.id, sl.start_date, sl.end_date, sl.days
        FROM student_leaves sl
-       WHERE sl.student_id=$1 AND sl.status='approved'
-         AND sl.end_date >= $2::date
-         AND sl.start_date <= COALESCE($3::date, $4::date, CURRENT_DATE)
+       WHERE sl.student_id=$1 AND sl.status IN ('approved','ended')
+         AND (
+           sl.stage_season_id=$2
+           OR (
+             sl.stage_season_id IS NULL
+             AND sl.end_date >= $3::date
+             AND sl.start_date <= COALESCE($4::date, $5::date, CURRENT_DATE)
+           )
+         )
        ORDER BY sl.start_date DESC, sl.id DESC`,
-      [studentId, current.started_at, current.ended_at, onDate]
+      [studentId, current.stage_season_id, current.started_at, current.ended_at, onDate]
     ),
     pool.query(
       `SELECT d.id, d.attendance_date, d.student_alert_sent_at
@@ -1409,22 +1564,44 @@ async function getStudentCurrentSeasonActivity(studentId, onDate = null) {
     stageName: current.stage_name,
     seasonName: current.season_name,
     leaves: leaveResult.rows,
+    approvedLeaveDays: leaveResult.rows.reduce((sum, leave) => sum + Number(leave.days), 0),
+    maxLeaveDays: MAX_LEAVE_DAYS_PER_SEASON,
     warnings: warningResult.rows,
   };
 }
 
 // ---------- التقارير التاريخية ----------
-const getStageSeasonReport = (stageSeasonId) =>
+const getStageSeasonReport = (stageSeasonId, timeZone = 'Asia/Baghdad') =>
   pool
     .query(
       `WITH ranked AS (${RANKED_STAGE_SEASONS_CTE})
        SELECT st.id AS student_id, st.full_name,
               r.id AS stage_season_id, r.stage_id,
               COALESCE(r.stage_name_snapshot, r.current_stage_name) AS stage_name,
-              r.season_number, r.recency_rank, r.is_active, r.started_at, r.ended_at,
+              r.season_name, r.season_number, r.recency_rank, r.is_active, r.started_at, r.ended_at,
               sub.id AS subject_id, sub.name AS subject_name,
               COUNT(l.id) AS total_lessons,
-              COUNT(a.id) FILTER (WHERE a.listened_at <= l.active_until) AS attended_lessons
+              COUNT(a.id) FILTER (WHERE a.listened_at <= l.active_until) AS attended_lessons,
+              COALESCE(
+                STRING_AGG(
+                  TO_CHAR(timezone($2, a.listened_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI'),
+                  ' | ' ORDER BY a.listened_at
+                ) FILTER (WHERE a.listened_at <= l.active_until),
+                ''
+              ) AS attendance_dates,
+              COALESCE((
+                SELECT SUM(sl.days) FROM student_leaves sl
+                WHERE sl.student_id=st.id AND sl.stage_season_id=r.id AND sl.status IN ('approved','ended')
+              ), 0)::integer AS approved_leave_days,
+              COALESCE((
+                SELECT STRING_AGG(
+                  TO_CHAR(sl.start_date, 'YYYY-MM-DD') || ' → ' || TO_CHAR(sl.end_date, 'YYYY-MM-DD') ||
+                  ' (' || sl.days || ' يوم)',
+                  ' | ' ORDER BY sl.start_date, sl.id
+                )
+                FROM student_leaves sl
+                WHERE sl.student_id=st.id AND sl.stage_season_id=r.id AND sl.status IN ('approved','ended')
+              ), '') AS approved_leave_periods
        FROM enrollments e
        JOIN students st ON st.id=e.student_id
        JOIN ranked r ON r.id=e.stage_season_id
@@ -1433,25 +1610,47 @@ const getStageSeasonReport = (stageSeasonId) =>
        LEFT JOIN attendance a ON a.lesson_id = l.id AND a.student_id = st.id
        WHERE r.id=$1
        GROUP BY st.id, st.full_name, r.id, r.stage_id, r.stage_name_snapshot, r.current_stage_name,
-                r.season_number, r.recency_rank, r.is_active, r.started_at, r.ended_at, sub.id, sub.name
+                r.season_name, r.season_number, r.recency_rank, r.is_active, r.started_at, r.ended_at,
+                sub.id, sub.name
        ORDER BY st.full_name, sub.name`,
-      [stageSeasonId]
+      [stageSeasonId, timeZone]
     )
     .then((r) => r.rows);
 
 // تقرير الطالب عبر كل مواسمه، أو موسم واحد فقط عند تمرير stageSeasonId (لاختيار الطالب من «تقريري»).
-const getStudentSeasonReport = (studentId, stageSeasonId = null) =>
-  pool
+const getStudentSeasonReport = (studentId, stageSeasonId = null, timeZone = 'Asia/Baghdad') => {
+  const timeZoneParam = stageSeasonId ? '$3' : '$2';
+  return pool
     .query(
       `WITH ranked AS (${RANKED_STAGE_SEASONS_CTE})
        SELECT st.id AS student_id, st.full_name,
               r.id AS stage_season_id, r.stage_id,
               COALESCE(r.stage_name_snapshot, r.current_stage_name) AS stage_name,
-              r.season_number, r.recency_rank, r.is_active, r.started_at, r.ended_at,
+              r.season_name, r.season_number, r.recency_rank, r.is_active, r.started_at, r.ended_at,
               e.status AS enrollment_status,
               sub.id AS subject_id, sub.name AS subject_name,
               COUNT(l.id) AS total_lessons,
-              COUNT(a.id) FILTER (WHERE a.listened_at <= l.active_until) AS attended_lessons
+              COUNT(a.id) FILTER (WHERE a.listened_at <= l.active_until) AS attended_lessons,
+              COALESCE(
+                STRING_AGG(
+                  TO_CHAR(timezone(${timeZoneParam}, a.listened_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI'),
+                  ' | ' ORDER BY a.listened_at
+                ) FILTER (WHERE a.listened_at <= l.active_until),
+                ''
+              ) AS attendance_dates,
+              COALESCE((
+                SELECT SUM(sl.days) FROM student_leaves sl
+                WHERE sl.student_id=st.id AND sl.stage_season_id=r.id AND sl.status IN ('approved','ended')
+              ), 0)::integer AS approved_leave_days,
+              COALESCE((
+                SELECT STRING_AGG(
+                  TO_CHAR(sl.start_date, 'YYYY-MM-DD') || ' → ' || TO_CHAR(sl.end_date, 'YYYY-MM-DD') ||
+                  ' (' || sl.days || ' يوم)',
+                  ' | ' ORDER BY sl.start_date, sl.id
+                )
+                FROM student_leaves sl
+                WHERE sl.student_id=st.id AND sl.stage_season_id=r.id AND sl.status IN ('approved','ended')
+              ), '') AS approved_leave_periods
        FROM enrollments e
        JOIN students st ON st.id=e.student_id
        JOIN ranked r ON r.id=e.stage_season_id
@@ -1460,11 +1659,13 @@ const getStudentSeasonReport = (studentId, stageSeasonId = null) =>
        LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=st.id
        WHERE st.id=$1 ${stageSeasonId ? 'AND r.id=$2' : ''}
        GROUP BY st.id, st.full_name, r.id, r.stage_id, r.stage_name_snapshot, r.current_stage_name,
-                r.season_number, r.recency_rank, r.is_active, r.started_at, r.ended_at, e.status, sub.id, sub.name
+                r.season_name, r.season_number, r.recency_rank, r.is_active, r.started_at, r.ended_at,
+                e.status, sub.id, sub.name
        ORDER BY r.started_at DESC, r.id DESC, sub.name`,
-      stageSeasonId ? [studentId, stageSeasonId] : [studentId]
+      stageSeasonId ? [studentId, stageSeasonId, timeZone] : [studentId, timeZone]
     )
     .then((r) => r.rows);
+};
 
 module.exports = {
   pool,
@@ -1523,6 +1724,7 @@ module.exports = {
   recordStudentUiMessage,
   takeStudentUiMessages,
   getStudentCurrentSeasonActivity,
+  getCurrentSeasonLeaveUsage,
   requestLeave,
   getLeaveById,
   decideLeave,
@@ -1536,4 +1738,5 @@ module.exports = {
   listPendingLeaves,
   getStageSeasonReport,
   getStudentSeasonReport,
+  MAX_LEAVE_DAYS_PER_SEASON,
 };
