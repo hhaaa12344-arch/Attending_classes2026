@@ -146,6 +146,15 @@ async function initSchema() {
       PRIMARY KEY(student_id, message_id)
     );
 
+    -- يمنع إرسال إشعار مستقل لكل درس؛ لكل طالب إشعار نشر واحد فقط يوميًا لكل مرحلة.
+    CREATE TABLE IF NOT EXISTS student_daily_lesson_notifications (
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      stage_id INTEGER NOT NULL REFERENCES stages(id) ON DELETE CASCADE,
+      notification_date DATE NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT now(),
+      PRIMARY KEY(student_id, stage_id, notification_date)
+    );
+
     -- عند الترقية من 2.4.1 نعامل الرسائل القديمة كرسائل قائمة حتى لا تختفي
     -- لوحة الطالب في أول ضغط بعد التحديث. الجداول الجديدة تبدأ بنوع screen أعلاه.
     ALTER TABLE student_ui_messages ADD COLUMN IF NOT EXISTS message_kind TEXT;
@@ -165,6 +174,8 @@ async function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_leaves_status ON student_leaves(status);
     CREATE INDEX IF NOT EXISTS idx_student_ui_messages_created
       ON student_ui_messages(student_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_daily_lesson_notifications_date
+      ON student_daily_lesson_notifications(notification_date);
   `);
 
   // تحويل البيانات القديمة إلى موسم تأسيسي واحد من دون فقد أي درس أو حضور.
@@ -940,16 +951,38 @@ const getActiveLessonsForStudent = (stageId, studentId) =>
                WHERE numbered.subject_id=l.subject_id
                  AND numbered.stage_season_id=l.stage_season_id
                  AND (numbered.activated_at, numbered.id) <= (l.activated_at, l.id)) AS lesson_number,
-              EXISTS(SELECT 1 FROM attendance a WHERE a.lesson_id=l.id AND a.student_id=$2) AS attended
+              false AS attended
        FROM lessons l
        JOIN subjects s ON s.id = l.subject_id
        JOIN enrollments e
          ON e.stage_season_id=l.stage_season_id AND e.student_id=$2 AND e.status='active'
        WHERE s.stage_id = $1 AND l.active_until > now()
+         AND NOT EXISTS(
+           SELECT 1 FROM attendance a WHERE a.lesson_id=l.id AND a.student_id=$2
+         )
        ORDER BY l.activated_at DESC`,
       [stageId, studentId]
     )
     .then((r) => r.rows);
+
+// حجز ذري لإشعار نشر دروس اليوم. إذا فشل إرسال تليجرام يُلغى الحجز كي تعاد المحاولة لاحقًا.
+const claimDailyLessonNotification = (studentId, stageId, notificationDate) =>
+  pool
+    .query(
+      `INSERT INTO student_daily_lesson_notifications(student_id, stage_id, notification_date)
+       VALUES($1,$2,$3::date)
+       ON CONFLICT (student_id, stage_id, notification_date) DO NOTHING
+       RETURNING student_id`,
+      [studentId, stageId, notificationDate]
+    )
+    .then((r) => Boolean(r.rows[0]));
+
+const releaseDailyLessonNotification = (studentId, stageId, notificationDate) =>
+  pool.query(
+    `DELETE FROM student_daily_lesson_notifications
+     WHERE student_id=$1 AND stage_id=$2 AND notification_date=$3::date`,
+    [studentId, stageId, notificationDate]
+  );
 
 const getLessonById = (lessonId) =>
   pool
@@ -1474,6 +1507,8 @@ module.exports = {
   activateLesson,
   getLessonBySource,
   getActiveLessonsForStudent,
+  claimDailyLessonNotification,
+  releaseDailyLessonNotification,
   getLessonById,
   markAttendance,
   canStudentAttendLesson,

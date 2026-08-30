@@ -186,11 +186,16 @@ function studentActionsKeyboard(studentId, isActive = true) {
 }
 
 async function sendToStageStudents(stageId, text, extra = undefined, options = {}) {
-  const { excludeStudentIds = new Set(), skipOnLeave = false } = options;
+  const {
+    excludeStudentIds = new Set(),
+    skipOnLeave = false,
+    dailyLessonNotificationDate = null,
+  } = options;
   const students = await db.getStudentsByStage(stageId);
   const today = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
   let delivered = 0;
   let skippedOnLeave = 0;
+  let alreadyNotifiedToday = 0;
   for (const st of students) {
     if (excludeStudentIds.has(st.id)) continue;
     // أثناء الإجازة: لا تصل إشعارات الدروس للطالب المجاز في هذا اليوم.
@@ -198,15 +203,34 @@ async function sendToStageStudents(stageId, text, extra = undefined, options = {
       skippedOnLeave += 1;
       continue;
     }
+    let dailyNotificationClaimed = false;
+    if (dailyLessonNotificationDate) {
+      dailyNotificationClaimed = await db.claimDailyLessonNotification(
+        st.id,
+        stageId,
+        dailyLessonNotificationDate
+      );
+      if (!dailyNotificationClaimed) {
+        alreadyNotifiedToday += 1;
+        continue;
+      }
+    }
     try {
       await bot.telegram.sendMessage(st.telegram_id, text, extra);
       delivered += 1;
     } catch (err) {
       console.warn(`تعذر إرسال إشعار للطالب ${st.id}:`, err.description || err.message);
+      if (dailyNotificationClaimed) {
+        try {
+          await db.releaseDailyLessonNotification(st.id, stageId, dailyLessonNotificationDate);
+        } catch (releaseError) {
+          console.warn(`تعذر تحرير حجز التنبيه اليومي للطالب ${st.id}:`, releaseError.message);
+        }
+      }
     }
     await new Promise((r) => setTimeout(r, 40)); // احترام حدود تليجرام لعدد الرسائل بالثانية
   }
-  return { delivered, total: students.length, skippedOnLeave };
+  return { delivered, total: students.length, skippedOnLeave, alreadyNotifiedToday };
 }
 
 // عند نشر درس جديد: نبّه الطلبة الذين انتهت إجازتهم توًّا بضرورة متابعة الدروس الفائتة أيضًا.
@@ -375,21 +399,20 @@ function formatStudentSeasonActivity(activity) {
 
 function lessonKeyboard(lessons) {
   const rows = [];
-  for (const lesson of lessons) {
+  const pendingLessons = lessons.filter((lesson) => !lesson.attended);
+  const channelUrl = pendingLessons.map((lesson) => channelEntryUrl(lesson.source_url)).find(Boolean);
+  if (channelUrl) {
+    rows.push([urlButton('📢 الانتقال إلى قناة الدروس', channelUrl)]);
+  }
+  for (const lesson of pendingLessons) {
     const number = Number(lesson.lesson_number);
     const title = `${lesson.subject_name} — الدرس ${number}`;
-    const sourceUrl = clickableUrl(lesson.source_url);
-    if (sourceUrl) {
-      rows.push([urlButton(limitButtonText(`📢 انتقال إلى دروس اليوم — ${title}`), sourceUrl)]);
-    }
     rows.push([
-      lesson.attended
-        ? callbackButton(limitButtonText(`✔️ تم الاستماع — ${title}`), 'noop', 'success')
-        : callbackButton(
-            limitButtonText(`✅ تأشير تم الاستماع — ${title}`),
-            `attend:${lesson.lesson_id}`,
-            'success'
-          ),
+      callbackButton(
+        limitButtonText(`✅ تأشير تم الاستماع — ${title}`),
+        `attend:${lesson.lesson_id}`,
+        'success'
+      ),
     ]);
   }
   return Markup.inlineKeyboard(rows);
@@ -408,25 +431,42 @@ function clickableUrl(value) {
   return null;
 }
 
-function singleLessonKeyboard(lesson) {
-  const rows = [];
-  const sourceUrl = clickableUrl(lesson.source_url);
-  if (sourceUrl) {
-    rows.push([
-      urlButton(
-        `📢 انتقال إلى دروس اليوم — الدرس ${Number(lesson.lesson_number)}`,
-        sourceUrl
-      ),
-    ]);
+// في القنوات العامة نفتح واجهة القناة نفسها. وفي القنوات الخاصة نستخدم رابط المنشور
+// لأنه المدخل المضمون إلى القناة، لكننا نعرضه مرة واحدة فقط.
+function channelEntryUrl(value) {
+  const url = clickableUrl(value);
+  if (!url) return null;
+  const publicPost = url.match(/^(https?:\/\/t\.me\/)(?!c\/)([A-Za-z0-9_]+)\/\d+(?:[/?#].*)?$/i);
+  return publicPost ? `${publicPost[1]}${publicPost[2]}` : url;
+}
+
+function dailyLessonNotificationKeyboard(lesson) {
+  const channelUrl = channelEntryUrl(lesson && lesson.source_url);
+  if (channelUrl) {
+    return Markup.inlineKeyboard([[urlButton('📢 الانتقال إلى قناة الدروس', channelUrl)]]);
   }
-  rows.push([
-    callbackButton(
-      `✅ تم الاستماع — الدرس ${Number(lesson.lesson_number)}`,
-      `attend:${lesson.id}`,
-      'success'
-    ),
+  return Markup.inlineKeyboard([[callbackButton('📚 عرض دروس اليوم', 'menu_today')]]);
+}
+
+function dailyLessonNotificationText(hasChannelLink) {
+  return (
+    '📢 تم نشر دروس هذا اليوم لمرحلتك.\n' +
+    (hasChannelLink
+      ? 'اضغط «الانتقال إلى قناة الدروس» للاستماع، ثم افتح «📚 دروس اليوم» لتأشير الدروس التي استمعت إليها.'
+      : 'افتح «📚 دروس اليوم» للاستماع وتأشير الدروس التي أكملتها.')
+  );
+}
+
+function singleLessonKeyboard(lesson) {
+  return Markup.inlineKeyboard([
+    [
+      callbackButton(
+        `✅ تم الاستماع — الدرس ${Number(lesson.lesson_number)}`,
+        `attend:${lesson.id}`,
+        'success'
+      ),
+    ],
   ]);
-  return Markup.inlineKeyboard(rows);
 }
 
 async function showTodayLessons(ctx, options = {}) {
@@ -442,14 +482,16 @@ async function showTodayLessons(ctx, options = {}) {
     return replyStudentScreen(
       ctx,
       student,
-      'لا توجد دروس مفعّلة حاليًا لمرحلتك. تحقق لاحقًا.',
+      options.confirmation
+        ? `${options.confirmation}\n\nلا توجد دروس أخرى غير مؤشَّرة حاليًا لمرحلتك.`
+        : 'لا توجد دروس غير مؤشَّرة حاليًا لمرحلتك. تحقق لاحقًا.',
       studentMainMenu()
     );
   }
 
   const heading = options.confirmation
     ? `${options.confirmation}\n\nدروس اليوم المتاحة لمرحلتك:`
-    : 'دروس اليوم المتاحة لمرحلتك:\nانتقل إلى منشور الدرس في قناة مرحلتك، ثم أشّر «تم الاستماع».';
+    : 'دروس اليوم غير المؤشَّرة لمرحلتك:\nانتقل إلى قناة الدروس، ثم أشّر كل درس استمعت إليه.';
   const keyboard = lessonKeyboard(lessons);
 
   if (options.edit) {
@@ -1554,20 +1596,19 @@ bot.action(/admin_act_subject:(\d+)/, async (ctx) => {
   const activated = await db.activateLesson(subjectId, LESSON_ACTIVE_HOURS, 'manual', null);
   if (!activated) return ctx.reply('تعذر التفعيل: المرحلة مؤرشفة أو لا يوجد لها موسم نشط.');
   const lesson = await db.getLessonById(activated.id);
-  const notification =
-    `📢 تم تفعيل درس جديد في مادة «${subject.name}» — الدرس رقم ${Number(lesson.lesson_number)}.\n` +
-    `افتح «📚 دروس اليوم» بعد الاستماع لتسجيل حضورك.\n` +
-    `متاح لمدة ${LESSON_ACTIVE_HOURS} ساعة.`;
+  const notificationDate = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
+  const hasChannelLink = Boolean(channelEntryUrl(lesson.source_url));
   await notifyReturningFromLeave(subject.stage_id);
   const delivery = await sendToStageStudents(
     subject.stage_id,
-    notification,
-    singleLessonKeyboard(lesson),
-    { skipOnLeave: true }
+    dailyLessonNotificationText(hasChannelLink),
+    dailyLessonNotificationKeyboard(lesson),
+    { skipOnLeave: true, dailyLessonNotificationDate: notificationDate }
   );
   return ctx.editMessageText(
     `تم تفعيل الدرس رقم ${Number(lesson.lesson_number)} لمادة «${subject.name}» لمدة ${LESSON_ACTIVE_HOURS} ساعة ✅\n` +
-      `وصل الإشعار إلى ${delivery.delivered} من ${delivery.total} طالب` +
+      `وصل تنبيه دروس اليوم إلى ${delivery.delivered} من ${delivery.total} طالب` +
+      (delivery.alreadyNotifiedToday ? `، وسبق تنبيه ${delivery.alreadyNotifiedToday} اليوم` : '') +
       (delivery.skippedOnLeave ? `، وتُخطّي ${delivery.skippedOnLeave} في إجازة.` : '.')
   );
 });
@@ -1892,19 +1933,20 @@ async function handleChannelLesson(ctx) {
     // نبّه أولًا من انتهت إجازتهم توًّا (أول درس بعد الإجازة) بضرورة متابعة الدروس الفائتة.
     await notifyReturningFromLeave(channel.stage_id);
 
+    const notificationDate = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
+    const hasChannelLink = Boolean(channelEntryUrl(sourceUrl));
     const delivery = await sendToStageStudents(
       channel.stage_id,
-      `📢 تم نشر درس جديد في مادة «${subject.name}» — الدرس رقم ${Number(lesson.lesson_number)}.\n` +
-        `${sourceUrl ? 'اضغط «انتقال إلى دروس اليوم» لفتح منشور الدرس في قناة مرحلتك، ثم أشّر «تم الاستماع».' : 'افتح «📚 دروس اليوم» ثم أشّر «تم الاستماع».'}\n` +
-        `متاح لمدة ${LESSON_ACTIVE_HOURS} ساعة من الآن.`,
-      singleLessonKeyboard(lesson),
-      { skipOnLeave: true }
+      dailyLessonNotificationText(hasChannelLink),
+      dailyLessonNotificationKeyboard(lesson),
+      { skipOnLeave: true, dailyLessonNotificationDate: notificationDate }
     );
 
     await notifyAdmins(
       `✅ فُعّل تلقائيًا الدرس رقم ${Number(lesson.lesson_number)} لمادة «${subject.name}» من قناة «${
         channel.title || chatId
-      }». وصل الإشعار إلى ${delivery.delivered} من ${delivery.total} طالب` +
+      }». وصل تنبيه دروس اليوم إلى ${delivery.delivered} من ${delivery.total} طالب` +
+        (delivery.alreadyNotifiedToday ? `، وسبق تنبيه ${delivery.alreadyNotifiedToday} اليوم` : '') +
         (delivery.skippedOnLeave ? ` (تُخطّي ${delivery.skippedOnLeave} في إجازة).` : '.')
     );
   } catch (err) {
@@ -2040,6 +2082,10 @@ module.exports = {
   buildAdminAbsenceMessages,
   lessonKeyboard,
   singleLessonKeyboard,
+  channelEntryUrl,
+  dailyLessonNotificationKeyboard,
+  dailyLessonNotificationText,
+  sendToStageStudents,
   formatStudentSeasonActivity,
   buttonStyle,
   studentUiMessageKind,
