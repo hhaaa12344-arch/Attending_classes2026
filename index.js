@@ -188,7 +188,7 @@ function studentActionsKeyboard(studentId, isActive = true) {
 async function sendToStageStudents(stageId, text, extra = undefined, options = {}) {
   const { excludeStudentIds = new Set(), skipOnLeave = false } = options;
   const students = await db.getStudentsByStage(stageId);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
   let delivered = 0;
   let skippedOnLeave = 0;
   for (const st of students) {
@@ -211,8 +211,10 @@ async function sendToStageStudents(stageId, text, extra = undefined, options = {
 
 // عند نشر درس جديد: نبّه الطلبة الذين انتهت إجازتهم توًّا بضرورة متابعة الدروس الفائتة أيضًا.
 async function notifyReturningFromLeave(stageId) {
-  const returning = await db.getStudentsReturningFromLeave(stageId);
+  const today = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
+  const returning = await db.getStudentsReturningFromLeave(stageId, today);
   for (const st of returning) {
+    let delivered = false;
     try {
       const pending = await db.getUnmarkedLessonsForStudent(st.id);
       await bot.telegram.sendMessage(
@@ -221,10 +223,11 @@ async function notifyReturningFromLeave(stageId) {
           'منها دروس الإجازة التي لا تُحتسب غيابًا.\n' +
           'لا يمكن تأشير أي درس انتهت مهلته؛ افتح «📚 دروس اليوم» لعرض الدروس التي ما زالت مهلتها سارية.'
       );
+      delivered = true;
     } catch (err) {
       console.warn(`تعذر تنبيه الطالب العائد من إجازة ${st.id}:`, err.description || err.message);
     }
-    await db.markLeaveBacklogNotified(st.leave_id);
+    if (delivered) await db.markLeaveBacklogNotified(st.leave_id);
     await new Promise((r) => setTimeout(r, 40));
   }
 }
@@ -313,8 +316,14 @@ async function deleteMessageQuietly(chatId, messageId) {
   }
 }
 
-async function beginStudentScreen(ctx, student) {
-  const messageIds = await db.takeStudentUiMessages(student.id);
+function studentUiMessageKind(extra) {
+  return extra && extra.reply_markup && Array.isArray(extra.reply_markup.keyboard)
+    ? 'menu'
+    : 'screen';
+}
+
+async function beginStudentScreen(ctx, student, options = {}) {
+  const messageIds = await db.takeStudentUiMessages(student.id, Boolean(options.includeMenu));
   for (const messageId of messageIds) {
     await deleteMessageQuietly(ctx.chat.id, messageId);
   }
@@ -323,17 +332,20 @@ async function beginStudentScreen(ctx, student) {
   }
 }
 
-async function trackStudentUiMessage(student, message) {
+async function trackStudentUiMessage(student, message, messageKind = 'screen') {
   if (message && Number.isSafeInteger(Number(message.message_id))) {
-    await db.recordStudentUiMessage(student.id, Number(message.message_id));
+    await db.recordStudentUiMessage(student.id, Number(message.message_id), messageKind);
   }
   return message;
 }
 
 async function replyStudentScreen(ctx, student, text, extra = undefined, options = {}) {
-  if (options.clear !== false) await beginStudentScreen(ctx, student);
+  const messageKind = studentUiMessageKind(extra);
+  if (options.clear !== false) {
+    await beginStudentScreen(ctx, student, { includeMenu: messageKind === 'menu' });
+  }
   const message = await ctx.reply(text, extra);
-  return trackStudentUiMessage(student, message);
+  return trackStudentUiMessage(student, message, messageKind);
 }
 
 function formatStudentSeasonActivity(activity) {
@@ -836,6 +848,7 @@ bot.on('text', async (ctx, next) => {
   // -------- إضافة مرحلة --------
   if (state.action === 'admin_awaiting_stage_name') {
     const name = ctx.message.text.trim();
+    if (!name) return ctx.reply('أرسل اسمًا غير فارغ للمرحلة أو اضغط «↩️ رجوع».');
     try {
       await db.addStage(name);
     } catch (err) {
@@ -849,6 +862,7 @@ bot.on('text', async (ctx, next) => {
   // -------- تعديل اسم مرحلة --------
   if (state.action === 'admin_awaiting_stage_rename') {
     const name = ctx.message.text.trim();
+    if (!name) return ctx.reply('أرسل اسمًا غير فارغ للمرحلة أو اضغط «↩️ رجوع».');
     try {
       await db.updateStageName(state.stageId, name);
     } catch (err) {
@@ -882,6 +896,7 @@ bot.on('text', async (ctx, next) => {
   // -------- إضافة مادة: الاسم --------
   if (state.action === 'admin_awaiting_subject_name') {
     const name = ctx.message.text.trim();
+    if (!name) return ctx.reply('أرسل اسمًا غير فارغ للمادة أو اضغط «↩️ رجوع».');
     userState.set(ctx.from.id, { action: 'admin_awaiting_subject_hashtag', stageId: state.stageId, name });
     return ctx.reply(
       'أدخل الهاشتاغ الذي سيُستخدم لهذه المادة داخل منشورات القناة (بدون # وبدون مسافات)، أو أرسل "تخطي" لتوليده تلقائيًا من الاسم:'
@@ -892,6 +907,7 @@ bot.on('text', async (ctx, next) => {
   if (state.action === 'admin_awaiting_subject_hashtag') {
     const input = ctx.message.text.trim();
     const hashtag = normalizeHashtag(input === 'تخطي' ? state.name : input);
+    if (!hashtag) return ctx.reply('أرسل هاشتاغًا صحيحًا يحتوي حروفًا أو أرقامًا، أو أرسل «تخطي».');
     try {
       await db.addSubject(state.stageId, state.name, hashtag);
     } catch (err) {
@@ -938,6 +954,9 @@ bot.on('text', async (ctx, next) => {
   // -------- تعديل اسم طالب --------
   if (state.action === 'admin_awaiting_new_name') {
     const name = ctx.message.text.trim();
+    if (name.split(/\s+/).length < 4) {
+      return ctx.reply('أرسل الاسم الرباعي الكامل للطالب (أربعة أسماء على الأقل)، أو اضغط «↩️ رجوع».');
+    }
     await db.updateStudentName(state.studentId, name);
     userState.delete(ctx.from.id);
     return ctx.reply(`تم تحديث الاسم إلى: ${name} ✅`, adminMainMenu());
@@ -1005,7 +1024,10 @@ bot.action(/my_report_season:(\d+)/, async (ctx) => {
 async function openStudentSeasonActivity(ctx) {
   const student = await db.getStudentByTelegramId(ctx.from.id);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
-  const activity = await db.getStudentCurrentSeasonActivity(student.id);
+  const activity = await db.getStudentCurrentSeasonActivity(
+    student.id,
+    currentDateInTimeZone(ATTENDANCE_TIME_ZONE)
+  );
   return replyStudentScreen(ctx, student, formatStudentSeasonActivity(activity), studentMainMenu());
 }
 
@@ -1022,7 +1044,10 @@ async function openLeaveRequest(ctx) {
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   if (!student.is_active) return ctx.reply('حسابك مؤرشف حاليًا.');
 
-  const active = await db.getActiveOrUpcomingLeave(student.id);
+  const active = await db.getActiveOrUpcomingLeave(
+    student.id,
+    currentDateInTimeZone(ATTENDANCE_TIME_ZONE)
+  );
   const pending = await db.getPendingLeave(student.id);
   if (active) {
     return replyStudentScreen(
@@ -1172,6 +1197,13 @@ bot.action(/attend:(\d+)/, async (ctx) => {
   }
   const inserted = await db.markAttendance(student.id, lessonId);
   if (!inserted) {
+    const latestLesson = await db.getLessonById(lessonId);
+    if (!latestLesson || new Date(latestLesson.active_until) < new Date()) {
+      return ctx.answerCbQuery(`انتهت مدة تسجيل الحضور لهذا الدرس (${LESSON_ACTIVE_HOURS} ساعة).`);
+    }
+    if (!(await db.canStudentAttendLesson(student.id, lessonId))) {
+      return ctx.answerCbQuery('يجب إكمال اختيار الموسم الجديد أولًا عبر /start.');
+    }
     return ctx.answerCbQuery('تم تسجيل حضورك مسبقًا لهذا الدرس ✅');
   }
   await ctx.answerCbQuery('تم تسجيل حضورك ✅');
@@ -1526,10 +1558,17 @@ bot.action(/admin_act_subject:(\d+)/, async (ctx) => {
     `📢 تم تفعيل درس جديد في مادة «${subject.name}» — الدرس رقم ${Number(lesson.lesson_number)}.\n` +
     `افتح «📚 دروس اليوم» بعد الاستماع لتسجيل حضورك.\n` +
     `متاح لمدة ${LESSON_ACTIVE_HOURS} ساعة.`;
-  const delivery = await sendToStageStudents(subject.stage_id, notification, singleLessonKeyboard(lesson));
+  await notifyReturningFromLeave(subject.stage_id);
+  const delivery = await sendToStageStudents(
+    subject.stage_id,
+    notification,
+    singleLessonKeyboard(lesson),
+    { skipOnLeave: true }
+  );
   return ctx.editMessageText(
     `تم تفعيل الدرس رقم ${Number(lesson.lesson_number)} لمادة «${subject.name}» لمدة ${LESSON_ACTIVE_HOURS} ساعة ✅\n` +
-      `وصل الإشعار إلى ${delivery.delivered} من ${delivery.total} طالب.`
+      `وصل الإشعار إلى ${delivery.delivered} من ${delivery.total} طالب` +
+      (delivery.skippedOnLeave ? `، وتُخطّي ${delivery.skippedOnLeave} في إجازة.` : '.')
   );
 });
 
@@ -1742,6 +1781,7 @@ bot.action(/stu_hard:(\d+)/, async (ctx) => {
 });
 
 bot.action('admin_cancel_noop', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
   await ctx.answerCbQuery('تم الإلغاء');
   return ctx.editMessageText('تم إلغاء العملية.');
 });
@@ -1879,13 +1919,19 @@ bot.on('edited_channel_post', handleChannelLesson);
 // ---------------------------------------------------------------------------
 // تذكير تلقائي للطلبة الذين لم يسجلوا حضورًا قبل انتهاء المهلة
 // ---------------------------------------------------------------------------
+let reminderCheckRunning = false;
+
 async function checkReminders() {
+  if (reminderCheckRunning) return;
+  reminderCheckRunning = true;
   try {
     const lessons = await db.getLessonsNeedingReminder();
+    const today = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
     for (const lesson of lessons) {
       const students = await db.getNonAttendedStudentsForLesson(lesson.id, lesson.stage_id);
       const hoursLeft = Math.max(1, Math.round((new Date(lesson.active_until) - new Date()) / 3600000));
       for (const st of students) {
+        if (await db.isStudentOnLeave(st.id, today)) continue;
         try {
           await bot.telegram.sendMessage(
             st.telegram_id,
@@ -1903,6 +1949,8 @@ async function checkReminders() {
     }
   } catch (err) {
     console.error('خطأ أثناء فحص التذكيرات:', err);
+  } finally {
+    reminderCheckRunning = false;
   }
 }
 
@@ -1994,4 +2042,5 @@ module.exports = {
   singleLessonKeyboard,
   formatStudentSeasonActivity,
   buttonStyle,
+  studentUiMessageKind,
 };

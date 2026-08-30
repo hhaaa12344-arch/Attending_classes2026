@@ -141,9 +141,17 @@ async function initSchema() {
     CREATE TABLE IF NOT EXISTS student_ui_messages (
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
       message_id BIGINT NOT NULL,
+      message_kind TEXT NOT NULL DEFAULT 'screen',
       created_at TIMESTAMP NOT NULL DEFAULT now(),
       PRIMARY KEY(student_id, message_id)
     );
+
+    -- عند الترقية من 2.4.1 نعامل الرسائل القديمة كرسائل قائمة حتى لا تختفي
+    -- لوحة الطالب في أول ضغط بعد التحديث. الجداول الجديدة تبدأ بنوع screen أعلاه.
+    ALTER TABLE student_ui_messages ADD COLUMN IF NOT EXISTS message_kind TEXT;
+    UPDATE student_ui_messages SET message_kind='menu' WHERE message_kind IS NULL;
+    ALTER TABLE student_ui_messages ALTER COLUMN message_kind SET DEFAULT 'screen';
+    ALTER TABLE student_ui_messages ALTER COLUMN message_kind SET NOT NULL;
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_stage_seasons_one_active
       ON stage_seasons(stage_id) WHERE is_active=true;
@@ -486,7 +494,9 @@ async function createStudent(telegramId, fullName, stageId) {
   try {
     await client.query('BEGIN');
     const stageSeason = await client.query(
-      'SELECT id FROM stage_seasons WHERE stage_id=$1 AND is_active=true FOR UPDATE',
+      `SELECT ss.id FROM stage_seasons ss
+       JOIN stages st ON st.id=ss.stage_id AND st.is_active=true
+       WHERE ss.stage_id=$1 AND ss.is_active=true FOR UPDATE OF ss`,
       [stageId]
     );
     if (!stageSeason.rows[0]) throw new Error('لا يوجد موسم نشط لهذه المرحلة.');
@@ -958,7 +968,12 @@ const getLessonById = (lessonId) =>
 const markAttendance = (studentId, lessonId) =>
   pool
     .query(
-      `INSERT INTO attendance(student_id, lesson_id) VALUES($1,$2)
+      `INSERT INTO attendance(student_id, lesson_id)
+       SELECT $1, l.id
+       FROM lessons l
+       JOIN enrollments e
+         ON e.stage_season_id=l.stage_season_id AND e.student_id=$1 AND e.status='active'
+       WHERE l.id=$2 AND l.active_until >= now()
        ON CONFLICT (student_id, lesson_id) DO NOTHING RETURNING *`,
       [studentId, lessonId]
     )
@@ -1064,13 +1079,14 @@ const isStudentOnLeave = (studentId, onDate) =>
     .then((r) => Boolean(r.rows[0]));
 
 // إجازة الطالب الحالية أو القادمة (موافق عليها ولم تنتهِ)
-const getActiveOrUpcomingLeave = (studentId) =>
+const getActiveOrUpcomingLeave = (studentId, onDate = null) =>
   pool
     .query(
       `SELECT * FROM student_leaves
-       WHERE student_id=$1 AND status='approved' AND end_date >= CURRENT_DATE
+       WHERE student_id=$1 AND status='approved'
+         AND end_date >= COALESCE($2::date, CURRENT_DATE)
        ORDER BY start_date LIMIT 1`,
-      [studentId]
+      [studentId, onDate]
     )
     .then((r) => r.rows[0]);
 
@@ -1085,7 +1101,7 @@ const getPendingLeave = (studentId) =>
 
 // طلبة كانوا مجازين وانتهت إجازتهم، ولم يُنبَّهوا بعد بضرورة متابعة الدروس الفائتة.
 // يُستدعى عند تفعيل أول درس بعد انقضاء الإجازة.
-const getStudentsReturningFromLeave = (stageId) =>
+const getStudentsReturningFromLeave = (stageId, onDate = null) =>
   pool
     .query(
       `SELECT DISTINCT st.id, st.telegram_id, st.full_name, sl.id AS leave_id
@@ -1093,8 +1109,8 @@ const getStudentsReturningFromLeave = (stageId) =>
        JOIN students st ON st.id=sl.student_id
        WHERE st.stage_id=$1 AND st.is_active=true
          AND sl.status='approved' AND sl.backlog_notified=false
-         AND sl.end_date < CURRENT_DATE`,
-      [stageId]
+         AND sl.end_date < COALESCE($2::date, CURRENT_DATE)`,
+      [stageId, onDate]
     )
     .then((r) => r.rows);
 
@@ -1300,24 +1316,26 @@ const markAdminAbsenceAlertsSent = (attendanceDayIds) => {
 };
 
 // ---------- واجهة الطالب وسجل الموسم الحالي ----------
-const recordStudentUiMessage = (studentId, messageId) =>
+const recordStudentUiMessage = (studentId, messageId, messageKind = 'screen') =>
   pool.query(
-    `INSERT INTO student_ui_messages(student_id, message_id) VALUES($1,$2)
-     ON CONFLICT (student_id, message_id) DO NOTHING`,
-    [studentId, messageId]
+    `INSERT INTO student_ui_messages(student_id, message_id, message_kind) VALUES($1,$2,$3)
+     ON CONFLICT (student_id, message_id)
+     DO UPDATE SET message_kind=EXCLUDED.message_kind`,
+    [studentId, messageId, messageKind === 'menu' ? 'menu' : 'screen']
   );
 
-// حذف السجل وإرجاع المعرفات في عملية واحدة؛ حتى لا تتراكم محاولات حذف رسالة تعذر حذفها.
-const takeStudentUiMessages = (studentId) =>
+// رسائل القائمة السفلية تُحفظ عند فتح الشاشات الداخلية، وتُستبدل فقط عند إرسال قائمة جديدة.
+const takeStudentUiMessages = (studentId, includeMenu = false) =>
   pool
     .query(
-      `DELETE FROM student_ui_messages WHERE student_id=$1
+      `DELETE FROM student_ui_messages
+       WHERE student_id=$1 AND ($2::boolean OR message_kind <> 'menu')
        RETURNING message_id`,
-      [studentId]
+      [studentId, Boolean(includeMenu)]
     )
     .then((r) => r.rows.map((row) => Number(row.message_id)).filter(Number.isSafeInteger));
 
-async function getStudentCurrentSeasonActivity(studentId) {
+async function getStudentCurrentSeasonActivity(studentId, onDate = null) {
   const currentResult = await pool.query(
     `SELECT e.stage_season_id, e.started_at, e.ended_at,
             COALESCE(ss.stage_name_snapshot, st.name) AS stage_name,
@@ -1339,9 +1357,9 @@ async function getStudentCurrentSeasonActivity(studentId) {
        FROM student_leaves sl
        WHERE sl.student_id=$1 AND sl.status='approved'
          AND sl.end_date >= $2::date
-         AND sl.start_date <= COALESCE($3::date, CURRENT_DATE)
+         AND sl.start_date <= COALESCE($3::date, $4::date, CURRENT_DATE)
        ORDER BY sl.start_date DESC, sl.id DESC`,
-      [studentId, current.started_at, current.ended_at]
+      [studentId, current.started_at, current.ended_at, onDate]
     ),
     pool.query(
       `SELECT d.id, d.attendance_date, d.student_alert_sent_at
@@ -1373,7 +1391,7 @@ const getStageSeasonReport = (stageSeasonId) =>
               r.season_number, r.recency_rank, r.is_active, r.started_at, r.ended_at,
               sub.id AS subject_id, sub.name AS subject_name,
               COUNT(l.id) AS total_lessons,
-              COUNT(a.id) AS attended_lessons
+              COUNT(a.id) FILTER (WHERE a.listened_at <= l.active_until) AS attended_lessons
        FROM enrollments e
        JOIN students st ON st.id=e.student_id
        JOIN ranked r ON r.id=e.stage_season_id
@@ -1400,7 +1418,7 @@ const getStudentSeasonReport = (studentId, stageSeasonId = null) =>
               e.status AS enrollment_status,
               sub.id AS subject_id, sub.name AS subject_name,
               COUNT(l.id) AS total_lessons,
-              COUNT(a.id) AS attended_lessons
+              COUNT(a.id) FILTER (WHERE a.listened_at <= l.active_until) AS attended_lessons
        FROM enrollments e
        JOIN students st ON st.id=e.student_id
        JOIN ranked r ON r.id=e.stage_season_id
