@@ -198,6 +198,12 @@ async function initSchema() {
 
     ALTER TABLE students ADD COLUMN IF NOT EXISTS welcomed_at TIMESTAMP;
 
+    -- سجل الترحيلات التي تُنفَّذ مرة واحدة فقط
+    CREATE TABLE IF NOT EXISTS applied_migrations (
+      key TEXT PRIMARY KEY,
+      applied_at TIMESTAMP NOT NULL DEFAULT now()
+    );
+
     -- نوع المرحلة: 'lessons_only' حضور دروس فقط، أو 'full' مع مباحثات وتقارير وامتحانات.
     -- المراحل المُنشأة قبل هذه الميزة تُعتبر كاملة حفاظًا على سلوكها الحالي.
     ALTER TABLE stages ADD COLUMN IF NOT EXISTS stage_type TEXT NOT NULL DEFAULT 'full';
@@ -279,6 +285,21 @@ async function initSchema() {
     SET stage_season_id = ss.id
     FROM stage_seasons ss
     WHERE ss.stage_id = c.stage_id AND ss.is_active = true AND c.stage_season_id IS NULL;
+
+    -- ترحيل لمرة واحدة: التسجيلات التي أُنشئت آليًا عند ترقية قاعدة قديمة كان تاريخ بدئها
+    -- لحظة الترقية، فتختفي دروس الطالب السابقة من تقاريره. نُرجعها إلى بداية موسم مرحلته.
+    WITH todo AS (
+      SELECT 1 WHERE NOT EXISTS (
+        SELECT 1 FROM applied_migrations WHERE key = 'enrollment_started_at_backfill'
+      )
+    )
+    UPDATE enrollments e
+    SET started_at = ss.started_at
+    FROM stage_seasons ss, todo
+    WHERE ss.id = e.stage_season_id AND e.started_at > ss.started_at;
+
+    INSERT INTO applied_migrations(key) VALUES ('enrollment_started_at_backfill')
+    ON CONFLICT (key) DO NOTHING;
 
     INSERT INTO enrollments(student_id, stage_season_id, status, started_at)
     SELECT st.id, ss.id, 'active', st.created_at
@@ -1158,6 +1179,7 @@ const listTeacherSubjects = (teacherId) =>
               (SELECT COUNT(*) FROM enrollments e
                WHERE e.stage_season_id=ss.id AND e.status='active') AS student_count
        FROM teaching_assignments ta
+       JOIN teachers tt ON tt.id=ta.teacher_id AND tt.is_active=true
        JOIN subjects sub ON sub.id=ta.subject_id
        JOIN stage_seasons ss ON ss.id=ta.stage_season_id
        JOIN stages sg ON sg.id=ss.stage_id AND sg.stage_type <> 'lessons_only'
@@ -1174,7 +1196,7 @@ const listSubjectTeachers = (subjectId) =>
     .query(
       `SELECT ta.id AS assignment_id, t.id AS teacher_id, t.full_name, t.telegram_id
        FROM teaching_assignments ta
-       JOIN teachers t ON t.id=ta.teacher_id
+       JOIN teachers t ON t.id=ta.teacher_id AND t.is_active=true
        JOIN stage_seasons ss ON ss.id=ta.stage_season_id AND ss.is_active=true
        WHERE ta.subject_id=$1 ORDER BY t.full_name`,
       [subjectId]
@@ -1187,10 +1209,12 @@ const getSubjectAttendanceForTeacher = (subjectId, stageSeasonId) =>
     .query(
       `SELECT st.id AS student_id, st.full_name,
               COUNT(l.id) AS total_lessons,
-              COUNT(a.id) AS attended_lessons
+              -- يُحتسب الحضور المؤشَّر ضمن مهلة الدرس فقط، كما في تقريري الطالب والأدمن
+              COUNT(a.id) FILTER (WHERE a.listened_at <= l.active_until) AS attended_lessons
        FROM enrollments e
        JOIN students st ON st.id=e.student_id
        LEFT JOIN lessons l ON l.subject_id=$1 AND l.stage_season_id=$2
+            AND l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
        LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=st.id
        WHERE e.stage_season_id=$2 AND e.status='active'
        GROUP BY st.id, st.full_name
@@ -1212,9 +1236,10 @@ const getInstituteOverview = () =>
         (SELECT COUNT(*) FROM teachers WHERE is_active=true AND telegram_id IS NOT NULL) AS linked_teachers,
         (SELECT COUNT(*) FROM channels c
          JOIN stage_seasons ss2 ON ss2.id=c.stage_season_id AND ss2.is_active=true) AS active_channels,
-        (SELECT COUNT(*) FROM lessons WHERE activated_at::date = CURRENT_DATE) AS lessons_today,
-        (SELECT COUNT(*) FROM attendance WHERE listened_at::date = CURRENT_DATE) AS attendance_today,
-        (SELECT COUNT(*) FROM mubahatha_sessions WHERE opened_at::date = CURRENT_DATE) AS sessions_today`
+        (SELECT COUNT(*) FROM lessons WHERE (activated_at AT TIME ZONE 'UTC' AT TIME ZONE $1)::date = ((now() AT TIME ZONE $1))::date) AS lessons_today,
+        (SELECT COUNT(*) FROM attendance WHERE (listened_at AT TIME ZONE 'UTC' AT TIME ZONE $1)::date = ((now() AT TIME ZONE $1))::date) AS attendance_today,
+        (SELECT COUNT(*) FROM mubahatha_sessions WHERE (opened_at AT TIME ZONE 'UTC' AT TIME ZONE $1)::date = ((now() AT TIME ZONE $1))::date) AS sessions_today`,
+      [process.env.SCHEDULE_TIMEZONE || 'Asia/Baghdad']
     )
     .then((r) => r.rows[0]);
 
@@ -1347,6 +1372,8 @@ const getActiveLessonsForStudent = (stageId, studentId) =>
        JOIN enrollments e
          ON e.stage_season_id=l.stage_season_id AND e.student_id=$2 AND e.status='active'
        WHERE s.stage_id = $1 AND l.active_until > now()
+         AND l.activated_at >= e.started_at
+         AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
          AND NOT EXISTS(
            SELECT 1 FROM attendance a WHERE a.lesson_id=l.id AND a.student_id=$2
          )
@@ -1397,6 +1424,8 @@ const markAttendance = (studentId, lessonId) =>
        JOIN enrollments e
          ON e.stage_season_id=l.stage_season_id AND e.student_id=$1 AND e.status='active'
        WHERE l.id=$2 AND l.active_until >= now()
+         AND l.activated_at >= e.started_at
+         AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
        ON CONFLICT (student_id, lesson_id) DO NOTHING RETURNING *`,
       [studentId, lessonId]
     )
@@ -1407,7 +1436,10 @@ const canStudentAttendLesson = (studentId, lessonId) =>
     .query(
       `SELECT 1 FROM lessons l
        JOIN enrollments e ON e.stage_season_id=l.stage_season_id
-       WHERE l.id=$2 AND e.student_id=$1 AND e.status='active' LIMIT 1`,
+       WHERE l.id=$2 AND e.student_id=$1 AND e.status='active'
+         AND l.activated_at >= e.started_at
+         AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
+       LIMIT 1`,
       [studentId, lessonId]
     )
     .then((r) => Boolean(r.rows[0]));
@@ -1971,6 +2003,7 @@ const getStageSeasonReport = (stageSeasonId, timeZone = 'Asia/Baghdad') =>
        JOIN ranked r ON r.id=e.stage_season_id
        JOIN subjects sub ON sub.stage_id=r.stage_id
        LEFT JOIN lessons l ON l.subject_id=sub.id AND l.stage_season_id=r.id
+              AND l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
        LEFT JOIN attendance a ON a.lesson_id = l.id AND a.student_id = st.id
        WHERE r.id=$1
        GROUP BY st.id, st.full_name, r.id, r.stage_id, r.stage_name_snapshot, r.current_stage_name,
@@ -2020,6 +2053,7 @@ const getStudentSeasonReport = (studentId, stageSeasonId = null, timeZone = 'Asi
        JOIN ranked r ON r.id=e.stage_season_id
        JOIN subjects sub ON sub.stage_id=r.stage_id
        LEFT JOIN lessons l ON l.subject_id=sub.id AND l.stage_season_id=r.id
+              AND l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
        LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=st.id
        WHERE st.id=$1 ${stageSeasonId ? 'AND r.id=$2' : ''}
        GROUP BY st.id, st.full_name, r.id, r.stage_id, r.stage_name_snapshot, r.current_stage_name,
