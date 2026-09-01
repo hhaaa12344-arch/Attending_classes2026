@@ -197,6 +197,50 @@ async function initSchema() {
     ALTER TABLE seasons DROP CONSTRAINT IF EXISTS seasons_name_key;
 
     ALTER TABLE students ADD COLUMN IF NOT EXISTS welcomed_at TIMESTAMP;
+
+    -- نوع المرحلة: 'lessons_only' حضور دروس فقط، أو 'full' مع مباحثات وتقارير وامتحانات.
+    -- المراحل المُنشأة قبل هذه الميزة تُعتبر كاملة حفاظًا على سلوكها الحالي.
+    ALTER TABLE stages ADD COLUMN IF NOT EXISTS stage_type TEXT NOT NULL DEFAULT 'full';
+
+    -- كود نقل حساب الطالب عند تغييره هاتفه أو حساب تليجرام
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS transfer_code TEXT;
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS transfer_code_at TIMESTAMP;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_students_transfer_code
+      ON students(transfer_code) WHERE transfer_code IS NOT NULL;
+
+    -- ربط القناة بموسم المرحلة: يجعل قنوات المواسم المنتهية تتوقف تلقائيًا عن تفعيل الدروس.
+    ALTER TABLE channels ADD COLUMN IF NOT EXISTS stage_season_id
+      INTEGER REFERENCES stage_seasons(id) ON DELETE CASCADE;
+    CREATE INDEX IF NOT EXISTS idx_channels_stage_season ON channels(stage_season_id);
+
+    -- ---------- الأساتذة ----------
+    -- الأستاذ كيان مستقل عن الأدمن: يُعرَّف من لوحة الأدمن ثم يربط حسابه بكود تفعيل لمرة واحدة،
+    -- فلا يحتاج الأدمن لمعرفة معرّف تليجرام الخاص به مسبقًا.
+    CREATE TABLE IF NOT EXISTS teachers (
+      id SERIAL PRIMARY KEY,
+      full_name TEXT NOT NULL,
+      telegram_id BIGINT UNIQUE,
+      link_code TEXT UNIQUE,
+      phone TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMP NOT NULL DEFAULT now(),
+      linked_at TIMESTAMP
+    );
+
+    -- إسناد أستاذ لمادة داخل موسم محدد؛ فيمكن أن يتغير أستاذ المادة بين موسم وآخر
+    -- مع بقاء سجل الموسم السابق منسوبًا لأستاذه الحقيقي.
+    CREATE TABLE IF NOT EXISTS teaching_assignments (
+      id SERIAL PRIMARY KEY,
+      teacher_id INTEGER NOT NULL REFERENCES teachers(id) ON DELETE CASCADE,
+      subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+      stage_season_id INTEGER NOT NULL REFERENCES stage_seasons(id) ON DELETE CASCADE,
+      assigned_at TIMESTAMP NOT NULL DEFAULT now(),
+      UNIQUE(subject_id, stage_season_id, teacher_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_teach_assign_teacher ON teaching_assignments(teacher_id);
+    CREATE INDEX IF NOT EXISTS idx_teach_assign_subject ON teaching_assignments(subject_id);
+    CREATE INDEX IF NOT EXISTS idx_teach_assign_season ON teaching_assignments(stage_season_id);
     ALTER TABLE students ADD COLUMN IF NOT EXISTS official_confirmed_at TIMESTAMP;
 
     -- «السجل السابق» اسم مخصص لترحيل بيانات نسخة قديمة فقط.
@@ -229,6 +273,12 @@ async function initSchema() {
       ORDER BY ss.started_at, ss.id LIMIT 1
     ) chosen ON true
     WHERE l.subject_id=sub.id AND l.stage_season_id IS NULL;
+
+    -- القنوات المرتبطة سابقًا بالمرحلة فقط: تُربط بالموسم النشط لتلك المرحلة كي تبقى عاملة.
+    UPDATE channels c
+    SET stage_season_id = ss.id
+    FROM stage_seasons ss
+    WHERE ss.stage_id = c.stage_id AND ss.is_active = true AND c.stage_season_id IS NULL;
 
     INSERT INTO enrollments(student_id, stage_season_id, status, started_at)
     SELECT st.id, ss.id, 'active', st.created_at
@@ -314,7 +364,7 @@ async function initSchema() {
 }
 
 // ---------- المراحل ----------
-async function addStage(name) {
+async function addStage(name, stageType = 'full') {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -323,9 +373,9 @@ async function addStage(name) {
       season = await client.query("INSERT INTO seasons(name) VALUES('الموسم الأول') RETURNING id");
     }
     const stage = await client.query(
-      `INSERT INTO stages(name, sort_order)
-       VALUES($1, COALESCE((SELECT MAX(sort_order) + 1 FROM stages), 1)) RETURNING *`,
-      [name]
+      `INSERT INTO stages(name, sort_order, stage_type)
+       VALUES($1, COALESCE((SELECT MAX(sort_order) + 1 FROM stages), 1), $2) RETURNING *`,
+      [name, stageType === 'lessons_only' ? 'lessons_only' : 'full']
     );
     await client.query(
       'INSERT INTO stage_seasons(season_id, stage_id, stage_name_snapshot, is_active) VALUES($1,$2,$3,true)',
@@ -365,6 +415,12 @@ const getStageById = (stageId) =>
        WHERE st.id=$1`,
       [stageId]
     )
+    .then((r) => r.rows[0]);
+
+const setStageType = (id, stageType) =>
+  pool
+    .query('UPDATE stages SET stage_type=$2 WHERE id=$1 RETURNING *',
+      [id, stageType === 'lessons_only' ? 'lessons_only' : 'full'])
     .then((r) => r.rows[0]);
 
 async function updateStageName(stageId, name) {
@@ -519,7 +575,7 @@ async function hardDeleteSubject(subjectId) {
 const getStudentByTelegramId = (telegramId) =>
   pool
     .query(
-      `SELECT st.*, sg.name AS stage_name FROM students st
+      `SELECT st.*, sg.name AS stage_name, sg.stage_type FROM students st
        JOIN stages sg ON sg.id = st.stage_id
        WHERE st.telegram_id=$1`,
       [telegramId]
@@ -553,6 +609,53 @@ async function createStudent(telegramId, fullName, stageId) {
   } finally {
     client.release();
   }
+}
+
+// ---------- نقل حساب الطالب عند تغيير الهاتف أو حساب تليجرام ----------
+// يولّد الأدمن كودًا لمرة واحدة، يرسله الطالب من حسابه الجديد فينتقل سجله كاملًا
+// (الحضور والمباحثات والامتحانات والدرجات) لأن كل شيء مرتبط بـ students.id لا بمعرّف تليجرام.
+async function generateStudentTransferCode(studentId) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const r = await pool.query(
+        'UPDATE students SET transfer_code=$2, transfer_code_at=now() WHERE id=$1 RETURNING *',
+        [studentId, generateLinkCode()]
+      );
+      return r.rows[0];
+    } catch (err) {
+      if (err.code === '23505') continue;
+      throw err;
+    }
+  }
+  throw new Error('تعذر توليد كود نقل فريد، حاول مرة أخرى.');
+}
+
+// ينقل السجل إلى معرّف تليجرام الجديد ويُبطل الكود بعد الاستعمال.
+async function transferStudentAccount(code, newTelegramId) {
+  const clean = (code || '').trim().toUpperCase();
+  if (!clean) return null;
+
+  const target = await pool
+    .query('SELECT * FROM students WHERE transfer_code=$1 AND is_active=true', [clean])
+    .then((r) => r.rows[0]);
+  if (!target) return null;
+
+  // إن كان الحساب الجديد مسجَّلًا كطالب آخر، نمنع الالتباس بدل دمج سجلين
+  const existing = await pool
+    .query('SELECT * FROM students WHERE telegram_id=$1', [newTelegramId])
+    .then((r) => r.rows[0]);
+  if (existing && existing.id !== target.id) {
+    const err = new Error('هذا الحساب مسجَّل لطالب آخر. راجع الإدارة.');
+    err.code = 'ACCOUNT_IN_USE';
+    throw err;
+  }
+
+  const r = await pool.query(
+    `UPDATE students SET telegram_id=$2, transfer_code=NULL, transfer_code_at=NULL
+     WHERE id=$1 RETURNING *`,
+    [target.id, newTelegramId]
+  );
+  return r.rows[0];
 }
 
 const markWelcomed = (studentId) =>
@@ -664,6 +767,17 @@ async function hardDeleteStudent(id) {
   const result = await pool.query('DELETE FROM students WHERE id=$1 RETURNING id', [id]);
   return result.rowCount > 0;
 }
+
+// موسم المرحلة النشط الذي الطالب مسجَّل فيه حاليًا
+const getStudentActiveStageSeason = (studentId) =>
+  pool
+    .query(
+      `SELECT e.stage_season_id, ss.stage_id FROM enrollments e
+       JOIN stage_seasons ss ON ss.id=e.stage_season_id
+       WHERE e.student_id=$1 AND e.status='active' LIMIT 1`,
+      [studentId]
+    )
+    .then((r) => r.rows[0]);
 
 const getStudentsByStage = (stageId) =>
   pool
@@ -910,24 +1024,274 @@ async function resolveStudentTransition(studentId, decision) {
   }
 }
 
-// ---------- القنوات ----------
-const linkChannel = (stageId, chatId, title) =>
+// ---------- الأساتذة ----------
+// كود التفعيل: يُنشئه الأدمن ويرسله للأستاذ، فيرسله الأستاذ للبوت مرة واحدة ليُربط حسابه.
+function generateLinkCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // بلا أحرف/أرقام متشابهة
+  let code = '';
+  for (let i = 0; i < 8; i += 1) code += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return code;
+}
+
+async function addTeacher(fullName, phone = null) {
+  const name = (fullName || '').trim();
+  if (!name) throw new Error('اسم الأستاذ مطلوب.');
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const r = await pool.query(
+        'INSERT INTO teachers(full_name, phone, link_code) VALUES($1,$2,$3) RETURNING *',
+        [name, phone, generateLinkCode()]
+      );
+      return r.rows[0];
+    } catch (err) {
+      if (err.code === '23505') continue; // تصادم نادر في الكود، أعد التوليد
+      throw err;
+    }
+  }
+  throw new Error('تعذر توليد كود تفعيل فريد، حاول مرة أخرى.');
+}
+
+const getTeacherByTelegramId = (telegramId) =>
+  pool
+    .query('SELECT * FROM teachers WHERE telegram_id=$1 AND is_active=true', [telegramId])
+    .then((r) => r.rows[0]);
+
+const getTeacherById = (id) =>
+  pool.query('SELECT * FROM teachers WHERE id=$1', [id]).then((r) => r.rows[0]);
+
+// ربط حساب تليجرام للأستاذ بكود التفعيل (يُستهلك الكود بعد الربط).
+async function linkTeacherAccount(code, telegramId) {
+  const clean = (code || '').trim().toUpperCase();
+  if (!clean) return null;
+  const existing = await pool.query('SELECT * FROM teachers WHERE telegram_id=$1', [telegramId]);
+  if (existing.rows[0]) {
+    const err = new Error('هذا الحساب مرتبط بأستاذ بالفعل.');
+    err.code = 'ALREADY_LINKED';
+    throw err;
+  }
+  const r = await pool.query(
+    `UPDATE teachers SET telegram_id=$2, linked_at=now(), link_code=NULL
+     WHERE link_code=$1 AND is_active=true RETURNING *`,
+    [clean, telegramId]
+  );
+  return r.rows[0];
+}
+
+const listTeachers = () =>
   pool
     .query(
-      `INSERT INTO channels(stage_id, telegram_chat_id, title) VALUES($1,$2,$3)
-       ON CONFLICT (telegram_chat_id) DO UPDATE SET stage_id=$1, title=$3 RETURNING *`,
-      [stageId, chatId, title]
+      `SELECT t.*,
+              (SELECT COUNT(*) FROM teaching_assignments ta
+               JOIN stage_seasons ss ON ss.id=ta.stage_season_id
+               WHERE ta.teacher_id=t.id AND ss.is_active=true) AS active_subject_count
+       FROM teachers t ORDER BY t.is_active DESC, t.full_name`
+    )
+    .then((r) => r.rows);
+
+const updateTeacherName = (id, name) =>
+  pool.query('UPDATE teachers SET full_name=$1 WHERE id=$2 RETURNING *', [name, id]).then((r) => r.rows[0]);
+
+const setTeacherActive = (id, active) =>
+  pool.query('UPDATE teachers SET is_active=$2 WHERE id=$1 RETURNING *', [id, active]).then((r) => r.rows[0]);
+
+// إعادة توليد كود التفعيل (لو فقده الأستاذ أو أراد الأدمن نقل الحساب لجهاز آخر).
+const regenerateTeacherCode = (id) =>
+  pool
+    .query('UPDATE teachers SET link_code=$2, telegram_id=NULL, linked_at=NULL WHERE id=$1 RETURNING *', [
+      id,
+      generateLinkCode(),
+    ])
+    .then((r) => r.rows[0]);
+
+const hardDeleteTeacher = (id) =>
+  pool.query('DELETE FROM teachers WHERE id=$1 RETURNING id', [id]).then((r) => r.rowCount > 0);
+
+// إسناد المواد: دائمًا ضمن الموسم النشط للمرحلة التي تتبعها المادة.
+async function assignTeacherToSubject(teacherId, subjectId) {
+  const season = await pool.query(
+    `SELECT ss.id FROM subjects sub
+     JOIN stage_seasons ss ON ss.stage_id=sub.stage_id AND ss.is_active=true
+     WHERE sub.id=$1`,
+    [subjectId]
+  );
+  if (!season.rows[0]) {
+    const err = new Error('لا يوجد موسم نشط لمرحلة هذه المادة.');
+    err.code = 'NO_ACTIVE_SEASON';
+    throw err;
+  }
+  return pool
+    .query(
+      `INSERT INTO teaching_assignments(teacher_id, subject_id, stage_season_id)
+       VALUES($1,$2,$3) ON CONFLICT (subject_id, stage_season_id, teacher_id) DO NOTHING RETURNING *`,
+      [teacherId, subjectId, season.rows[0].id]
+    )
+    .then((r) => r.rows[0]);
+}
+
+const unassignTeacherFromSubject = (assignmentId) =>
+  pool.query('DELETE FROM teaching_assignments WHERE id=$1 RETURNING id', [assignmentId]).then((r) => r.rowCount > 0);
+
+// كل مواد المواسم النشطة — يستخدمها الأدمن الذي يملك صلاحيات الأستاذ على كل المواد.
+const listAllActiveSubjects = () =>
+  pool
+    .query(
+      `SELECT sub.id AS subject_id, sub.name AS subject_name,
+              sg.id AS stage_id, COALESCE(ss.stage_name_snapshot, sg.name) AS stage_name,
+              ss.id AS stage_season_id, se.name AS season_name,
+              (SELECT COUNT(*) FROM enrollments e
+               WHERE e.stage_season_id=ss.id AND e.status='active') AS student_count
+       FROM subjects sub
+       JOIN stage_seasons ss ON ss.stage_id=sub.stage_id AND ss.is_active=true
+       JOIN stages sg ON sg.id=ss.stage_id AND sg.stage_type <> 'lessons_only'
+       JOIN seasons se ON se.id=ss.season_id
+       ORDER BY sg.sort_order NULLS LAST, sg.id, sub.name`
+    )
+    .then((r) => r.rows);
+
+// مواد الأستاذ في الموسم النشط (ما يراه في لوحته).
+const listTeacherSubjects = (teacherId) =>
+  pool
+    .query(
+      `SELECT ta.id AS assignment_id, sub.id AS subject_id, sub.name AS subject_name,
+              sg.id AS stage_id, COALESCE(ss.stage_name_snapshot, sg.name) AS stage_name,
+              ss.id AS stage_season_id, se.name AS season_name,
+              (SELECT COUNT(*) FROM enrollments e
+               WHERE e.stage_season_id=ss.id AND e.status='active') AS student_count
+       FROM teaching_assignments ta
+       JOIN subjects sub ON sub.id=ta.subject_id
+       JOIN stage_seasons ss ON ss.id=ta.stage_season_id
+       JOIN stages sg ON sg.id=ss.stage_id AND sg.stage_type <> 'lessons_only'
+       JOIN seasons se ON se.id=ss.season_id
+       WHERE ta.teacher_id=$1 AND ss.is_active=true
+       ORDER BY sg.sort_order NULLS LAST, sg.id, sub.name`,
+      [teacherId]
+    )
+    .then((r) => r.rows);
+
+// أساتذة مادة معيّنة في الموسم النشط (لعرضها للأدمن).
+const listSubjectTeachers = (subjectId) =>
+  pool
+    .query(
+      `SELECT ta.id AS assignment_id, t.id AS teacher_id, t.full_name, t.telegram_id
+       FROM teaching_assignments ta
+       JOIN teachers t ON t.id=ta.teacher_id
+       JOIN stage_seasons ss ON ss.id=ta.stage_season_id AND ss.is_active=true
+       WHERE ta.subject_id=$1 ORDER BY t.full_name`,
+      [subjectId]
+    )
+    .then((r) => r.rows);
+
+// تقرير حضور مادة واحدة لأستاذها: كل طالب وكم درسًا حضر من إجمالي دروس المادة في الموسم.
+const getSubjectAttendanceForTeacher = (subjectId, stageSeasonId) =>
+  pool
+    .query(
+      `SELECT st.id AS student_id, st.full_name,
+              COUNT(l.id) AS total_lessons,
+              COUNT(a.id) AS attended_lessons
+       FROM enrollments e
+       JOIN students st ON st.id=e.student_id
+       LEFT JOIN lessons l ON l.subject_id=$1 AND l.stage_season_id=$2
+       LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=st.id
+       WHERE e.stage_season_id=$2 AND e.status='active'
+       GROUP BY st.id, st.full_name
+       ORDER BY st.full_name`,
+      [subjectId, stageSeasonId]
+    )
+    .then((r) => r.rows);
+
+// ---------- لوحة المعهد ----------
+const getInstituteOverview = () =>
+  pool
+    .query(
+      `SELECT
+        (SELECT COUNT(*) FROM stages WHERE is_active=true) AS active_stages,
+        (SELECT COUNT(*) FROM subjects sub
+         JOIN stage_seasons ss ON ss.stage_id=sub.stage_id AND ss.is_active=true) AS subjects,
+        (SELECT COUNT(*) FROM students WHERE is_active=true) AS active_students,
+        (SELECT COUNT(*) FROM teachers WHERE is_active=true) AS teachers,
+        (SELECT COUNT(*) FROM teachers WHERE is_active=true AND telegram_id IS NOT NULL) AS linked_teachers,
+        (SELECT COUNT(*) FROM channels c
+         JOIN stage_seasons ss2 ON ss2.id=c.stage_season_id AND ss2.is_active=true) AS active_channels,
+        (SELECT COUNT(*) FROM lessons WHERE activated_at::date = CURRENT_DATE) AS lessons_today,
+        (SELECT COUNT(*) FROM attendance WHERE listened_at::date = CURRENT_DATE) AS attendance_today,
+        (SELECT COUNT(*) FROM mubahatha_sessions WHERE opened_at::date = CURRENT_DATE) AS sessions_today`
     )
     .then((r) => r.rows[0]);
 
+const getInstituteStageBreakdown = () =>
+  pool
+    .query(
+      `SELECT COALESCE(ss.stage_name_snapshot, sg.name) AS stage_name, se.name AS season_name,
+              (SELECT COUNT(*) FROM enrollments e WHERE e.stage_season_id=ss.id AND e.status='active') AS student_count,
+              (SELECT COUNT(*) FROM subjects sub WHERE sub.stage_id=sg.id) AS subject_count,
+              (SELECT COUNT(*) FROM lessons l WHERE l.stage_season_id=ss.id) AS lesson_count,
+              (SELECT COUNT(*) FROM mubahatha_groups g WHERE g.stage_season_id=ss.id) AS group_count,
+              (SELECT COUNT(*) FROM channels c WHERE c.stage_season_id=ss.id) AS channel_count
+       FROM stage_seasons ss
+       JOIN stages sg ON sg.id=ss.stage_id
+       JOIN seasons se ON se.id=ss.season_id
+       WHERE ss.is_active=true
+       ORDER BY sg.sort_order NULLS LAST, sg.id`
+    )
+    .then((r) => r.rows);
+
+// ---------- القنوات ----------
+// القناة تُربط بموسم المرحلة (stage_season) لا بالمرحلة نفسها.
+// فائدة ذلك: عند بدء موسم جديد يصبح موسم المرحلة السابق غير نشط، فتتوقف قناته القديمة تلقائيًا
+// عن تفعيل الدروس — وهو ما يناسب إنشاء قنوات جديدة كل موسم، ويمنع أن يُفعِّل منشورٌ قديم
+// (أو تعديلٌ على منشور قديم) درسًا في الموسم الحالي بالخطأ.
+const linkChannel = async (stageId, chatId, title) => {
+  const season = await pool.query(
+    'SELECT id FROM stage_seasons WHERE stage_id=$1 AND is_active=true LIMIT 1',
+    [stageId]
+  );
+  if (!season.rows[0]) {
+    const err = new Error('لا يوجد موسم نشط لهذه المرحلة، فلا يمكن ربط قناة بها.');
+    err.code = 'NO_ACTIVE_SEASON';
+    throw err;
+  }
+  return pool
+    .query(
+      `INSERT INTO channels(stage_id, stage_season_id, telegram_chat_id, title) VALUES($1,$2,$3,$4)
+       ON CONFLICT (telegram_chat_id)
+       DO UPDATE SET stage_id=$1, stage_season_id=$2, title=$4 RETURNING *`,
+      [stageId, season.rows[0].id, chatId, title]
+    )
+    .then((r) => r.rows[0]);
+};
+
+// لا تُرجع إلا قناة موسمها ما زال نشطًا؛ قنوات المواسم المنتهية تُتجاهل تمامًا.
 const getChannelByChatId = (chatId) =>
-  pool.query('SELECT * FROM channels WHERE telegram_chat_id=$1', [chatId]).then((r) => r.rows[0]);
+  pool
+    .query(
+      `SELECT c.* FROM channels c
+       JOIN stage_seasons ss ON ss.id = c.stage_season_id
+       WHERE c.telegram_chat_id=$1 AND ss.is_active=true`,
+      [chatId]
+    )
+    .then((r) => r.rows[0]);
 
 const listChannelsWithStage = () =>
   pool
     .query(
+      `SELECT c.*, s.name AS stage_name, ss.is_active AS season_is_active, se.name AS season_name
+       FROM channels c
+       JOIN stages s ON s.id = c.stage_id
+       LEFT JOIN stage_seasons ss ON ss.id = c.stage_season_id
+       LEFT JOIN seasons se ON se.id = ss.season_id
+       ORDER BY ss.is_active DESC NULLS LAST, c.id`
+    )
+    .then((r) => r.rows);
+
+// القنوات التي توقفت لأن موسمها انتهى — تُعرض للأدمن ليربط قنوات الموسم الجديد.
+const listStaleChannels = (stageId) =>
+  pool
+    .query(
       `SELECT c.*, s.name AS stage_name FROM channels c
-       JOIN stages s ON s.id = c.stage_id ORDER BY c.id`
+       JOIN stages s ON s.id = c.stage_id
+       LEFT JOIN stage_seasons ss ON ss.id = c.stage_season_id
+       WHERE c.stage_id=$1 AND (ss.is_active IS DISTINCT FROM true)`,
+      [stageId]
     )
     .then((r) => r.rows);
 
@@ -1675,6 +2039,7 @@ module.exports = {
   listAllStages,
   getStageById,
   updateStageName,
+  setStageType,
   archiveStage,
   restoreStage,
   hardDeleteStage,
@@ -1688,6 +2053,8 @@ module.exports = {
   getStudentByTelegramId,
   createStudent,
   markWelcomed,
+  generateStudentTransferCode,
+  transferStudentAccount,
   confirmOfficialStudent,
   searchStudents,
   getStudentById,
@@ -1696,6 +2063,7 @@ module.exports = {
   archiveStudent,
   hardDeleteStudent,
   getStudentsByStage,
+  getStudentActiveStageSeason,
   listStageSeasons,
   listStudentSeasons,
   startSeasonForStages,
@@ -1704,6 +2072,24 @@ module.exports = {
   linkChannel,
   getChannelByChatId,
   listChannelsWithStage,
+  listStaleChannels,
+  getInstituteOverview,
+  getInstituteStageBreakdown,
+  addTeacher,
+  getTeacherByTelegramId,
+  getTeacherById,
+  linkTeacherAccount,
+  listTeachers,
+  updateTeacherName,
+  setTeacherActive,
+  regenerateTeacherCode,
+  hardDeleteTeacher,
+  assignTeacherToSubject,
+  unassignTeacherFromSubject,
+  listTeacherSubjects,
+  listAllActiveSubjects,
+  listSubjectTeachers,
+  getSubjectAttendanceForTeacher,
   unlinkChannel,
   activateLesson,
   getLessonBySource,
