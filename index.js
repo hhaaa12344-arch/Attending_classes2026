@@ -62,7 +62,7 @@ const STUDENT_MENU_BUTTONS = new Set([
   '📚 دروس اليوم',
   '📊 تقريري',
   '🌴 طلب إجازة',
-  '🗓️ جدولي',
+  '🗓️ جدول المباحثات',
   '📝 الامتحانات الشهرية',
   '🎯 درجاتي',
   '📖 مشاركتي',
@@ -156,7 +156,7 @@ function studentMainMenu(student = null) {
     [replyButton('🌴 طلب إجازة'), replyButton(STUDENT_ACTIVITY_BUTTON)],
   ];
   if (!lessonsOnly) {
-    rows.push([replyButton('🗓️ جدولي'), replyButton('📝 الامتحانات الشهرية')]);
+    rows.push([replyButton('🗓️ جدول المباحثات'), replyButton('📝 الامتحانات الشهرية')]);
     rows.push([replyButton('🎯 درجاتي'), replyButton('📖 مشاركتي')]);
     rows.push([replyButton('📄 إرسال تقرير')]);
   }
@@ -3447,7 +3447,7 @@ bot.action(/fin_do:(\d+):(\d+)/, async (ctx) => {
 // ---------------------------------------------------------------------------
 // الطالب — جدوله الأسبوعي
 // ---------------------------------------------------------------------------
-bot.hears('🗓️ جدولي', async (ctx) => {
+bot.hears('🗓️ جدول المباحثات', async (ctx) => {
   const student = await db.getStudentByTelegramId(ctx.from.id);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
