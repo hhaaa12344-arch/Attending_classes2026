@@ -62,9 +62,9 @@ const STUDENT_MENU_BUTTONS = new Set([
   '📚 دروس اليوم',
   '📊 تقريري',
   '🌴 طلب إجازة',
-  '🗓️ جدول - المباحثات',
+  '🗓️ جدولي',
   '📝 الامتحانات الشهرية',
-  '🎯 درجاتي',
+  '🎯 درجات - المباحثات',
   '📖 مشاركتي',
   '📄 إرسال تقرير',
   STUDENT_ACTIVITY_BUTTON,
@@ -76,6 +76,7 @@ const STUDENT_MENU_BUTTONS = new Set([
 const TEACHER_MENU_BUTTONS = new Set([
   '📚 موادي', '📊 حضور موادي', '👥 المجموعات',
   '🗓️ جدول المباحثات', '📝 الامتحانات', '🏁 إنهاء الموسم', '✏️ تحرير الدرجات',
+  '📋 تقارير الدروس', '🔗 روابط المجموعات', '🧹 تنظيف المحادثة', '🙈 إخفاء الأزرار',
 ]);
 
 const ADMIN_MENU_BUTTONS = new Set([
@@ -94,6 +95,10 @@ const ADMIN_MENU_BUTTONS = new Set([
   '👨‍🏫 إدارة الأساتذة',
   '🔄 تغيير أستاذ مادة',
   '📈 لوحة المعهد',
+  '📋 تقارير الدروس',
+  '🔗 روابط المجموعات',
+  '🧹 تنظيف المحادثة',
+  '🙈 إخفاء الأزرار',
 ]);
 
 const isAdmin = (ctx) => ADMIN_IDS.includes(ctx.from.id);
@@ -157,7 +162,7 @@ function studentMainMenu(student = null) {
   ];
   if (!lessonsOnly) {
     rows.push([replyButton('🗓️ جدولي'), replyButton('📝 الامتحانات الشهرية')]);
-    rows.push([replyButton('🎯 درجاتي'), replyButton('📖 مشاركتي')]);
+    rows.push([replyButton('🎯 درجات - المباحثات'), replyButton('📖 مشاركتي')]);
     rows.push([replyButton('📄 إرسال تقرير')]);
   }
   rows.push([replyButton(BACK_BUTTON)]);
@@ -192,7 +197,9 @@ function teacherMainMenu() {
     [replyButton('📚 موادي'), replyButton('📊 حضور موادي')],
     [replyButton('👥 المجموعات'), replyButton('🗓️ جدول المباحثات')],
     [replyButton('📝 الامتحانات'), replyButton('🏁 إنهاء الموسم')],
-    [replyButton('✏️ تحرير الدرجات')],
+    [replyButton('✏️ تحرير الدرجات'), replyButton('📋 تقارير الدروس')],
+    [replyButton('🔗 روابط المجموعات'), replyButton('🧹 تنظيف المحادثة')],
+    [replyButton('🙈 إخفاء الأزرار')],
   ]).resize().persistent();
 }
 
@@ -208,7 +215,9 @@ function adminMainMenu() {
     ['📈 لوحة المعهد'],
     ['👥 المجموعات', '🗓️ جدول المباحثات'],
     ['📝 الامتحانات', '🏁 إنهاء الموسم'],
-    ['✏️ تحرير الدرجات'],
+    ['✏️ تحرير الدرجات', '📋 تقارير الدروس'],
+    ['🔗 روابط المجموعات', '🧹 تنظيف المحادثة'],
+    ['🙈 إخفاء الأزرار'],
     [BACK_BUTTON, '❌ إلغاء العملية'],
   ];
   return Markup.keyboard(rows.map((row) => row.map((text) => replyButton(text)))).resize().persistent();
@@ -1364,6 +1373,37 @@ bot.on('text', async (ctx, next) => {
       `✅ استُلم تقرير مادة «${state.subjectName}».` +
         (sent.delivered > 0 ? '\nوصل إلى الأستاذ.' : '\nمحفوظ في النظام وسيطّلع عليه الأستاذ.'),
       studentMainMenu()
+    );
+  }
+
+  // -------- درجة حضور الدروس بعد مراجعة التقرير --------
+  if (state.action === 'lessons_score') {
+    const score = Number(ctx.message.text.trim());
+    const max = studies.GRADE_WEIGHTS.lessonsTotal;
+    if (Number.isNaN(score) || score < 0 || score > max) {
+      return ctx.reply(`أرسل درجة بين 0 و${max}.`);
+    }
+    if (!(await teacherOwnsSubject(ctx, state.subjectId, state.ssId))) {
+      userState.delete(ctx.from.id);
+      return ctx.reply('غير مصرح.');
+    }
+    await studies.setLessonsScore(state.studentId, state.subjectId, state.ssId, score, ctx.from.id);
+    userState.delete(ctx.from.id);
+    // يُبلَّغ الطالب بدرجته لتثبت له
+    const student = await db.getStudentById(state.studentId);
+    if (student && student.telegram_id) {
+      try {
+        await bot.telegram.sendMessage(
+          Number(student.telegram_id),
+          `📋 مُنحت درجة حضور الدروس: ${score} من ${max}.\nتجدها في «🎯 درجات - المباحثات».`
+        );
+      } catch (err) {
+        console.warn('تعذر إبلاغ الطالب بدرجة الدروس:', err.description || err.message);
+      }
+    }
+    return ctx.reply(
+      `✅ ${state.studentName}: ${score} من ${max}. وأُبلغ الطالب بدرجته.`,
+      isAdmin(ctx) ? adminMainMenu() : teacherMainMenu()
     );
   }
 
@@ -3410,11 +3450,11 @@ bot.action(/fin_preview:(\d+):(\d+)/, async (ctx) => {
     `معاينة_درجات_${subjectId}`,
     buildMarkdownDoc(
       'معاينة درجات الموسم',
-      ['الطالب', 'النمط', 'حضر', 'من', 'المباحثات', 'التقارير', 'المشاركة', 'الامتحانات', 'المجموع'],
+      ['الطالب', 'النمط', 'حضر', 'من', 'المباحثات', 'التقارير', 'المشاركة', 'الامتحانات', 'الدروس', 'المجموع'],
       grades.map((g) => [
         g.fullName, g.mode === 'report' ? 'تقارير' : 'مباحثات',
         g.attendedSessions, g.eligibleSessions, g.mubahathaScore, g.reportScore,
-        g.participationScore, g.examsScore, g.totalScore,
+        g.participationScore, g.examsScore, g.lessonsScore, g.totalScore,
       ]),
       '_هذه معاينة قبل الاعتماد._'
     )
@@ -3734,7 +3774,7 @@ bot.on('my_chat_member', async (ctx) => {
 // ---------------------------------------------------------------------------
 // الطالب — درجاته المحفوظة عبر كل المواسم
 // ---------------------------------------------------------------------------
-bot.hears('🎯 درجاتي', async (ctx) => {
+bot.hears('🎯 درجات - المباحثات', async (ctx) => {
   const student = await db.getStudentByTelegramId(ctx.from.id);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
@@ -3758,7 +3798,10 @@ bot.hears('🎯 درجاتي', async (ctx) => {
         `     الامتحانات الشهرية: ${Number(g.exams_score)} من ${studies.GRADE_WEIGHTS.examsTotal}` +
         ` | ${g.mode === 'report' ? 'التقارير' : 'المباحثات'}: ${Number(g.participation_score)} من ${
           studies.GRADE_WEIGHTS.participationTotal
-        }`
+        }` +
+        (Number(g.lessons_score) > 0
+          ? ` | حضور الدروس: ${Number(g.lessons_score)} من ${studies.GRADE_WEIGHTS.lessonsTotal}`
+          : '')
     );
     parts.push(`📘 ${season}\n${lines.join('\n')}`);
   }
@@ -4286,6 +4329,156 @@ bot.action(/admin_stage_type_set:(\d+):(lessons_only|full)/, async (ctx) => {
   await ctx.answerCbQuery('تم التغيير ✅');
   return ctx.editMessageText(
     `✅ صارت «${stage.name}» ${ctx.match[2] === 'lessons_only' ? '📚 حضور دروس فقط' : '🎓 كاملة'}.`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// إخفاء الأزرار وتنظيف المحادثة
+// ---------------------------------------------------------------------------
+bot.hears('🙈 إخفاء الأزرار', (ctx) =>
+  ctx.reply(
+    'أُخفيت الأزرار. لإظهارها من جديد أرسل /start أو /menu.',
+    Markup.removeKeyboard()
+  )
+);
+
+bot.command('menu', async (ctx) => {
+  if (isAdmin(ctx)) return ctx.reply('لوحة الأدمن:', adminMainMenu());
+  const teacher = await db.getTeacherByTelegramId(ctx.from.id);
+  if (teacher) return ctx.reply('لوحة الأستاذ:', teacherMainMenu());
+  const student = await db.getStudentByTelegramId(ctx.from.id);
+  if (student) return ctx.reply('قائمتك:', studentMainMenu(student));
+  return ctx.reply('أرسل /start للبدء.');
+});
+
+// حذف رسائل البوت المتراكمة في هذه المحادثة.
+// تليجرام يسمح للبوت بحذف رسائله خلال 48 ساعة فقط، ولا يحذف رسائل المستخدم في الخاص.
+bot.hears('🧹 تنظيف المحادثة', async (ctx) => {
+  const current = ctx.message.message_id;
+  let deleted = 0;
+  for (let id = current - 1; id > Math.max(0, current - 120); id -= 1) {
+    try {
+      await ctx.telegram.deleteMessage(ctx.chat.id, id);
+      deleted += 1;
+    } catch (err) {
+      // رسالة قديمة أو ليست للبوت أو محذوفة مسبقًا — تُتجاوز بهدوء
+    }
+  }
+  try {
+    await ctx.telegram.deleteMessage(ctx.chat.id, current);
+  } catch (err) {
+    /* تُتجاوز */
+  }
+  return ctx.reply(
+    `🧹 حُذفت ${deleted} رسالة.\n` +
+      'ملاحظة: تليجرام لا يسمح بحذف ما مضى عليه أكثر من 48 ساعة، ولا برسائلك أنت في المحادثة الخاصة.'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// الأستاذ — روابط مجموعات المباحثة
+// ---------------------------------------------------------------------------
+bot.hears('🔗 روابط المجموعات', async (ctx) => {
+  const subjects = await getActorSubjects(ctx);
+  if (!subjects) return ctx.reply('هذه الشاشة متاحة للأساتذة والأدمن فقط.');
+  if (subjects.length === 0) return ctx.reply('لا توجد مواد متاحة في الموسم الحالي.');
+
+  const blocks = [];
+  const buttons = [];
+  for (const sub of subjects) {
+    const groups = await studies.listGroups(sub.subject_id, sub.stage_season_id);
+    if (groups.length === 0) continue;
+    blocks.push(
+      `📘 ${sub.subject_name} — ${sub.stage_name}\n` +
+        groups
+          .map(
+            (g) =>
+              `   ${g.title}: ${Number(g.member_count)}/${g.capacity}` +
+              `${g.invite_link ? '' : ' ⚠️ بلا رابط'}`
+          )
+          .join('\n')
+    );
+    for (const g of groups) {
+      if (g.invite_link) {
+        buttons.push([Markup.button.url(limitButtonText(`🔗 ${g.title} — ${sub.subject_name}`, 50), g.invite_link)]);
+      }
+    }
+  }
+  if (blocks.length === 0) {
+    return ctx.reply('لا توجد مجموعات بعد. أنشئها من «👥 المجموعات».');
+  }
+  return ctx.reply(
+    `روابط مجموعات المباحثة:\n\n${blocks.join('\n\n')}`,
+    buttons.length ? Markup.inlineKeyboard(buttons) : undefined
+  );
+});
+
+// ---------------------------------------------------------------------------
+// الأستاذ — تقارير حضور الدروس ومنح درجة عليها
+// ---------------------------------------------------------------------------
+bot.hears('📋 تقارير الدروس', (ctx) =>
+  pickTeacherSubject(ctx, 'lr_subj', 'اختر المادة لمراجعة حضور دروسها ومنح الدرجات:')
+);
+
+bot.action(/lr_subj:(\d+):(\d+)/, async (ctx) => {
+  const subjectId = Number(ctx.match[1]);
+  const ssId = Number(ctx.match[2]);
+  if (!(await teacherOwnsSubject(ctx, subjectId, ssId))) return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();
+
+  const rows = await db.getSubjectAttendanceForTeacher(subjectId, ssId);
+  if (rows.length === 0) return ctx.reply('لا يوجد طلبة مسجّلون في هذه المادة.');
+  const total = Number(rows[0].total_lessons);
+  const grades = await studies.listSubjectGrades(subjectId, ssId);
+  const scoreOf = new Map(grades.map((g) => [g.student_id, g.lessons_score]));
+
+  // الملف يحوي الجميع، والأزرار للمنح الفردي
+  await sendMarkdownDoc(
+    ctx,
+    `حضور_الدروس_${subjectId}`,
+    buildMarkdownDoc(
+      'تقرير حضور الدروس',
+      ['الطالب', 'حضر', 'إجمالي الدروس', 'النسبة', 'درجة الدروس'],
+      rows.map((r) => [
+        r.full_name,
+        Number(r.attended_lessons),
+        total,
+        total ? `${Math.round((Number(r.attended_lessons) / total) * 100)}%` : '—',
+        scoreOf.get(r.student_id) === undefined ? '—' : Number(scoreOf.get(r.student_id)),
+      ]),
+      `**عدد الدروس المفعّلة:** ${total} | **درجة الدروس من:** ${studies.GRADE_WEIGHTS.lessonsTotal}`
+    )
+  );
+
+  return ctx.reply(
+    `اضغط على الطالب لمنحه درجة حضور الدروس (من ${studies.GRADE_WEIGHTS.lessonsTotal}):`,
+    Markup.inlineKeyboard(
+      rows.slice(0, 40).map((r) => [
+        callbackButton(
+          `${limitButtonText(r.full_name, 26)} — ${Number(r.attended_lessons)}/${total}` +
+            `${scoreOf.get(r.student_id) ? ` (${Number(scoreOf.get(r.student_id))})` : ''}`,
+          `lr_grade:${r.student_id}:${subjectId}:${ssId}`
+        ),
+      ])
+    )
+  );
+});
+
+bot.action(/lr_grade:(\d+):(\d+):(\d+)/, async (ctx) => {
+  const [, studentId, subjectId, ssId] = ctx.match.map(Number);
+  if (!(await teacherOwnsSubject(ctx, subjectId, ssId))) return ctx.answerCbQuery('غير مصرح.');
+  const student = await db.getStudentById(studentId);
+  userState.set(ctx.from.id, {
+    action: 'lessons_score',
+    studentId,
+    subjectId,
+    ssId,
+    studentName: student ? student.full_name : '',
+  });
+  await ctx.answerCbQuery();
+  return ctx.reply(
+    `👤 ${student ? student.full_name : ''}\n` +
+      `أرسل درجة حضور الدروس (من 0 إلى ${studies.GRADE_WEIGHTS.lessonsTotal}):`
   );
 });
 

@@ -3,7 +3,11 @@
 const { pool } = require('./db');
 
 // توزيع الدرجات في الموسم (قابل للتغيير من مكان واحد)
+// الامتحان يفتح ليلًا في الساعة المحددة من اليوم المختار ويستمر عدد الساعات المُدخَل.
+const EXAM_START_HOUR = Number(process.env.EXAM_START_HOUR || 22);
+
 const GRADE_WEIGHTS = {
+  lessonsTotal: Number(process.env.LESSONS_GRADE_TOTAL || 15), // درجة حضور الدروس
   examsTotal: 15, // 3 امتحانات شهرية × 5
   examEach: 5,
   participationTotal: 15, // المباحثات أو التقارير
@@ -162,6 +166,8 @@ async function initStudiesSchema() {
 
     ALTER TABLE final_grades ADD COLUMN IF NOT EXISTS edited_by BIGINT;
     ALTER TABLE final_grades ADD COLUMN IF NOT EXISTS edited_at TIMESTAMP;
+    -- درجة حضور الدروس يمنحها الأستاذ بعد مراجعة تقرير الحضور
+    ALTER TABLE final_grades ADD COLUMN IF NOT EXISTS lessons_score NUMERIC NOT NULL DEFAULT 0;
 
 
     -- تأجيل الامتحان: يُسجَّل التاريخ الأصلي عند أول تأجيل للرجوع إليه.
@@ -472,9 +478,13 @@ async function createExam(subjectId, stageSeasonId, teacherId, { examNumber, tit
     const r = await pool.query(
       `INSERT INTO exams(subject_id, stage_season_id, teacher_id, exam_number, title,
                          opens_at, available_hours, closes_at, max_score)
-       VALUES($1,$2,$3,$4,$5, $6::date, $7::int, $6::date + make_interval(hours => $7::int), $8)
+       VALUES($1,$2,$3,$4,$5,
+              $6::date + make_interval(hours => $9::int),
+              $7::int,
+              $6::date + make_interval(hours => $9::int) + make_interval(hours => $7::int),
+              $8)
        RETURNING *`,
-      [subjectId, stageSeasonId, teacherId, n, title, dateIso, h, GRADE_WEIGHTS.examEach]
+      [subjectId, stageSeasonId, teacherId, n, title, dateIso, h, GRADE_WEIGHTS.examEach, EXAM_START_HOUR]
     );
     return r.rows[0];
   } catch (err) {
@@ -708,12 +718,12 @@ async function postponeExam(examId, newDateIso, hours) {
     .query(
       `UPDATE exams SET
          original_opens_at = COALESCE(original_opens_at, opens_at),
-         opens_at = $2::date,
+         opens_at = $2::date + make_interval(hours => $4::int),
          available_hours = $3::int,
-         closes_at = $2::date + make_interval(hours => $3::int),
+         closes_at = $2::date + make_interval(hours => $4::int) + make_interval(hours => $3::int),
          postponed_count = postponed_count + 1
        WHERE id=$1 RETURNING *`,
-      [examId, newDateIso, h]
+      [examId, newDateIso, h, EXAM_START_HOUR]
     )
     .then((r) => r.rows[0]);
 }
@@ -1359,7 +1369,8 @@ async function overrideStudentGrade(studentId, subjectId, stageSeasonId, fields,
 
   const cappedExams = Math.max(0, Math.min(GRADE_WEIGHTS.examsTotal, exams));
   const cappedPart = Math.max(0, Math.min(GRADE_WEIGHTS.participationTotal, participation));
-  const total = Math.round((cappedExams + cappedPart) * 100) / 100;
+  const lessons = Number(current ? current.lessons_score : 0) || 0;
+  const total = Math.round((cappedExams + cappedPart + lessons) * 100) / 100;
 
   return pool
     .query(
@@ -1378,11 +1389,25 @@ async function overrideStudentGrade(studentId, subjectId, stageSeasonId, fields,
 }
 
 // طلبة المادة في الموسم مع درجاتهم (لاختيار من يُحرَّر له)
+// درجة حضور الدروس: يمنحها الأستاذ للطالب بعد مراجعة تقرير حضوره.
+const setLessonsScore = (studentId, subjectId, stageSeasonId, score, editedBy) =>
+  pool
+    .query(
+      `INSERT INTO final_grades(student_id, subject_id, stage_season_id, lessons_score, edited_by, edited_at)
+       VALUES($1,$2,$3,$4,$5, now())
+       ON CONFLICT (student_id, subject_id, stage_season_id) DO UPDATE SET
+         lessons_score=$4, edited_by=$5, edited_at=now()
+       RETURNING *`,
+      [studentId, subjectId, stageSeasonId,
+       Math.max(0, Math.min(GRADE_WEIGHTS.lessonsTotal, Number(score))), editedBy]
+    )
+    .then((r) => r.rows[0]);
+
 const listSubjectGrades = (subjectId, stageSeasonId) =>
   pool
     .query(
       `SELECT st.id AS student_id, st.full_name, fg.exams_score, fg.participation_score,
-              fg.total_score, fg.edited_at
+              fg.total_score, fg.lessons_score, fg.edited_at
        FROM enrollments e
        JOIN students st ON st.id=e.student_id AND st.is_active=true
        LEFT JOIN final_grades fg
@@ -1429,7 +1454,8 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
             COALESCE(el.eligible_sessions,0) AS eligible_sessions,
             COALESCE(el.attended_sessions,0) AS attended_sessions,
             COALESCE(et.exams_score,0) AS exams_score,
-            COALESCE(fg.report_score,0) AS report_score
+            COALESCE(fg.report_score,0) AS report_score,
+            COALESCE(fg.lessons_score,0) AS lessons_score
      FROM participation_modes pm
      JOIN students st ON st.id=pm.student_id
      LEFT JOIN eligible el ON el.student_id=pm.student_id
@@ -1450,6 +1476,8 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
     const reportScore = Number(r.report_score);
     const participation = Math.min(GRADE_WEIGHTS.participationTotal, mubahathaScore + reportScore);
     const examsScore = Math.min(GRADE_WEIGHTS.examsTotal, Number(r.exams_score));
+    // درجة حضور الدروس يمنحها الأستاذ يدويًا وتُضاف للمجموع
+    const lessonsScore = Math.min(GRADE_WEIGHTS.lessonsTotal, Number(r.lessons_score));
     return {
       studentId: r.student_id,
       fullName: r.full_name,
@@ -1460,7 +1488,8 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
       reportScore,
       participationScore: Math.round(participation * 100) / 100,
       examsScore,
-      totalScore: Math.round((participation + examsScore) * 100) / 100,
+      lessonsScore,
+      totalScore: Math.round((participation + examsScore + lessonsScore) * 100) / 100,
     };
   });
 }
@@ -1474,14 +1503,16 @@ async function finalizeSeasonGrades(subjectId, stageSeasonId) {
     for (const g of grades) {
       await client.query(
         `INSERT INTO final_grades(student_id, subject_id, stage_season_id,
-            exams_score, mubahatha_score, report_score, participation_score, total_score, finalized_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8, now())
+            exams_score, mubahatha_score, report_score, participation_score, total_score,
+            lessons_score, finalized_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
          ON CONFLICT (student_id, subject_id, stage_season_id) DO UPDATE SET
             exams_score=$4, mubahatha_score=$5, participation_score=$7,
-            total_score=$8, finalized_at=now()`,
+            total_score=$8, lessons_score=$9, finalized_at=now()`,
         [
           g.studentId, subjectId, stageSeasonId,
           g.examsScore, g.mubahathaScore, g.reportScore, g.participationScore, g.totalScore,
+          g.lessonsScore,
         ]
       );
     }
@@ -1574,6 +1605,8 @@ module.exports = {
   getStudentFinalGrades,
   overrideStudentGrade,
   listSubjectGrades,
+  setLessonsScore,
+  EXAM_START_HOUR,
   computeSeasonGrades,
   finalizeSeasonGrades,
 };
