@@ -4174,10 +4174,12 @@ bot.hears('📈 لوحة المعهد', async (ctx) => {
 
   const problems = [];
   if (Number(exceptions.unassigned_students) > 0) {
-    problems.push(`• ${Number(exceptions.unassigned_students)} طالبًا اختاروا المباحثات ولم يُوزَّعوا على مجموعة`);
+    problems.push(`• ${Number(exceptions.unassigned_students)} طالبًا اختاروا المباحثات ولم يُوزَّعوا على مجموعة بعد`);
   }
   if (Number(exceptions.no_mode_students) > 0) {
-    problems.push(`• ${Number(exceptions.no_mode_students)} طالبًا لم يختاروا نمط مشاركتهم بعد`);
+    problems.push(
+      `• ${Number(exceptions.no_mode_students)} طالبًا لم يختاروا نمط مشاركتهم في مادة واحدة على الأقل`
+    );
   }
   if (Number(exceptions.groups_without_link) > 0) {
     problems.push(`• ${Number(exceptions.groups_without_link)} مجموعة بلا رابط دعوة`);
@@ -4195,7 +4197,10 @@ bot.hears('📈 لوحة المعهد', async (ctx) => {
     problems.push(`• ${Number(exceptions.draft_exams)} امتحانًا مسودة لم يُنشر`);
   }
   if (Number(exceptions.ungraded_reports) > 0) {
-    problems.push(`• ${Number(exceptions.ungraded_reports)} تقريرًا لم يُقيَّم`);
+    problems.push(
+      `• ${Number(exceptions.ungraded_reports)} تقريرًا لم يُقيَّم` +
+        ` (لـ${Number(exceptions.ungraded_report_students)} طالبًا)`
+    );
   }
   if (Number(exceptions.stages_without_channel) > 0) {
     problems.push(`• ${Number(exceptions.stages_without_channel)} مرحلة بلا قناة نشطة`);

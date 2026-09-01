@@ -874,13 +874,13 @@ const getInstituteExceptions = () =>
   pool
     .query(
       `SELECT
-        (SELECT COUNT(*) FROM participation_modes pm
+        (SELECT COUNT(DISTINCT pm.student_id) FROM participation_modes pm
          JOIN stage_seasons ss ON ss.id=pm.stage_season_id AND ss.is_active=true
          WHERE pm.mode='mubahatha' AND NOT EXISTS (
            SELECT 1 FROM group_memberships m WHERE m.student_id=pm.student_id
              AND m.subject_id=pm.subject_id AND m.stage_season_id=pm.stage_season_id
          )) AS unassigned_students,
-        (SELECT COUNT(*) FROM enrollments e
+        (SELECT COUNT(DISTINCT e.student_id) FROM enrollments e
          JOIN stage_seasons ss2 ON ss2.id=e.stage_season_id AND ss2.is_active=true
          JOIN stages sgx ON sgx.id=ss2.stage_id AND sgx.stage_type <> 'lessons_only'
          JOIN subjects sub ON sub.stage_id=ss2.stage_id
@@ -908,6 +908,11 @@ const getInstituteExceptions = () =>
          LEFT JOIN final_grades fg ON fg.student_id=r.student_id AND fg.subject_id=r.subject_id
               AND fg.stage_season_id=r.stage_season_id
          WHERE fg.report_score IS NULL) AS ungraded_reports,
+        (SELECT COUNT(DISTINCT r2.student_id) FROM student_reports r2
+         JOIN stage_seasons ss8 ON ss8.id=r2.stage_season_id AND ss8.is_active=true
+         LEFT JOIN final_grades fg2 ON fg2.student_id=r2.student_id AND fg2.subject_id=r2.subject_id
+              AND fg2.stage_season_id=r2.stage_season_id
+         WHERE fg2.report_score IS NULL) AS ungraded_report_students,
         (SELECT COUNT(*) FROM stage_seasons ss7
          WHERE ss7.is_active=true AND NOT EXISTS (
            SELECT 1 FROM channels c WHERE c.stage_season_id=ss7.id
