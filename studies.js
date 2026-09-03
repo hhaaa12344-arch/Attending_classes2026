@@ -76,10 +76,31 @@ async function initStudiesSchema() {
       id SERIAL PRIMARY KEY,
       session_id INTEGER NOT NULL REFERENCES mubahatha_sessions(id) ON DELETE CASCADE,
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      -- phase: 'start' حضور بداية المباحثة، 'end' حضور نهايتها؛ سجلان مستقلان لكل طالب.
+      phase TEXT NOT NULL DEFAULT 'start' CHECK (phase IN ('start','end')),
       marked_at TIMESTAMP NOT NULL DEFAULT now(),
       marked_by TEXT NOT NULL DEFAULT 'student',
-      UNIQUE(session_id, student_id)
+      UNIQUE(session_id, student_id, phase)
     );
+
+    -- ترقية آمنة للسجلات القديمة (كان القيد على session+student فقط قبل الحضور المزدوج)
+    ALTER TABLE mubahatha_attendance ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'start';
+    DO $mub$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='mubahatha_attendance_session_id_student_id_key') THEN
+        ALTER TABLE mubahatha_attendance DROP CONSTRAINT mubahatha_attendance_session_id_student_id_key;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='mubahatha_attendance_session_student_phase_key') THEN
+        ALTER TABLE mubahatha_attendance
+          ADD CONSTRAINT mubahatha_attendance_session_student_phase_key
+          UNIQUE(session_id, student_id, phase);
+      END IF;
+    END $mub$;
+
+    -- إدارة الحضور الثاني على مستوى الجلسة:
+    -- end_opened_at لحظة فتح حضور النهاية، end_closes_at إغلاقه (بعد 10 دقائق)، end_prompt_sent هل نُبِّه الأستاذ.
+    ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_opened_at TIMESTAMP;
+    ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_closes_at TIMESTAMP;
+    ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_prompt_sent BOOLEAN NOT NULL DEFAULT false;
 
     -- ---------- الامتحانات الشهرية ----------
     -- ثلاثة امتحانات في الموسم لكل مادة، كل امتحان 5 درجات مهما كان عدد أسئلته.
@@ -229,6 +250,7 @@ async function initStudiesSchema() {
     CREATE INDEX IF NOT EXISTS idx_exams_subject ON exams(subject_id, stage_season_id);
     CREATE INDEX IF NOT EXISTS idx_exam_q_exam ON exam_questions(exam_id);
     CREATE INDEX IF NOT EXISTS idx_attempts_student ON exam_attempts(student_id);
+    CREATE INDEX IF NOT EXISTS idx_exam_answers_attempt ON exam_answers(attempt_id);
     CREATE INDEX IF NOT EXISTS idx_reports_subject ON student_reports(subject_id, stage_season_id);
   `);
 }
@@ -441,14 +463,73 @@ const getOpenSessionForGroup = (groupId) =>
     )
     .then((r) => r.rows[0]);
 
-const markSessionAttendance = (sessionId, studentId, markedBy = 'student') =>
+const markSessionAttendance = (sessionId, studentId, phase = 'start', markedBy = 'student') =>
   pool
     .query(
-      `INSERT INTO mubahatha_attendance(session_id, student_id, marked_by)
-       VALUES($1,$2,$3) ON CONFLICT (session_id, student_id) DO NOTHING RETURNING *`,
-      [sessionId, studentId, markedBy]
+      `INSERT INTO mubahatha_attendance(session_id, student_id, phase, marked_by)
+       VALUES($1,$2,$3,$4)
+       ON CONFLICT (session_id, student_id, phase) DO NOTHING RETURNING *`,
+      [sessionId, studentId, phase, markedBy]
     )
     .then((r) => r.rows[0]);
+
+// يفتح حضور النهاية للجلسة ويحدد إغلاقه بعد المدة (10 دقائق افتراضيًا)، مرة واحدة.
+const END_ATTENDANCE_MINUTES = Number(process.env.END_ATTENDANCE_MINUTES || 10);
+
+async function openEndAttendance(sessionId) {
+  const r = await pool.query(
+    `UPDATE mubahatha_sessions
+     SET end_opened_at = now(),
+         end_closes_at = now() + make_interval(mins => $2::int),
+         is_closed = true
+     WHERE id=$1 AND end_opened_at IS NULL
+     RETURNING *`,
+    [sessionId, END_ATTENDANCE_MINUTES]
+  );
+  return r.rows[0]; // null إن كان مفتوحًا مسبقًا
+}
+
+// هل حضور النهاية مفتوح الآن لهذه الجلسة؟
+const isEndAttendanceOpen = (sessionId) =>
+  pool
+    .query(
+      `SELECT 1 FROM mubahatha_sessions
+       WHERE id=$1 AND end_opened_at IS NOT NULL AND end_closes_at > now()`,
+      [sessionId]
+    )
+    .then((r) => Boolean(r.rows[0]));
+
+// الجلسات التي حان تنبيه أستاذها بقرب فتح الحضور الثاني (قبل الإغلاق بـ leadMinutes) ولم يُنبَّه.
+const getSessionsNeedingEndPrompt = (leadMinutes = 10) =>
+  pool
+    .query(
+      `SELECT s.*, g.subject_id, g.title AS group_title, g.group_number,
+              t.telegram_id AS teacher_telegram_id, sub.name AS subject_name
+       FROM mubahatha_sessions s
+       JOIN mubahatha_groups g ON g.id=s.group_id
+       JOIN subjects sub ON sub.id=g.subject_id
+       LEFT JOIN teachers t ON t.id=s.teacher_id AND t.is_active=true
+       WHERE s.is_closed=false AND s.end_prompt_sent=false
+         AND s.closes_at - make_interval(mins => $1::int) <= now()`,
+      [leadMinutes]
+    )
+    .then((r) => r.rows);
+
+const markEndPromptSent = (sessionId) =>
+  pool.query('UPDATE mubahatha_sessions SET end_prompt_sent=true WHERE id=$1', [sessionId]);
+
+// الجلسات التي بلغت وقت انتهائها ولم يفتح الأستاذ حضورها الثاني — يُفتح تلقائيًا.
+const getSessionsNeedingAutoEnd = () =>
+  pool
+    .query(
+      `SELECT s.*, g.id AS gid, g.title AS group_title, g.group_number,
+              sub.name AS subject_name
+       FROM mubahatha_sessions s
+       JOIN mubahatha_groups g ON g.id=s.group_id
+       JOIN subjects sub ON sub.id=g.subject_id
+       WHERE s.end_opened_at IS NULL AND s.closes_at <= now()`
+    )
+    .then((r) => r.rows);
 
 // ---------------------------------------------------------------------------
 // الامتحانات
@@ -1365,14 +1446,35 @@ const getSlotsReadyToStart = () =>
 
 // يفتح جلسة الموعد ويربطها بالقرار حتى لا تُفتح مرتين.
 async function startSessionFromSlot(slot) {
-  const session = await openSession(
-    slot.group_id,
-    slot.teacher_id,
-    `${slot.subject_name} — ${formatSlot(slot)}`,
-    slot.duration_hours
-  );
-  await pool.query('UPDATE slot_decisions SET session_id=$2 WHERE id=$1', [slot.decision_id, session.id]);
-  return session;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // نحجز القرار بشرط أن جلسته لم تُفتح بعد؛ لو فتحها تِك آخر لن يُرجع صفًا فنُلغي.
+    const claim = await client.query(
+      'SELECT id FROM slot_decisions WHERE id=$1 AND session_id IS NULL FOR UPDATE',
+      [slot.decision_id]
+    );
+    if (!claim.rows[0]) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const sess = await client.query(
+      `INSERT INTO mubahatha_sessions(group_id, teacher_id, title, closes_at)
+       VALUES($1,$2,$3, now() + make_interval(hours => $4::int)) RETURNING *`,
+      [slot.group_id, slot.teacher_id, `${slot.subject_name} — ${formatSlot(slot)}`, slot.duration_hours]
+    );
+    await client.query('UPDATE slot_decisions SET session_id=$2 WHERE id=$1', [
+      slot.decision_id,
+      sess.rows[0].id,
+    ]);
+    await client.query('COMMIT');
+    return sess.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 const getSessionById = (sessionId) =>
@@ -1495,8 +1597,11 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
   const rows = await pool.query(
     `WITH eligible AS (
        SELECT pm.student_id,
-              COUNT(s.id) AS eligible_sessions,
-              COUNT(att.id) AS attended_sessions
+              COUNT(DISTINCT s.id) AS eligible_sessions,
+              -- الحضور يُحتسب مكتملًا فقط إن سجّل الطالب البداية والنهاية معًا لنفس الجلسة
+              COUNT(DISTINCT s.id) FILTER (
+                WHERE start_att.id IS NOT NULL AND end_att.id IS NOT NULL
+              ) AS attended_sessions
        FROM participation_modes pm
        LEFT JOIN group_memberships gm
               ON gm.student_id=pm.student_id AND gm.subject_id=pm.subject_id
@@ -1504,8 +1609,12 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
        LEFT JOIN mubahatha_sessions s
               ON s.group_id=gm.group_id
              AND (pm.joined_mubahatha_at IS NULL OR s.opened_at >= pm.joined_mubahatha_at)
-       LEFT JOIN mubahatha_attendance att
-              ON att.session_id=s.id AND att.student_id=pm.student_id
+       LEFT JOIN mubahatha_attendance start_att
+              ON start_att.session_id=s.id AND start_att.student_id=pm.student_id
+             AND start_att.phase='start'
+       LEFT JOIN mubahatha_attendance end_att
+              ON end_att.session_id=s.id AND end_att.student_id=pm.student_id
+             AND end_att.phase='end'
        WHERE pm.subject_id=$1 AND pm.stage_season_id=$2
        GROUP BY pm.student_id
      ),
@@ -1632,6 +1741,12 @@ module.exports = {
   listGroupSessions,
   getOpenSessionForGroup,
   markSessionAttendance,
+  openEndAttendance,
+  isEndAttendanceOpen,
+  getSessionsNeedingEndPrompt,
+  markEndPromptSent,
+  getSessionsNeedingAutoEnd,
+  END_ATTENDANCE_MINUTES,
   createExam,
   addExamQuestion,
   listExamQuestions,

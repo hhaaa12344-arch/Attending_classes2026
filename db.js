@@ -9,9 +9,21 @@ const pool = new Pool({
   // تُحفظ أعمدة الوقت القديمة بصيغة TIMESTAMP؛ تثبيت جلسة PostgreSQL على UTC
   // يمنع اختلاف تفسير المهل بين خادم وآخر، ثم نحول يوم الغياب إلى توقيت المعهد صراحةً.
   options: '-c timezone=UTC',
+  // عشرة اتصالات تكفي خدمة واحدة و1000+ طالب؛ الحل بتقليل الاستعلامات لا بزيادة الاتصالات.
+  max: Number(process.env.PG_POOL_MAX || 10),
+  idleTimeoutMillis: 30000, // يغلق الاتصال الخامل بعد نصف دقيقة فلا يتراكم
+  connectionTimeoutMillis: 5000, // لا ينتظر اتصالًا للأبد إن كانت القاعدة مشغولة
+  statement_timeout: 15000, // يقتل أي استعلام يتجاوز 15 ثانية فلا يعلّق البوت
+  query_timeout: 15000,
+  keepAlive: true,
   ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('railway')
     ? { rejectUnauthorized: false }
     : false,
+});
+
+// أخطاء الاتصالات الخاملة تُسجَّل ولا تُسقط العملية (توثيق node-postgres يوصي بهذا).
+pool.on('error', (err) => {
+  console.error('خطأ غير متوقع في مجمع اتصالات PostgreSQL:', err.message);
 });
 
 // إنشاء/تحديث الجداول تلقائيًا عند كل تشغيل (آمن للتشغيل المتكرر — IF NOT EXISTS في كل مكان)
@@ -68,6 +80,9 @@ async function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_students_stage ON students(stage_id);
     CREATE INDEX IF NOT EXISTS idx_lessons_subject ON lessons(subject_id);
     CREATE INDEX IF NOT EXISTS idx_attendance_student ON attendance(student_id);
+    -- فهارس أداء تُسرّع التقارير وفحص الغياب مع تراكم مئات آلاف الصفوف عبر المواسم:
+    CREATE INDEX IF NOT EXISTS idx_attendance_lesson ON attendance(lesson_id);
+    CREATE INDEX IF NOT EXISTS idx_attendance_student_lesson ON attendance(student_id, lesson_id);
     CREATE INDEX IF NOT EXISTS idx_channels_stage ON channels(stage_id);
   `);
 
@@ -334,6 +349,8 @@ async function initSchema() {
       ON lessons(source_chat_id, source_message_id)
       WHERE source_chat_id IS NOT NULL AND source_message_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_lessons_stage_season ON lessons(stage_season_id);
+    CREATE INDEX IF NOT EXISTS idx_lessons_subject_season ON lessons(subject_id, stage_season_id);
+    CREATE INDEX IF NOT EXISTS idx_lessons_season_activated ON lessons(stage_season_id, activated_at);
   `);
 
   // لقطة يومية ثابتة عند اكتمال مهل دروس اليوم؛ لا يسمح البوت بالتأشير بعد انتهاء المهلة.
@@ -372,6 +389,17 @@ async function initSchema() {
 
     ALTER TABLE student_attendance_days
       ADD COLUMN IF NOT EXISTS is_excused_leave BOOLEAN NOT NULL DEFAULT false;
+
+    -- عدّاد الغياب المتتالي محسوب ومخزَّن عند إدراج كل يوم، فلا يُعاد حسابه بالكامل كل جولة.
+    ALTER TABLE student_attendance_days
+      ADD COLUMN IF NOT EXISTS absence_streak INTEGER NOT NULL DEFAULT 0;
+
+    -- آخر يوم عولج فعلًا لكل موسم مرحلة، كي يبدأ الفحص منه لا من بداية الموسم في كل جولة.
+    CREATE TABLE IF NOT EXISTS attendance_processing_cursor (
+      stage_season_id INTEGER PRIMARY KEY REFERENCES stage_seasons(id) ON DELETE CASCADE,
+      last_processed_date DATE,
+      updated_at TIMESTAMP NOT NULL DEFAULT now()
+    );
 
     -- تصحيح أي لقطة أنشأها الإصدار 2.3.0 ليوم كان الطالب فيه بإجازة معتمدة.
     UPDATE student_attendance_days d
@@ -803,6 +831,49 @@ const getStudentActiveStageSeason = (studentId) =>
 const getStudentsByStage = (stageId) =>
   pool
     .query('SELECT * FROM students WHERE stage_id=$1 AND is_active=true', [stageId])
+    .then((r) => r.rows);
+
+// طلبة المرحلة النشطون غير المجازين اليوم — باستعلام واحد بدل استعلامَي إجازة لكل طالب.
+// يُستعمل لإشعارات الدروس والمباحثات والامتحانات، فيهبط عدد الاستعلامات من آلاف إلى واحد.
+const getEligibleStudentsForStage = (stageId, onDate) =>
+  pool
+    .query(
+      `SELECT st.id, st.telegram_id, st.full_name
+       FROM students st
+       WHERE st.stage_id=$1 AND st.is_active=true
+         AND NOT EXISTS (
+           SELECT 1 FROM student_leaves sl
+           WHERE sl.student_id=st.id AND sl.status='approved'
+             AND $2::date BETWEEN sl.start_date AND sl.end_date
+         )`,
+      [stageId, onDate]
+    )
+    .then((r) => r.rows);
+
+// نسخة إشعار الدرس اليومي: تُرجع فقط من لم يُشعَر اليوم وتحجز الإشعار لهم دفعة واحدة (ذرّيًا).
+const claimDailyLessonRecipients = (stageId, onDate) =>
+  pool
+    .query(
+      `WITH eligible AS (
+         SELECT st.id, st.telegram_id, st.full_name
+         FROM students st
+         WHERE st.stage_id=$1 AND st.is_active=true
+           AND NOT EXISTS (
+             SELECT 1 FROM student_leaves sl
+             WHERE sl.student_id=st.id AND sl.status='approved'
+               AND $2::date BETWEEN sl.start_date AND sl.end_date
+           )
+       ),
+       claimed AS (
+         INSERT INTO student_daily_lesson_notifications(student_id, stage_id, notification_date)
+         SELECT id, $1, $2::date FROM eligible
+         ON CONFLICT DO NOTHING
+         RETURNING student_id
+       )
+       SELECT e.id, e.telegram_id, e.full_name
+       FROM eligible e JOIN claimed c ON c.student_id = e.id`,
+      [stageId, onDate]
+    )
     .then((r) => r.rows);
 
 // ---------- المواسم وانتقال الطلبة ----------
@@ -1761,9 +1832,16 @@ const getNonAttendedStudentsForLesson = (lessonId, stageId) =>
 // ---------- تنبيهات الغياب المتتالي ----------
 // يُغلق يوم الدراسة بعد انتهاء مهلة آخر درس فيه، ثم تُحفظ لقطة لا تتغير لاحقًا.
 // اليوم غياب كامل فقط عندما يكون عدد الدروس المؤشرة ضمن مهلتها صفرًا.
-const processCompletedAttendanceDays = (timeZone = 'Asia/Baghdad') =>
-  pool
-    .query(
+// معالجة تدريجية: تعالج فقط الأيام التي اكتملت مهلة دروسها ولم تُعالَج بعد،
+// وتبدأ من اليوم التالي لآخر يوم مُعالَج لكل موسم بدل مسح الموسم كله في كل جولة.
+// وتحسب عدّاد الغياب المتتالي وقت الإدراج فيُخزَّن ولا يُعاد حسابه لاحقًا.
+async function processCompletedAttendanceDays(timeZone = 'Asia/Baghdad') {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // الأيام المكتملة الجديدة (بعد المؤشر) لكل طالب وموسم
+    const inserted = await client.query(
       `WITH completed_days AS (
          SELECT e.student_id,
                 l.stage_season_id,
@@ -1779,7 +1857,10 @@ const processCompletedAttendanceDays = (timeZone = 'Asia/Baghdad') =>
          FROM students st
          JOIN enrollments e ON e.student_id=st.id AND e.status='active'
          JOIN lessons l ON l.stage_season_id=e.stage_season_id
+           AND l.activated_at >= e.started_at
+           AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
          JOIN absence_monitoring_config cfg ON cfg.id=1
+         LEFT JOIN attendance_processing_cursor cur ON cur.stage_season_id=l.stage_season_id
          CROSS JOIN LATERAL (
            SELECT ((l.activated_at AT TIME ZONE 'UTC') AT TIME ZONE $1)::date AS attendance_date
          ) lesson_day
@@ -1787,8 +1868,9 @@ const processCompletedAttendanceDays = (timeZone = 'Asia/Baghdad') =>
          WHERE st.is_active=true
            AND lesson_day.attendance_date >=
              (((cfg.started_at AT TIME ZONE 'UTC') AT TIME ZONE $1)::date)
+           -- التدرّج: نتجاوز الأيام التي سبق معالجتها لهذا الموسم
+           AND (cur.last_processed_date IS NULL OR lesson_day.attendance_date > cur.last_processed_date)
          GROUP BY e.student_id, l.stage_season_id, lesson_day.attendance_date
-         -- اليوم هو تاريخ تفعيل الدروس، ولا نعتمده قبل انتهاء مهلة كل دروسه.
          HAVING MAX(l.active_until) <= now()
        )
        INSERT INTO student_attendance_days(
@@ -1804,41 +1886,65 @@ const processCompletedAttendanceDays = (timeZone = 'Asia/Baghdad') =>
        ON CONFLICT (student_id, stage_season_id, attendance_date) DO NOTHING
        RETURNING *`,
       [timeZone]
-    )
-    .then((r) => r.rows);
+    );
 
-const ABSENCE_STREAKS_CTE = `
-  WITH ordered_days AS (
-    SELECT d.*,
-           LAG(d.is_full_absence) OVER (
-             PARTITION BY d.student_id, d.stage_season_id ORDER BY d.attendance_date
-           ) AS previous_full_absence
-    FROM student_attendance_days d
-  ), grouped_days AS (
-    SELECT o.*,
-           SUM(
-             CASE
-               WHEN o.is_full_absence AND COALESCE(o.previous_full_absence, false) THEN 0
-               ELSE 1
-             END
-           ) OVER (
-             PARTITION BY o.student_id, o.stage_season_id
-             ORDER BY o.attendance_date ROWS UNBOUNDED PRECEDING
-           ) AS streak_group
-    FROM ordered_days o
-  ), streaked_days AS (
-    SELECT g.*,
-           CASE WHEN g.is_full_absence THEN
-             COUNT(*) FILTER (WHERE g.is_full_absence) OVER (
-               PARTITION BY g.student_id, g.stage_season_id, g.streak_group
-               ORDER BY g.attendance_date ROWS UNBOUNDED PRECEDING
-             )
-           ELSE 0 END::integer AS streak_length,
-           MIN(g.attendance_date) FILTER (WHERE g.is_full_absence) OVER (
-             PARTITION BY g.student_id, g.stage_season_id, g.streak_group
-           ) AS streak_start_date
-    FROM grouped_days g
-  )`;
+    // حساب عدّاد الغياب المتتالي لكل الأيام المتأثرة دفعة واحدة (يعمل ولو أُدرجت كلها معًا).
+    // الطريقة: نرقّم مجموعات التتابع، فيبدأ عدّاد جديد عند كل يوم حضور فعلي (لا إجازة)،
+    // وأيام الإجازة لا تفتح مجموعة جديدة ولا تُعدّ، ثم نعدّ أيام الغياب داخل كل مجموعة.
+    await client.query(
+      `WITH affected AS (
+         SELECT DISTINCT student_id, stage_season_id FROM student_attendance_days
+       ),
+       ordered AS (
+         SELECT d.id, d.student_id, d.stage_season_id, d.attendance_date,
+                d.is_full_absence, d.is_excused_leave,
+                SUM(CASE WHEN d.is_full_absence = false AND d.is_excused_leave = false THEN 1 ELSE 0 END)
+                  OVER (PARTITION BY d.student_id, d.stage_season_id
+                        ORDER BY d.attendance_date ROWS UNBOUNDED PRECEDING) AS break_group
+         FROM student_attendance_days d
+       ),
+       streaks AS (
+         SELECT o.id,
+                CASE WHEN o.is_full_absence THEN
+                  COUNT(*) FILTER (WHERE o.is_full_absence)
+                    OVER (PARTITION BY o.student_id, o.stage_season_id, o.break_group
+                          ORDER BY o.attendance_date ROWS UNBOUNDED PRECEDING)
+                ELSE 0 END::integer AS streak
+         FROM ordered o
+       )
+       UPDATE student_attendance_days d
+       SET absence_streak = s.streak
+       FROM streaks s
+       WHERE s.id = d.id AND d.absence_streak <> s.streak`
+    );
+
+    // تحديث المؤشر لكل موسم عولج فيه يوم جديد (تجميع مباشر بلا قائمة IN عملاقة)
+    if (inserted.rows.length > 0) {
+      const seasonIds = [...new Set(inserted.rows.map((r) => r.stage_season_id))];
+      await client.query(
+        `INSERT INTO attendance_processing_cursor(stage_season_id, last_processed_date, updated_at)
+         SELECT stage_season_id, MAX(attendance_date), now()
+         FROM student_attendance_days
+         WHERE stage_season_id = ANY($1::int[])
+         GROUP BY stage_season_id
+         ON CONFLICT (stage_season_id) DO UPDATE
+           SET last_processed_date = GREATEST(
+                 attendance_processing_cursor.last_processed_date,
+                 EXCLUDED.last_processed_date),
+               updated_at = now()`,
+        [seasonIds]
+      );
+    }
+
+    await client.query('COMMIT');
+    return inserted.rows;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 async function getAbsenceAlertCandidates(threshold, alertKind) {
   const sentColumn =
@@ -1850,22 +1956,22 @@ async function getAbsenceAlertCandidates(threshold, alertKind) {
   if (!sentColumn || !Number.isInteger(threshold) || threshold < 1) {
     throw new Error('نوع تنبيه الغياب أو حدّه غير صالح.');
   }
+  // يعتمد على absence_streak المخزَّن مسبقًا، فلا يعيد حساب السلاسل بـ Window Functions كل جولة.
   return pool
     .query(
-      `${ABSENCE_STREAKS_CTE}
-       SELECT d.id AS attendance_day_id,
+      `SELECT d.id AS attendance_day_id,
               d.student_id, st.telegram_id, st.full_name,
               COALESCE(ss.stage_name_snapshot, sg.name) AS stage_name,
-              d.stage_season_id, d.streak_length,
-              d.streak_start_date, d.attendance_date AS streak_end_date
-       FROM streaked_days d
+              d.stage_season_id, d.absence_streak AS streak_length,
+              d.attendance_date AS streak_end_date
+       FROM student_attendance_days d
        JOIN students st ON st.id=d.student_id AND st.is_active=true
        JOIN enrollments e
          ON e.student_id=d.student_id AND e.stage_season_id=d.stage_season_id AND e.status='active'
        JOIN stage_seasons ss ON ss.id=d.stage_season_id
        JOIN stages sg ON sg.id=ss.stage_id
        WHERE d.is_full_absence=true
-         AND d.streak_length=$1
+         AND d.absence_streak=$1
          AND d.${sentColumn} IS NULL
        ORDER BY stage_name, st.full_name`,
       [threshold]
@@ -2097,6 +2203,8 @@ module.exports = {
   archiveStudent,
   hardDeleteStudent,
   getStudentsByStage,
+  getEligibleStudentsForStage,
+  claimDailyLessonRecipients,
   getStudentActiveStageSeason,
   listStageSeasons,
   listStudentSeasons,

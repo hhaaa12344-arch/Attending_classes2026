@@ -50,9 +50,30 @@ if (ADMIN_IDS.length === 0) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
+// طابور إرسال عام ينظّم معدّل الرسائل ويعالج 429؛ يُستعمل للبث الجماعي.
+const { createTelegramQueue, PRIORITY } = require('./telegramQueue');
+const tgQueue = createTelegramQueue(bot.telegram);
+
 // حالة مؤقتة في الذاكرة لكل مستخدم لإدارة خطوات الإدخال المتعددة (تسجيل، إضافة، تعديل...)
 // يعمل بشكل صحيح طالما البوت يعمل على نسخة تشغيل واحدة (الوضع الافتراضي على Railway)
-const userState = new Map();
+const rawUserState = new Map();
+// غلاف يضيف تلقائيًا صلاحية 30 دقيقة لكل حالة إدخال، فتُنظَّف المهجورة دوريًا
+const userState = {
+  set(key, value) {
+    return rawUserState.set(key, { ...value, expiresAt: Date.now() + 30 * 60 * 1000 });
+  },
+  get(key) {
+    return rawUserState.get(key);
+  },
+  delete(key) {
+    return rawUserState.delete(key);
+  },
+  entries() {
+    return rawUserState.entries();
+  },
+};
+const timers = [];  // مراجع المؤقتات للإغلاق المنظم
+let scheduleTickRunning = false;  // قفل يمنع تداخل جولات الجدولة
 
 const BACK_BUTTON = '↩️ رجوع';
 const STUDENT_ACTIVITY_BUTTON = '📋 المتغيرات';
@@ -243,46 +264,39 @@ async function sendToStageStudents(stageId, text, extra = undefined, options = {
     skipOnLeave = false,
     dailyLessonNotificationDate = null,
   } = options;
-  const students = await db.getStudentsByStage(stageId);
   const today = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
-  let delivered = 0;
-  let skippedOnLeave = 0;
-  let alreadyNotifiedToday = 0;
-  for (const st of students) {
-    if (excludeStudentIds.has(st.id)) continue;
-    // أثناء الإجازة: لا تصل إشعارات الدروس للطالب المجاز في هذا اليوم.
-    if (skipOnLeave && (await db.isStudentOnLeave(st.id, today))) {
-      skippedOnLeave += 1;
-      continue;
-    }
-    let dailyNotificationClaimed = false;
-    if (dailyLessonNotificationDate) {
-      dailyNotificationClaimed = await db.claimDailyLessonNotification(
-        st.id,
-        stageId,
-        dailyLessonNotificationDate
-      );
-      if (!dailyNotificationClaimed) {
-        alreadyNotifiedToday += 1;
-        continue;
-      }
-    }
-    try {
-      await bot.telegram.sendMessage(st.telegram_id, text, extra);
-      delivered += 1;
-    } catch (err) {
-      console.warn(`تعذر إرسال إشعار للطالب ${st.id}:`, err.description || err.message);
-      if (dailyNotificationClaimed) {
-        try {
-          await db.releaseDailyLessonNotification(st.id, stageId, dailyLessonNotificationDate);
-        } catch (releaseError) {
-          console.warn(`تعذر تحرير حجز التنبيه اليومي للطالب ${st.id}:`, releaseError.message);
-        }
-      }
-    }
-    await new Promise((r) => setTimeout(r, 40)); // احترام حدود تليجرام لعدد الرسائل بالثانية
+
+  // استعلام واحد يُرجع المستحقين، بدل استعلامَي إجازة/حجز لكل طالب على حدة.
+  let recipients;
+  if (dailyLessonNotificationDate) {
+    // يُرجع فقط من لم يُشعَر اليوم ويحجز لهم الإشعار ذرّيًا في الاستعلام نفسه
+    recipients = await db.claimDailyLessonRecipients(stageId, dailyLessonNotificationDate);
+  } else if (skipOnLeave) {
+    recipients = await db.getEligibleStudentsForStage(stageId, today);
+  } else {
+    recipients = await db.getStudentsByStage(stageId);
   }
-  return { delivered, total: students.length, skippedOnLeave, alreadyNotifiedToday };
+
+  const targets = recipients.filter((st) => !excludeStudentIds.has(st.id));
+  // الإرسال عبر الطابور المركزي (أولوية بث منخفضة)، بلا تأخير يدوي — الطابور ينظّم المعدل.
+  const results = await Promise.allSettled(
+    targets.map((st) =>
+      tgQueue.sendMessage(st.telegram_id, text, extra, { priority: PRIORITY.low })
+    )
+  );
+  const delivered = results.filter((r) => r.status === 'fulfilled').length;
+
+  // تحرير حجز اليوم لمن فشل إرساله فعليًا، كي يُعاد الإشعار في الجولة التالية
+  if (dailyLessonNotificationDate) {
+    await Promise.allSettled(
+      results.map((r, i) =>
+        r.status === 'rejected'
+          ? db.releaseDailyLessonNotification(targets[i].id, stageId, dailyLessonNotificationDate)
+          : Promise.resolve()
+      )
+    );
+  }
+  return { delivered, total: targets.length };
 }
 
 // عند نشر درس جديد: نبّه الطلبة الذين انتهت إجازتهم توًّا بضرورة متابعة الدروس الفائتة أيضًا.
@@ -2733,13 +2747,26 @@ bot.action(/admin_tunassign_do:(\d+)/, async (ctx) => {
 const SLOT_PROMPT_LEAD_MINUTES = Number(process.env.SLOT_PROMPT_LEAD_MINUTES || 5);
 
 async function runScheduleTick() {
+  // قفل بسيط يمنع تداخل جولتين (لو تأخرت جولة تجاوزت الدقيقة) فلا تُفتح جلسة مرتين.
+  if (scheduleTickRunning) return;
+  scheduleTickRunning = true;
+  try {
+    await runScheduleTickInner();
+  } finally {
+    scheduleTickRunning = false;
+  }
+}
+
+async function runScheduleTickInner() {
   // 1) سؤال الأستاذ قبل الموعد بخمس دقائق: هل توجد محاضرة اليوم؟
   try {
     const pending = await studies.getSlotsNeedingPrompt(SLOT_PROMPT_LEAD_MINUTES);
     for (const slot of pending) {
       const date = slot.scheduled_date.toISOString().slice(0, 10);
       // يُسجَّل السؤال أولًا حتى لا يتكرر لو فشل الإرسال
-      await studies.recordSlotPrompt(slot.id, date);
+      // recordSlotPrompt يُرجع صفًا فقط إن أدرج فعليًا؛ إن لم يُدرج فقد سُئل مسبقًا فنتجاوز
+      const promptRow = await studies.recordSlotPrompt(slot.id, date);
+      if (!promptRow) continue;
       if (!slot.teacher_telegram_id) continue;
       try {
         await bot.telegram.sendMessage(
@@ -2765,31 +2792,34 @@ async function runScheduleTick() {
     const ready = await studies.getSlotsReadyToStart();
     for (const slot of ready) {
       const session = await studies.startSessionFromSlot(slot);
+      if (!session) continue; // فُتحت من جولة أخرى — تجاوز
       const students = await studies.listGroupStudents(slot.group_id);
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback('✅ حضرتُ المباحثة', `mub_attend:${session.id}`)],
       ]);
-      for (const st of students) {
-        try {
-          await bot.telegram.sendMessage(
+      await Promise.allSettled(
+        students.map((st) =>
+          tgQueue.sendMessage(
             Number(st.telegram_id),
             `🟢 بدأت مباحثة «${slot.subject_name}» الآن.\n` +
               `المجموعة: ${slot.group_title || 'المجموعة ' + slot.group_number}\n\n` +
               'بعد حضورك المباحثة فعلًا اضغط الزر أدناه لتسجيل حضورك.',
-            keyboard
-          );
-        } catch (err) {
-          console.warn(`تعذر تنبيه الطالب ${st.id} ببدء المباحثة:`, err.description || err.message);
-        }
-        await new Promise((r) => setTimeout(r, 40));
-      }
+            keyboard,
+            { priority: PRIORITY.normal }
+          )
+        )
+      );
       if (slot.teacher_id) {
         const teacher = await db.getTeacherById(slot.teacher_id);
         if (teacher && teacher.telegram_id) {
           try {
             await bot.telegram.sendMessage(
               Number(teacher.telegram_id),
-              `🟢 فُتحت مباحثة «${slot.subject_name}» وأُرسل التنبيه إلى ${students.length} طالبًا.`
+              `🟢 فُتحت مباحثة «${slot.subject_name}» وأُرسل تنبيه حضور البداية إلى ${students.length} طالبًا.\n` +
+                'عند انتهاء المباحثة اضغط الزر لفتح حضور النهاية (أو يُفتح تلقائيًا عند حلول وقت الانتهاء).',
+              Markup.inlineKeyboard([
+                [Markup.button.callback('🔚 إنهاء المباحثة وفتح حضور النهاية', `mub_finish:${session.id}`)],
+              ])
             );
           } catch (err) {
             console.warn('تعذر إبلاغ الأستاذ ببدء الجلسة:', err.description || err.message);
@@ -2800,6 +2830,62 @@ async function runScheduleTick() {
   } catch (err) {
     console.error('خطأ في فتح جلسات المباحثات:', err);
   }
+
+  // 3) تنبيه الأستاذ قبل انتهاء المباحثة بعشر دقائق ليفتح حضور النهاية
+  try {
+    const needing = await studies.getSessionsNeedingEndPrompt(studies.END_ATTENDANCE_MINUTES);
+    for (const s of needing) {
+      await studies.markEndPromptSent(s.id);
+      if (!s.teacher_telegram_id) continue;
+      try {
+        await bot.telegram.sendMessage(
+          Number(s.teacher_telegram_id),
+          `⏰ تقترب نهاية مباحثة «${s.subject_name}» — ${s.group_title || 'المجموعة ' + s.group_number}.\n` +
+            'اضغط لإنهائها الآن وفتح حضور النهاية، أو ستُفتح تلقائيًا عند حلول وقت الانتهاء.',
+          Markup.inlineKeyboard([
+            [Markup.button.callback('🔚 إنهاء المباحثة وفتح حضور النهاية', `mub_finish:${s.id}`)],
+          ])
+        );
+      } catch (err) {
+        console.warn('تعذر تنبيه الأستاذ بحضور النهاية:', err.description || err.message);
+      }
+    }
+  } catch (err) {
+    console.error('خطأ في تنبيه حضور النهاية:', err);
+  }
+
+  // 4) فتح حضور النهاية تلقائيًا للجلسات التي بلغت وقت انتهائها ولم يُنهِها الأستاذ
+  try {
+    const auto = await studies.getSessionsNeedingAutoEnd();
+    for (const s of auto) {
+      await openEndAttendanceAndNotify(s.id, 'تلقائيًا');
+    }
+  } catch (err) {
+    console.error('خطأ في الفتح التلقائي لحضور النهاية:', err);
+  }
+}
+
+// يفتح حضور النهاية (مرة واحدة) ويرسل زر «حضرت النهاية» لطلبة المجموعة عبر الطابور.
+async function openEndAttendanceAndNotify(sessionId, byWhom) {
+  const opened = await studies.openEndAttendance(sessionId);
+  if (!opened) return null; // مفتوح مسبقًا
+  const session = await studies.getSessionById(sessionId);
+  const students = await studies.listGroupStudents(session.group_id);
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('✅ حضرتُ نهاية المباحثة', `mub_end_attend:${sessionId}`)],
+  ]);
+  const results = await Promise.allSettled(
+    students.map((st) =>
+      tgQueue.sendMessage(
+        Number(st.telegram_id),
+        `🔔 انتهت المباحثة (${byWhom}). سجّل حضور النهاية خلال ${studies.END_ATTENDANCE_MINUTES} دقائق.\n` +
+          'ملاحظة: حضور النهاية سجل مستقل عن حضور البداية، وكلاهما مطلوب لاكتمال حضورك.',
+        keyboard,
+        { priority: PRIORITY.normal }
+      )
+    )
+  );
+  return { notified: results.filter((r) => r.status === 'fulfilled').length };
 }
 
 bot.action(/slot_yes:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
@@ -2825,15 +2911,49 @@ bot.action(/mub_attend:(\d+)/, async (ctx) => {
   const session = await studies.getSessionById(sessionId);
   if (!session) return ctx.answerCbQuery('الجلسة غير موجودة.');
   if (session.is_closed || new Date(session.closes_at) < new Date()) {
-    return ctx.answerCbQuery('انتهى وقت تسجيل الحضور لهذه المباحثة.');
+    return ctx.answerCbQuery('انتهى وقت تسجيل حضور بداية المباحثة.');
   }
   const member = await studies.isStudentInGroup(student.id, session.group_id);
   if (!member) return ctx.answerCbQuery('هذه المباحثة ليست لمجموعتك.');
 
-  const marked = await studies.markSessionAttendance(sessionId, student.id);
-  if (!marked) return ctx.answerCbQuery('سُجّل حضورك مسبقًا ✅');
-  await ctx.answerCbQuery('تم تسجيل حضورك ✅');
-  return ctx.editMessageText('✅ تم تسجيل حضورك في المباحثة. بارك الله فيك.');
+  const marked = await studies.markSessionAttendance(sessionId, student.id, 'start');
+  if (!marked) return ctx.answerCbQuery('سجّلت حضور البداية مسبقًا ✅');
+  await ctx.answerCbQuery('تم تسجيل حضور البداية ✅');
+  return ctx.editMessageText(
+    '✅ سُجّل حضورك في بداية المباحثة.\nلا تنسَ تسجيل حضور النهاية عند إغلاقها.'
+  );
+});
+
+// حضور النهاية — سجل مستقل عن البداية
+bot.action(/mub_end_attend:(\d+)/, async (ctx) => {
+  const student = await db.getStudentByTelegramId(ctx.from.id);
+  if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا عبر /start');
+  const sessionId = Number(ctx.match[1]);
+  if (!(await studies.isEndAttendanceOpen(sessionId))) {
+    return ctx.answerCbQuery('انتهى وقت تسجيل حضور النهاية.');
+  }
+  const session = await studies.getSessionById(sessionId);
+  if (!session) return ctx.answerCbQuery('الجلسة غير موجودة.');
+  if (!(await studies.isStudentInGroup(student.id, session.group_id))) {
+    return ctx.answerCbQuery('هذه المباحثة ليست لمجموعتك.');
+  }
+  const marked = await studies.markSessionAttendance(sessionId, student.id, 'end');
+  if (!marked) return ctx.answerCbQuery('سجّلت حضور النهاية مسبقًا ✅');
+  await ctx.answerCbQuery('تم تسجيل حضور النهاية ✅');
+  return ctx.editMessageText('✅ سُجّل حضورك في نهاية المباحثة. اكتمل حضورك، بارك الله فيك.');
+});
+
+// الأستاذ ينهي المباحثة يدويًا فيفتح حضور النهاية فورًا
+bot.action(/mub_finish:(\d+)/, async (ctx) => {
+  const teacher = await db.getTeacherByTelegramId(ctx.from.id);
+  if (!teacher && !isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const sessionId = Number(ctx.match[1]);
+  await ctx.answerCbQuery();
+  const result = await openEndAttendanceAndNotify(sessionId, 'الأستاذ');
+  if (!result) return ctx.editMessageText('حضور النهاية مفتوح مسبقًا أو الجلسة غير موجودة.');
+  return ctx.editMessageText(
+    `✅ أُنهيت المباحثة وفُتح حضور النهاية لـ${result.notified} طالبًا لمدة ${studies.END_ATTENDANCE_MINUTES} دقائق.`
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -4387,7 +4507,7 @@ async function purgeBotMessages(ctx) {
   const chatId = ctx.chat && ctx.chat.id;
   const list = botMessages.get(chatId);
   if (!chatId || !list || list.length === 0) return;
-  botMessages.set(chatId, []);
+  botMessages.delete(chatId);
   for (const id of list) {
     try {
       await ctx.telegram.deleteMessage(chatId, id);
@@ -4822,12 +4942,51 @@ async function main() {
   await bot.launch();
   console.log('البوت يعمل الآن ✅');
 
-  setInterval(checkReminders, 10 * 60 * 1000); // فحص كل 10 دقائق
-  setInterval(checkConsecutiveAbsence, 10 * 60 * 1000); // تثبيت الأيام وإرسال تنبيهي 3 و10 أيام
-  setInterval(runScheduleTick, 60 * 1000); // مواعيد المباحثات: سؤال الأستاذ وفتح الجلسات
+  // مراجع المؤقتات لإيقافها عند الإغلاق المنظم
+  timers.push(setInterval(checkReminders, 10 * 60 * 1000));
+  timers.push(setInterval(checkConsecutiveAbsence, 10 * 60 * 1000));
+  timers.push(setInterval(runScheduleTick, 60 * 1000));
+  // تنظيف الذاكرة كل خمس دقائق: حالات إدخال منتهية، وسجلات مجموعات قديمة
+  timers.push(setInterval(cleanupMemory, 5 * 60 * 1000));
   runScheduleTick();
   checkReminders();
   checkConsecutiveAbsence();
+}
+
+// تنظيف الخرائط في الذاكرة كي لا تنمو بلا حدّ مع كثرة المستخدمين
+function cleanupMemory() {
+  const now = Date.now();
+  let cleaned = 0;
+  for (const [userId, state] of userState.entries()) {
+    if (state && state.expiresAt && state.expiresAt < now) {
+      userState.delete(userId);
+      cleaned += 1;
+    }
+  }
+  // المجموعات المُلتقطة التي مضى على إضافتها أكثر من 24 ساعة
+  for (const [chatId, info] of pendingGroupChats.entries()) {
+    if (info && info.at && now - info.at > 24 * 60 * 60 * 1000) {
+      pendingGroupChats.delete(chatId);
+    }
+  }
+  if (cleaned > 0) console.log(`تنظيف الذاكرة: أُزيلت ${cleaned} حالة إدخال منتهية.`);
+}
+
+// إغلاق منظم: يوقف المؤقتات والاستقبال ثم يغلق قاعدة البيانات، فلا تُفقد البيانات
+async function gracefulShutdown(signal) {
+  console.log(`استلام ${signal}: إغلاق منظم...`);
+  for (const t of timers) clearInterval(t);
+  try {
+    bot.stop(signal);
+  } catch (err) {
+    /* قد يكون متوقفًا */
+  }
+  try {
+    await db.pool.end();
+  } catch (err) {
+    console.warn('تعذر إغلاق مجمع الاتصالات:', err.message);
+  }
+  process.exit(0);
 }
 
 if (require.main === module) {
@@ -4836,8 +4995,12 @@ if (require.main === module) {
     process.exit(1);
   });
 
-  process.once('SIGINT', () => bot.stop('SIGINT'));
-  process.once('SIGTERM', () => bot.stop('SIGTERM'));
+  process.once('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  // لا تُسقط العملية على خطأ غير ملتقط؛ سجّله وواصل العمل
+  process.on('unhandledRejection', (err) => {
+    console.error('وعد مرفوض غير معالَج:', err && err.message ? err.message : err);
+  });
 }
 
 module.exports = {
