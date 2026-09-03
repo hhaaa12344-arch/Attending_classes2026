@@ -395,30 +395,47 @@ async function assignStudentToGroup(studentId, subjectId, stageSeasonId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const candidate = await client.query(
-      `SELECT g.id, g.capacity,
-              (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) AS member_count
-       FROM mubahatha_groups g
-       WHERE g.subject_id=$1 AND g.stage_season_id=$2 AND g.is_active=true
-       ORDER BY g.group_number
-       FOR UPDATE`,
+    // قائمة المجموعات مرتبة؛ نجرّب واحدة واحدة: نقفل صف المجموعة نفسه (FOR UPDATE)
+    // ثم نعدّ أعضاءها داخل القفل. القفل على صف المجموعة يُسلسل المتسابقين على نفس المجموعة،
+    // فلا يرى اثنان العدد القديم معًا، ومن ثمّ لا تتجاوز السعة أبدًا.
+    const groups = await client.query(
+      `SELECT id, capacity FROM mubahatha_groups
+       WHERE subject_id=$1 AND stage_season_id=$2 AND is_active=true
+       ORDER BY group_number`,
       [subjectId, stageSeasonId]
     );
-    const target = candidate.rows.find((g) => Number(g.member_count) < Number(g.capacity));
-    if (!target) {
-      await client.query('ROLLBACK');
-      return { group: null, created: false, full: true };
+
+    for (const g of groups.rows) {
+      // اقفل صف هذه المجموعة تحديدًا (يُسلسل كل من يحاول الانضمام إليها)
+      await client.query('SELECT id FROM mubahatha_groups WHERE id=$1 FOR UPDATE', [g.id]);
+      const countRow = await client.query(
+        'SELECT COUNT(*)::int AS c FROM group_memberships WHERE group_id=$1',
+        [g.id]
+      );
+      if (countRow.rows[0].c < Number(g.capacity)) {
+        // قد يكون الطالب أُدرج في مجموعة أخرى بين الفحص الأول والقفل؛ ON CONFLICT يحميه
+        const ins = await client.query(
+          `INSERT INTO group_memberships(group_id, student_id, subject_id, stage_season_id)
+           VALUES($1,$2,$3,$4)
+           ON CONFLICT (student_id, subject_id, stage_season_id) DO NOTHING
+           RETURNING id`,
+          [g.id, studentId, subjectId, stageSeasonId]
+        );
+        await client.query('COMMIT');
+        if (ins.rows[0]) {
+          const group = await pool
+            .query('SELECT * FROM mubahatha_groups WHERE id=$1', [g.id])
+            .then((r) => r.rows[0]);
+          return { group, created: true };
+        }
+        // أُدرج في مجموعة أخرى متزامنًا — نُرجع مجموعته الفعلية
+        const already = await getStudentGroup(studentId, subjectId, stageSeasonId);
+        return { group: already, created: false };
+      }
     }
-    await client.query(
-      `INSERT INTO group_memberships(group_id, student_id, subject_id, stage_season_id)
-       VALUES($1,$2,$3,$4)`,
-      [target.id, studentId, subjectId, stageSeasonId]
-    );
-    await client.query('COMMIT');
-    const group = await pool
-      .query('SELECT * FROM mubahatha_groups WHERE id=$1', [target.id])
-      .then((r) => r.rows[0]);
-    return { group, created: true };
+
+    await client.query('ROLLBACK');
+    return { group: null, created: false, full: true };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
