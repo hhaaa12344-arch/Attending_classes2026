@@ -54,6 +54,56 @@ const bot = new Telegraf(BOT_TOKEN);
 const { createTelegramQueue, PRIORITY } = require('./telegramQueue');
 const tgQueue = createTelegramQueue(bot.telegram);
 
+// حارس وضع المعاينة: يمنع أي عملية كتابة قبل أن تصل لمعالجها.
+// أزرار الكتابة (تسجيل حضور، منح درجة، إرسال، اختيار نمط، حذف...) تُعرض معطّلة.
+// أزرار الاستعراض والتنقل تمر بحرية. القائمة تُبنى من بادئات معرّفات أزرار الكتابة.
+const PREVIEW_BLOCKED_ACTION_PREFIXES = [
+  'attend', 'mub_attend', 'mub_end_attend', 'mub_finish',
+  'pm_set', 'pm_join', 'pm_switch', 'pm_switchok',
+  'rep_send', 'stex_start', 'stex_ans',
+  'sr_item', 'sr_apply', 'sr_manual', 'lr_grade', 'gr_edit',
+  'season_choice', 'leave_approve', 'leave_reject', 'leave_cancel', 'leave_open',
+  'noop_activity',
+];
+// خطوات الإدخال النصي التي تكتب في القاعدة (تُمنع في المعاينة)
+const PREVIEW_BLOCKED_TEXT_ACTIONS = new Set([
+  'leave_awaiting_days', 'leave_awaiting_reason', 'student_report_upload',
+  'report_item_score', 'teacher_report_score', 'grade_override', 'lessons_score',
+]);
+// أزرار قوائم الطالب/الأستاذ التي تُنفّذ عمليات (لا مجرد عرض)
+const PREVIEW_BLOCKED_HEARS = new Set(['🌴 طلب إجازة', '📄 إرسال تقرير']);
+
+bot.use(async (ctx, next) => {
+  if (!isInPreview(ctx)) return next();
+
+  // أزرار الكتابة عبر callback
+  const data = ctx.callbackQuery && ctx.callbackQuery.data;
+  if (data) {
+    const prefix = data.split(':')[0];
+    if (PREVIEW_BLOCKED_ACTION_PREFIXES.includes(prefix)) {
+      return ctx.answerCbQuery(
+        '👁️ وضع المعاينة: هذه العملية معطّلة، ولا يُحفظ شيء.',
+        { show_alert: true }
+      );
+    }
+  }
+
+  // أزرار قوائم تُنفّذ عمليات
+  const text = ctx.message && ctx.message.text;
+  if (text && PREVIEW_BLOCKED_HEARS.has(text.trim())) {
+    return ctx.reply('👁️ وضع المعاينة: هذه العملية معطّلة، ولا يُحفظ شيء.');
+  }
+
+  // خطوة إدخال نصي تكتب في القاعدة
+  const state = userState.get(ctx.from.id);
+  if (text && state && PREVIEW_BLOCKED_TEXT_ACTIONS.has(state.action)) {
+    userState.delete(ctx.from.id);
+    return ctx.reply('👁️ وضع المعاينة: هذه العملية معطّلة، ولا يُحفظ شيء.');
+  }
+
+  return next();
+});
+
 // حالة مؤقتة في الذاكرة لكل مستخدم لإدارة خطوات الإدخال المتعددة (تسجيل، إضافة، تعديل...)
 // يعمل بشكل صحيح طالما البوت يعمل على نسخة تشغيل واحدة (الوضع الافتراضي على Railway)
 const rawUserState = new Map();
@@ -80,6 +130,7 @@ const STUDENT_ACTIVITY_BUTTON = '📋 المتغيرات';
 const LEGACY_STUDENT_ACTIVITY_BUTTON = '📋 إجازاتي وإنذاراتي';
 const LEGACY_STUDENT_ACTIVITY_BUTTON_2 = '📋 إجازاتي وتنبيهاتي';
 const STUDENT_MENU_BUTTONS = new Set([
+  '🚪 الخروج من المعاينة',
   '📚 دروس اليوم',
   '📊 تقريري',
   '🌴 طلب إجازة',
@@ -95,6 +146,7 @@ const STUDENT_MENU_BUTTONS = new Set([
 
 // أزرار لوحة الأستاذ — تُعامل كأزرار قوائم فلا تُفسَّر كإدخال نصي
 const TEACHER_MENU_BUTTONS = new Set([
+  '🚪 الخروج من المعاينة',
   '📚 موادي', '📊 حضور موادي', '👥 المجموعات',
   '🗓️ جدول المباحثات', '📝 الامتحانات', '🏁 إنهاء الموسم', '✏️ تحرير الدرجات',
   '📄 تقارير الطلبة', '🔗 روابط المجموعات',
@@ -116,11 +168,49 @@ const ADMIN_MENU_BUTTONS = new Set([
   '👨‍🏫 إدارة الأساتذة',
   '🔄 تغيير أستاذ مادة',
   '📈 لوحة المعهد',
+  '👁️ الدخول بصفة أخرى',
   '📄 تقارير الطلبة',
   '🔗 روابط المجموعات',
 ]);
 
 const isAdmin = (ctx) => ADMIN_IDS.includes(ctx.from.id);
+
+// ---------------------------------------------------------------------------
+// وضع المعاينة للأدمن: يدخل بصفة طالب أو أستاذ حقيقي فيرى ما يراه، بلا حفظ أي شيء.
+// ---------------------------------------------------------------------------
+// المفتاح: معرّف تليجرام للأدمن → { role: 'student'|'teacher', id, name }
+const previewMode = new Map();
+
+const isInPreview = (ctx) => isAdmin(ctx) && previewMode.has(ctx.from.id);
+const getPreview = (ctx) => previewMode.get(ctx.from.id);
+
+// يُستدعى في بداية كل معالج يكتب في قاعدة البيانات. إن كان الأدمن يعاين، يوقف العملية.
+// يعالج نداءات الأزرار (answerCbQuery) والرسائل (reply) معًا.
+async function blockIfPreview(ctx) {
+  if (!isInPreview(ctx)) return false;
+  const msg = '👁️ وضع المعاينة: هذه العملية معطّلة، ولا يُحفظ أي شيء في قاعدة البيانات.';
+  try {
+    if (ctx.callbackQuery) await ctx.answerCbQuery(msg, { show_alert: true });
+    else await ctx.reply(msg);
+  } catch (err) {
+    /* تجاهل */
+  }
+  return true;
+}
+
+// الطالب الفعّال: المنتحَل في وضع المعاينة، وإلا صاحب الحساب.
+async function effectiveStudent(ctx) {
+  const pv = getPreview(ctx);
+  if (pv && pv.role === 'student') return db.getStudentById(pv.id);
+  return db.getStudentByTelegramId(ctx.from.id);
+}
+
+// الأستاذ الفعّال: المنتحَل في وضع المعاينة، وإلا صاحب الحساب (أو الأدمن بصلاحية أستاذ).
+async function effectiveTeacher(ctx) {
+  const pv = getPreview(ctx);
+  if (pv && pv.role === 'teacher') return db.getTeacherById(pv.id);
+  return db.getTeacherByTelegramId(ctx.from.id);
+}
 
 // رسالة تُرسل للطالب أول مرة يسجّل فيها، تُوضّح جهة النظام والحكم الشرعي لتأشير الحضور.
 const WELCOME_MESSAGE =
@@ -204,7 +294,7 @@ function officialConfirmationKeyboard() {
 }
 
 async function sendOfficialConfirmationPrompt(ctx) {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (student) {
     return replyStudentScreen(ctx, student, OFFICIAL_CONFIRMATION_MESSAGE, officialConfirmationKeyboard());
   }
@@ -230,7 +320,7 @@ function adminMainMenu() {
     ['⚙️ إدارة المراحل', '🗓️ بدء موسم جديد'],
     ['🗂️ أرشيف المواسم', '🌴 طلبات الإجازة'],
     ['👨‍🏫 إدارة الأساتذة', '🔄 تغيير أستاذ مادة'],
-    ['📈 لوحة المعهد'],
+    ['📈 لوحة المعهد', '👁️ الدخول بصفة أخرى'],
     ['👥 المجموعات', '🗓️ جدول المباحثات'],
     ['📝 الامتحانات', '🏁 إنهاء الموسم'],
     ['✏️ تحرير الدرجات', '📄 تقارير الطلبة'],
@@ -569,7 +659,7 @@ function singleLessonKeyboard(lesson) {
 }
 
 async function showTodayLessons(ctx, options = {}) {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   const transition = await db.getPendingTransition(student.id);
   if (transition) {
@@ -791,7 +881,7 @@ function transitionKeyboard(transition) {
 }
 
 async function showTransitionPrompt(ctx, options = {}) {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   const transition = await db.getPendingTransition(student.id);
   if (!transition) {
@@ -827,7 +917,12 @@ function seasonSelectionKeyboard(stages, selectedIds) {
 // ---------------------------------------------------------------------------
 bot.start(async (ctx) => {
   userState.delete(ctx.from.id);
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  // إرسال /start أثناء المعاينة يُنهيها ويعيد الأدمن لوضعه
+  if (isInPreview(ctx)) {
+    previewMode.delete(ctx.from.id);
+    return ctx.reply('🚪 خرجت من وضع المعاينة، وعدت أدمن.', adminMainMenu());
+  }
+  const student = await effectiveStudent(ctx);
   if (student) {
     if (!student.is_active) {
       return ctx.reply('حسابك مؤرشف حاليًا. تواصل مع الأدمن إذا كنت تريد العودة للدراسة.');
@@ -839,7 +934,7 @@ bot.start(async (ctx) => {
     return undefined;
   }
   // الأستاذ المرتبط يرى لوحته مباشرة، ولا يمر بتسجيل الطلبة
-  const teacher = await db.getTeacherByTelegramId(ctx.from.id);
+  const teacher = await effectiveTeacher(ctx);
   if (teacher) {
     return ctx.reply(`أهلًا بك أستاذ ${teacher.full_name} 👋`, teacherMainMenu());
   }
@@ -854,7 +949,7 @@ bot.start(async (ctx) => {
 });
 
 bot.command('teacher', async (ctx) => {
-  const teacher = await db.getTeacherByTelegramId(ctx.from.id);
+  const teacher = await effectiveTeacher(ctx);
   if (!teacher) {
     return ctx.reply('هذا الأمر متاح للأساتذة المسجّلين فقط. أرسل كود التفعيل الذي زوّدك به المعهد.');
   }
@@ -868,7 +963,7 @@ async function requireOfficialConfirmation(ctx, next) {
   if (isAdmin(ctx)) return next();
   const callbackData = ctx.callbackQuery && ctx.callbackQuery.data;
   if (callbackData === 'confirm_official_student') return next();
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return next();
   if (!student.is_active) {
     if (ctx.callbackQuery) await ctx.answerCbQuery('حسابك مؤرشف حاليًا.', { show_alert: true });
@@ -885,7 +980,7 @@ bot.on('text', requireOfficialConfirmation);
 bot.on('callback_query', requireOfficialConfirmation);
 
 bot.action('confirm_official_student', async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('أكمل تسجيل الاسم والمرحلة أولًا.', { show_alert: true });
   if (!student.is_active) return ctx.answerCbQuery('حسابك مؤرشف حاليًا.', { show_alert: true });
   await db.confirmOfficialStudent(student.id);
@@ -993,7 +1088,7 @@ async function deliverReportToTeachers(student, subjectId, subjectName, payload)
 bot.on(['document', 'photo'], async (ctx, next) => {
   const state = userState.get(ctx.from.id);
   if (!state || state.action !== 'student_report_upload') return next();
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) {
     userState.delete(ctx.from.id);
     return ctx.reply('الرجاء التسجيل أولًا عبر /start');
@@ -1029,7 +1124,7 @@ bot.on('text', async (ctx, next) => {
     if (isAdmin(ctx)) {
       return ctx.reply(hadStep ? 'تم الرجوع عن الخطوة الحالية.' : 'أنت في القائمة الرئيسية.', adminMainMenu());
     }
-    const student = await db.getStudentByTelegramId(ctx.from.id);
+    const student = await effectiveStudent(ctx);
     if (!student) return ctx.reply('تم الرجوع. أرسل /start لبدء التسجيل من جديد.');
     return replyStudentScreen(
       ctx,
@@ -1118,7 +1213,7 @@ bot.on('text', async (ctx, next) => {
   if (state.action === 'leave_awaiting_days') {
     const days = parseLeaveDays(ctx.message.text);
     if (days === null) {
-      const student = await db.getStudentByTelegramId(ctx.from.id);
+      const student = await effectiveStudent(ctx);
       if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
       return replyStudentScreen(
         ctx,
@@ -1128,7 +1223,7 @@ bot.on('text', async (ctx, next) => {
         studentMainMenu()
       );
     }
-    const student = await db.getStudentByTelegramId(ctx.from.id);
+    const student = await effectiveStudent(ctx);
     if (!student) {
       userState.delete(ctx.from.id);
       return ctx.reply('الرجاء التسجيل أولًا عبر /start');
@@ -1360,7 +1455,7 @@ bot.on('text', async (ctx, next) => {
 
   // -------- تقرير مكتوب نصًا من الطالب --------
   if (state.action === 'student_report_upload') {
-    const student = await db.getStudentByTelegramId(ctx.from.id);
+    const student = await effectiveStudent(ctx);
     if (!student) {
       userState.delete(ctx.from.id);
       return ctx.reply('الرجاء التسجيل أولًا عبر /start');
@@ -1459,6 +1554,21 @@ bot.on('text', async (ctx, next) => {
       `✅ حُدّثت الدرجة.\nالمشاركة: ${Number(saved.participation_score)} | ` +
         `الامتحانات: ${Number(saved.exams_score)} | المجموع: ${Number(saved.total_score)}`,
       isAdmin(ctx) ? adminMainMenu() : teacherMainMenu()
+    );
+  }
+
+  // -------- بحث عن طالب للدخول بصفته (معاينة) --------
+  if (state.action === 'pv_search_student' && isAdmin(ctx)) {
+    const results = await db.searchStudents(ctx.message.text.trim(), 12);
+    userState.delete(ctx.from.id);
+    if (results.length === 0) return ctx.reply('لا توجد نتائج مطابقة.');
+    return ctx.reply(
+      'اختر الطالب للدخول بصفته:',
+      Markup.inlineKeyboard(
+        results.map((s) => [
+          callbackButton(limitButtonText(`${s.full_name} — ${s.stage_name}`, 48), `pv_as_student:${s.id}`),
+        ])
+      )
     );
   }
 
@@ -1629,7 +1739,7 @@ bot.action('menu_today', async (ctx) => {
 bot.hears('📚 دروس اليوم', (ctx) => showTodayLessons(ctx));
 
 async function openMyReport(ctx) {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   const seasons = await db.listStudentSeasons(student.id);
   if (seasons.length === 0) return replyStudentScreen(ctx, student, 'لا توجد بيانات دراسية مسجلة حتى الآن.');
@@ -1649,7 +1759,7 @@ async function openMyReport(ctx) {
 bot.hears('📊 تقريري', openMyReport);
 
 bot.action(/my_report_season:(\d+)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   await ctx.answerCbQuery();
   const rows = await sendStudentReportMessages(ctx, student.id, Number(ctx.match[1]), { student });
@@ -1658,7 +1768,7 @@ bot.action(/my_report_season:(\d+)/, async (ctx) => {
 });
 
 async function openStudentSeasonActivity(ctx) {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   const activity = await db.getStudentCurrentSeasonActivity(
     student.id,
@@ -1676,7 +1786,7 @@ bot.hears(LEGACY_STUDENT_ACTIVITY_BUTTON_2, openStudentSeasonActivity);
 // الطالب — طلب إجازة / إلغاؤها
 // ---------------------------------------------------------------------------
 async function openLeaveRequest(ctx) {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   if (!student.is_active) return ctx.reply('حسابك مؤرشف حاليًا.');
 
@@ -1737,7 +1847,7 @@ async function openLeaveRequest(ctx) {
 bot.hears('🌴 طلب إجازة', openLeaveRequest);
 
 bot.action(/leave_cancel:(\d+)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   const cancelled = await db.cancelLeave(
     student.id,
@@ -1821,7 +1931,7 @@ bot.action('season_open', async (ctx) => {
 });
 
 bot.action(/season_choice:(repeat|promote)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   await ctx.answerCbQuery('جاري حفظ اختيارك...');
   try {
@@ -1843,7 +1953,7 @@ bot.action(/season_choice:(repeat|promote)/, async (ctx) => {
 bot.action('noop', (ctx) => ctx.answerCbQuery('تم تسجيل حضورك مسبقًا لهذا الدرس ✅'));
 
 bot.action(/attend:(\d+)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا عبر /start');
   const lessonId = Number(ctx.match[1]);
   const lesson = await db.getLessonById(lessonId);
@@ -2507,10 +2617,10 @@ bot.action(/admin_channel_stage:(\d+)/, async (ctx) => {
 // لوحة الأستاذ
 // ---------------------------------------------------------------------------
 async function requireTeacher(ctx) {
-  const teacher = await db.getTeacherByTelegramId(ctx.from.id);
+  const teacher = await effectiveTeacher(ctx);
   if (teacher) return teacher;
-  // الأدمن يملك صلاحيات الأستاذ كاملة حتى لو لم يكن مسجَّلًا كأستاذ
-  if (isAdmin(ctx)) return { id: null, full_name: 'الأدمن', isAdmin: true };
+  // في المعاينة بصفة أستاذ نتوقف على الأستاذ المنتحَل فقط، لا نمنح صلاحيات الأدمن الكاملة
+  if (isAdmin(ctx) && !isInPreview(ctx)) return { id: null, full_name: 'الأدمن', isAdmin: true };
   await ctx.reply('هذه الشاشة متاحة للأساتذة والأدمن فقط.');
   return null;
 }
@@ -2889,7 +2999,7 @@ async function openEndAttendanceAndNotify(sessionId, byWhom) {
 }
 
 bot.action(/slot_yes:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
-  const teacher = await db.getTeacherByTelegramId(ctx.from.id);
+  const teacher = await effectiveTeacher(ctx);
   if (!teacher) return ctx.answerCbQuery('غير مصرح.');
   await studies.recordSlotDecision(Number(ctx.match[1]), ctx.match[2], 'confirmed', ctx.from.id);
   await ctx.answerCbQuery('تم التأكيد ✅');
@@ -2897,7 +3007,7 @@ bot.action(/slot_yes:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
 });
 
 bot.action(/slot_no:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
-  const teacher = await db.getTeacherByTelegramId(ctx.from.id);
+  const teacher = await effectiveTeacher(ctx);
   if (!teacher) return ctx.answerCbQuery('غير مصرح.');
   await studies.recordSlotDecision(Number(ctx.match[1]), ctx.match[2], 'postponed', ctx.from.id);
   await ctx.answerCbQuery('تم التأجيل');
@@ -2905,7 +3015,7 @@ bot.action(/slot_no:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
 });
 
 bot.action(/mub_attend:(\d+)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا عبر /start');
   const sessionId = Number(ctx.match[1]);
   const session = await studies.getSessionById(sessionId);
@@ -2926,7 +3036,7 @@ bot.action(/mub_attend:(\d+)/, async (ctx) => {
 
 // حضور النهاية — سجل مستقل عن البداية
 bot.action(/mub_end_attend:(\d+)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا عبر /start');
   const sessionId = Number(ctx.match[1]);
   if (!(await studies.isEndAttendanceOpen(sessionId))) {
@@ -2945,7 +3055,7 @@ bot.action(/mub_end_attend:(\d+)/, async (ctx) => {
 
 // الأستاذ ينهي المباحثة يدويًا فيفتح حضور النهاية فورًا
 bot.action(/mub_finish:(\d+)/, async (ctx) => {
-  const teacher = await db.getTeacherByTelegramId(ctx.from.id);
+  const teacher = await effectiveTeacher(ctx);
   if (!teacher && !isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
   const sessionId = Number(ctx.match[1]);
   await ctx.answerCbQuery();
@@ -2962,8 +3072,9 @@ bot.action(/mub_finish:(\d+)/, async (ctx) => {
 // الأدمن يملك صلاحيات الأستاذ كاملة: يرى كل مواد المعهد ويعمل عليها،
 // بينما يرى الأستاذ المواد المسنَدة إليه فقط.
 async function getActorSubjects(ctx) {
-  if (isAdmin(ctx)) return db.listAllActiveSubjects();
-  const teacher = await db.getTeacherByTelegramId(ctx.from.id);
+  // في المعاينة بصفة أستاذ: مواد ذلك الأستاذ فقط، لا كل مواد المعهد
+  if (isAdmin(ctx) && !isInPreview(ctx)) return db.listAllActiveSubjects();
+  const teacher = await effectiveTeacher(ctx);
   if (!teacher) return null;
   return db.listTeacherSubjects(teacher.id);
 }
@@ -2997,11 +3108,11 @@ async function pickTeacherSubject(ctx, prefix, prompt) {
 // يتحقق من صلاحية العمل على المادة: الأدمن على كل المواد، والأستاذ على مواده فقط.
 // يُرجع كائنًا فيه teacherId (قد يكون null للأدمن) أو null إن لم يُصرَّح.
 async function teacherOwnsSubject(ctx, subjectId, stageSeasonId) {
-  if (isAdmin(ctx)) {
-    const teacher = await db.getTeacherByTelegramId(ctx.from.id);
+  if (isAdmin(ctx) && !isInPreview(ctx)) {
+    const teacher = await effectiveTeacher(ctx);
     return { id: teacher ? teacher.id : null, isAdmin: true };
   }
-  const teacher = await db.getTeacherByTelegramId(ctx.from.id);
+  const teacher = await effectiveTeacher(ctx);
   if (!teacher) return null;
   const owns = (await db.listTeacherSubjects(teacher.id)).some(
     (s) => s.subject_id === subjectId && s.stage_season_id === stageSeasonId
@@ -3641,7 +3752,7 @@ bot.action(/fin_do:(\d+):(\d+)/, async (ctx) => {
 // الطالب — جدوله الأسبوعي
 // ---------------------------------------------------------------------------
 bot.hears('🗓️ جدولي', async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
   const slots = await studies.listStudentSlots(student.id);
@@ -3668,7 +3779,7 @@ bot.hears('🗓️ جدولي', async (ctx) => {
 // الطالب — الامتحانات الشهرية
 // ---------------------------------------------------------------------------
 bot.hears('📝 الامتحانات الشهرية', async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
 
@@ -3728,7 +3839,7 @@ async function sendNextExamQuestion(ctx, attemptId, examId) {
 }
 
 bot.action(/stex_start:(\d+)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   const examId = Number(ctx.match[1]);
   try {
@@ -3747,7 +3858,7 @@ bot.action(/stex_start:(\d+)/, async (ctx) => {
 });
 
 bot.action(/stex_ans:(\d+):(\d+):(\d+)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   const attemptId = Number(ctx.match[1]);
   const questionId = Number(ctx.match[2]);
@@ -3928,7 +4039,7 @@ bot.on('my_chat_member', async (ctx) => {
 // الطالب — درجاته المحفوظة عبر كل المواسم
 // ---------------------------------------------------------------------------
 bot.hears('🎯 درجات - المباحثات', async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
   const grades = await studies.getStudentFinalGrades(student.id);
@@ -4042,7 +4153,7 @@ function modeLabel(row) {
 }
 
 async function showMyParticipation(ctx) {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
   const subjects = await studies.listStudentSubjects(student.id);
@@ -4067,7 +4178,7 @@ async function showMyParticipation(ctx) {
 bot.hears('📖 مشاركتي', showMyParticipation);
 
 bot.action(/pm_subj:(\d+):(\d+)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   const subjectId = Number(ctx.match[1]);
   const ssId = Number(ctx.match[2]);
@@ -4098,7 +4209,7 @@ bot.action(/pm_subj:(\d+):(\d+)/, async (ctx) => {
 });
 
 bot.action(/pm_set:(\d+):(\d+):(mubahatha|report)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   const subjectId = Number(ctx.match[1]);
   const ssId = Number(ctx.match[2]);
@@ -4153,14 +4264,14 @@ async function joinMubahathaGroup(ctx, student, subjectId, ssId) {
 }
 
 bot.action(/pm_join:(\d+):(\d+)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   await ctx.answerCbQuery();
   return joinMubahathaGroup(ctx, student, Number(ctx.match[1]), Number(ctx.match[2]));
 });
 
 bot.action(/pm_switch:(\d+):(\d+)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   const subjectId = Number(ctx.match[1]);
   const ssId = Number(ctx.match[2]);
@@ -4177,7 +4288,7 @@ bot.action(/pm_switch:(\d+):(\d+)/, async (ctx) => {
 });
 
 bot.action(/pm_switchok:(\d+):(\d+)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   const subjectId = Number(ctx.match[1]);
   const ssId = Number(ctx.match[2]);
@@ -4192,7 +4303,7 @@ bot.action(/pm_switchok:(\d+):(\d+)/, async (ctx) => {
 // الطالب — إرسال التقارير
 // ---------------------------------------------------------------------------
 bot.hears('📄 إرسال تقرير', async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
   const subjects = await studies.listStudentSubjects(student.id);
@@ -4216,7 +4327,7 @@ bot.hears('📄 إرسال تقرير', async (ctx) => {
 });
 
 bot.action(/rep_send:(\d+):(\d+)/, async (ctx) => {
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   const subjectId = Number(ctx.match[1]);
   const ssId = Number(ctx.match[2]);
@@ -4535,9 +4646,9 @@ bot.use(async (ctx, next) => {
 // يعيد لوحة الأزرار حسب دور المستخدم، إن اختفت لأي سبب
 bot.command('menu', async (ctx) => {
   if (isAdmin(ctx)) return ctx.reply('لوحة الأدمن:', adminMainMenu());
-  const teacher = await db.getTeacherByTelegramId(ctx.from.id);
+  const teacher = await effectiveTeacher(ctx);
   if (teacher) return ctx.reply('لوحة الأستاذ:', teacherMainMenu());
-  const student = await db.getStudentByTelegramId(ctx.from.id);
+  const student = await effectiveStudent(ctx);
   if (student) return ctx.reply('قائمتك:', studentMainMenu(student));
   return ctx.reply('أرسل /start للبدء.');
 });
@@ -4720,6 +4831,101 @@ bot.action(/sr_manual:(\d+):(\d+):(\d+)/, async (ctx) => {
   });
   await ctx.answerCbQuery();
   return ctx.reply(`أرسل الدرجة النهائية لتقاريره (من 0 إلى ${studies.GRADE_WEIGHTS.participationTotal}):`);
+});
+
+// ---------------------------------------------------------------------------
+// الأدمن — الدخول بصفة طالب أو أستاذ (وضع معاينة، بلا حفظ)
+// ---------------------------------------------------------------------------
+bot.hears('👁️ الدخول بصفة أخرى', async (ctx) => {
+  if (!isAdmin(ctx)) return denyUnauthorized(ctx);
+  if (isInPreview(ctx)) {
+    const pv = getPreview(ctx);
+    return ctx.reply(
+      `أنت الآن في وضع المعاينة بصفة: ${pv.role === 'student' ? 'الطالب' : 'الأستاذ'} «${pv.name}».`,
+      Markup.inlineKeyboard([[callbackButton('🚪 الخروج من المعاينة', 'pv_exit')]])
+    );
+  }
+  return ctx.reply(
+    '👁️ وضع المعاينة: تدخل بصفة طالب أو أستاذ حقيقي فترى ما يراه تمامًا، ' +
+      'وأي عملية تعديل تُعرض معطّلة ولا يُحفظ شيء.\n\nبصفة من تريد الدخول؟',
+    Markup.inlineKeyboard([
+      [callbackButton('🎓 بصفة طالب', 'pv_pick_student')],
+      [callbackButton('👨‍🏫 بصفة أستاذ', 'pv_pick_teacher')],
+    ])
+  );
+});
+
+bot.action('pv_pick_student', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  userState.set(ctx.from.id, { action: 'pv_search_student' });
+  await ctx.answerCbQuery();
+  return ctx.reply('أرسل اسم الطالب (كليًا أو جزئيًا) للدخول بصفته:');
+});
+
+bot.action('pv_pick_teacher', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const teachers = (await db.listTeachers()).filter((t) => t.telegram_id);
+  await ctx.answerCbQuery();
+  if (teachers.length === 0) {
+    return ctx.reply('لا يوجد أساتذة مفعّلون للدخول بصفتهم.');
+  }
+  return ctx.reply(
+    'اختر الأستاذ للدخول بصفته:',
+    Markup.inlineKeyboard(
+      teachers.slice(0, 40).map((t) => [
+        callbackButton(limitButtonText(t.full_name, 45), `pv_as_teacher:${t.id}`),
+      ])
+    )
+  );
+});
+
+bot.action(/pv_as_student:(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const student = await db.getStudentById(Number(ctx.match[1]));
+  if (!student) return ctx.answerCbQuery('الطالب غير موجود.');
+  previewMode.set(ctx.from.id, { role: 'student', id: student.id, name: student.full_name });
+  await ctx.answerCbQuery('دخلت وضع المعاينة');
+  await ctx.editMessageText(
+    `👁️ أنت الآن تعاين بصفة الطالب «${student.full_name}».\n` +
+      'كل ما تراه هو ما يراه هو، وأي تعديل معطّل. للخروج اضغط الزر أو أرسل /start.'
+  );
+  return ctx.reply(`قائمة الطالب «${student.full_name}» (معاينة):`, studentPreviewMenu(student));
+});
+
+bot.action(/pv_as_teacher:(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const teacher = await db.getTeacherById(Number(ctx.match[1]));
+  if (!teacher) return ctx.answerCbQuery('الأستاذ غير موجود.');
+  previewMode.set(ctx.from.id, { role: 'teacher', id: teacher.id, name: teacher.full_name });
+  await ctx.answerCbQuery('دخلت وضع المعاينة');
+  await ctx.editMessageText(
+    `👁️ أنت الآن تعاين بصفة الأستاذ «${teacher.full_name}».\n` +
+      'كل ما تراه هو ما يراه هو، وأي تعديل معطّل. للخروج اضغط الزر أو أرسل /start.'
+  );
+  return ctx.reply(`لوحة الأستاذ «${teacher.full_name}» (معاينة):`, teacherPreviewMenu());
+});
+
+bot.action('pv_exit', async (ctx) => {
+  previewMode.delete(ctx.from.id);
+  await ctx.answerCbQuery('خرجت من المعاينة');
+  await ctx.editMessageText('🚪 خرجت من وضع المعاينة، وعدت أدمن.');
+  return ctx.reply('لوحة الأدمن:', adminMainMenu());
+});
+
+// قوائم المعاينة: نفس قوائم الطالب/الأستاذ مع زر خروج ظاهر دائمًا
+function studentPreviewMenu(student) {
+  const base = studentMainMenu(student).reply_markup.keyboard;
+  return Markup.keyboard([...base, ['🚪 الخروج من المعاينة']]).resize().persistent();
+}
+function teacherPreviewMenu() {
+  const base = teacherMainMenu().reply_markup.keyboard;
+  return Markup.keyboard([...base, ['🚪 الخروج من المعاينة']]).resize().persistent();
+}
+
+bot.hears('🚪 الخروج من المعاينة', async (ctx) => {
+  if (!isInPreview(ctx)) return undefined;
+  previewMode.delete(ctx.from.id);
+  return ctx.reply('🚪 خرجت من وضع المعاينة، وعدت أدمن.', adminMainMenu());
 });
 
 async function showLinkedChannels(ctx) {
@@ -5005,6 +5211,10 @@ if (require.main === module) {
 
 module.exports = {
   bot,
+  previewMode,
+  isInPreview,
+  effectiveStudent,
+  effectiveTeacher,
   buildStageSeasonMd,
   buildStudentReportMd,
   buildMarkdownTable,
