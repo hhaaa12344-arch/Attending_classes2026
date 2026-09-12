@@ -1,0 +1,60 @@
+'use strict';
+
+async function enqueueNotification(client, { key, chatId, text, extra = {}, method = 'sendMessage', priority = 5, expiresAt = null, mark = null }) {
+  if (!['sendMessage', 'sendDocument', 'sendPhoto'].includes(method)) throw new Error('Unsupported notification');
+  return client.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,method,payload,priority,expires_at,delivery_mark)
+    VALUES($1,$2,$3,$4::jsonb,$5,$6,$7::jsonb) ON CONFLICT(dedupe_key) DO NOTHING RETURNING id`,
+  [key, chatId, method, JSON.stringify([text, extra]), priority, expiresAt,JSON.stringify(mark)]);
+}
+
+function createOutboxWorker(pool, queue) {
+  let running = false;
+  let stopped = false;
+  let nextPoll = 0;
+  let lastPrune = 0;
+  async function tick() {
+    if (running || stopped || Date.now()<nextPoll) return;
+    running = true;
+    try {
+      if(Date.now()-lastPrune>86400000){
+        await pool.query("DELETE FROM notification_outbox WHERE status IN ('sent','expired') AND created_at<now()-interval '30 days'");
+        await pool.query("DELETE FROM student_daily_lesson_notifications WHERE notification_date<CURRENT_DATE-30");
+        lastPrune=Date.now();
+      }
+      await pool.query(`UPDATE notification_outbox SET status='expired'
+        WHERE status IN ('pending','sending') AND expires_at <= now()`);
+      // Lease one item at a time: never reserve a large batch while waiting for Telegram.
+      for (let i = 0; i < 250 && !stopped; i++) {
+        const { rows } = await pool.query(`UPDATE notification_outbox SET status='sending',
+          lease_until=now()+interval '5 minutes', attempts=attempts+1
+          WHERE id=(SELECT id FROM notification_outbox
+            WHERE ((status='pending' AND available_at <= now()) OR (status='sending' AND lease_until < now()))
+              AND (expires_at IS NULL OR expires_at > now())
+            ORDER BY priority,id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *`);
+        const job = rows[0];
+        if (!job) {nextPoll=Date.now()+5000;break;}
+        try {
+          await queue[job.method](Number(job.chat_id), ...job.payload, { priority: job.priority });
+          const c=await pool.connect();
+          try{
+            await c.query('BEGIN');
+            await c.query(`UPDATE notification_outbox SET status='sent',sent_at=now(),lease_until=NULL,last_error=NULL WHERE id=$1`,[job.id]);
+            const mark=job.delivery_mark;
+            if(mark?.kind==='student_absence')await c.query('UPDATE student_attendance_days SET student_alert_sent_at=COALESCE(student_alert_sent_at,now()) WHERE id=$1',[mark.id]);
+            if(mark?.kind==='admin_absence')await c.query('UPDATE student_attendance_days SET admin_alert_sent_at=COALESCE(admin_alert_sent_at,now()) WHERE id=ANY($1::bigint[])',[mark.ids]);
+            await c.query('COMMIT');
+          }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+        } catch (err) {
+          const code = err.response?.error_code;
+          const permanent = code === 400 || code === 403 || job.attempts >= 8;
+          const delay = Math.max(Number(err.response?.parameters?.retry_after || 0), Math.min(300, 2 ** job.attempts));
+          await pool.query(`UPDATE notification_outbox SET status=$2,lease_until=NULL,
+            available_at=now()+make_interval(secs=>$3),last_error=$4 WHERE id=$1`,
+          [job.id, permanent ? 'failed' : 'pending', delay, String(code || err.code || 'DELIVERY_ERROR').slice(0, 100)]);
+        }
+      }
+    } finally { running = false; }
+  }
+  return { tick, stop: () => { stopped = true; }, isRunning: () => running };
+}
+module.exports = { enqueueNotification, createOutboxWorker };

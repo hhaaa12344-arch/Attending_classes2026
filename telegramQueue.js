@@ -4,20 +4,27 @@
 // المركزي ينظّم المعدل مهما تعددت الحلقات، ويعطي رسائل المستخدم المباشرة أولوية على البث.
 
 const DEFAULT_RATE = Number(process.env.TELEGRAM_RATE_PER_SEC || 25);
-const MIN_INTERVAL_MS = Math.ceil(1000 / DEFAULT_RATE);
 const MAX_RETRIES = 3;
 
 // أولويات أصغر رقمًا تُرسل أولًا: 1 رسائل المستخدم المباشرة، 5 الإشعارات، 9 البث الجماعي.
 const PRIORITY = { high: 1, normal: 5, low: 9 };
 
-function createTelegramQueue(telegram) {
+function createTelegramQueue(telegram, { rate = DEFAULT_RATE, maxPending = 2000, sleep = ms => new Promise(r => setTimeout(r,ms)) } = {}) {
+  if (!Number.isFinite(rate) || rate < 1 || rate > 30) throw new Error('TELEGRAM_RATE_PER_SEC must be from 1 to 30');
+  const interval = Math.ceil(1000 / rate);
+  const methods = ['sendMessage', 'sendDocument', 'sendPhoto'];
+  const send = Object.fromEntries(methods.map(method => [method, telegram[method].bind(telegram)]));
   const queue = [];
   let seq = 0;
   let draining = false;
   let pausedUntil = 0; // يُضبط عند 429 لاحترام retry_after
+  let stopped = false;
 
   function enqueue(method, args, { priority = PRIORITY.normal } = {}) {
     return new Promise((resolve, reject) => {
+      if (stopped || queue.length >= maxPending) {
+        return reject(Object.assign(new Error('Telegram queue is busy'), { code: stopped ? 'QUEUE_STOPPED' : 'QUEUE_FULL' }));
+      }
       // seq يحفظ ترتيب الوصول ضمن الأولوية الواحدة (FIFO)
       queue.push({ method, args, priority, seq: seq++, resolve, reject, attempts: 0 });
       queue.sort((a, b) => a.priority - b.priority || a.seq - b.seq);
@@ -36,15 +43,18 @@ function createTelegramQueue(telegram) {
       }
       const job = queue.shift();
       try {
-        const result = await telegram[job.method](...job.args);
+        const result = await send[job.method](...job.args);
         job.resolve(result);
       } catch (err) {
         const code = err && err.response && err.response.error_code;
         const retryAfter = err && err.response && err.response.parameters
           && err.response.parameters.retry_after;
 
-        if (code === 429) {
+        if (code === 429 && job.attempts < MAX_RETRIES) {
           // تجاوزنا الحد: نوقف الطابور كله المدة التي يطلبها تليجرام ثم نعيد المهمة
+          job.attempts += 1;
+          // Long waits belong to the durable worker, not an unbounded in-memory lease.
+          if (Number(retryAfter) > 30) { job.reject(err); continue; }
           pausedUntil = Date.now() + ((retryAfter || 1) * 1000);
           queue.unshift(job);
           continue;
@@ -62,12 +72,10 @@ function createTelegramQueue(telegram) {
           job.reject(err);
         }
       }
-      await sleep(MIN_INTERVAL_MS);
+      await sleep(interval);
     }
     draining = false;
   }
-
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   return {
     PRIORITY,
@@ -78,6 +86,10 @@ function createTelegramQueue(telegram) {
     sendPhoto: (chatId, photo, extra, opts) =>
       enqueue('sendPhoto', [chatId, photo, extra], opts),
     pendingCount: () => queue.length,
+    stop: () => {
+      stopped = true;
+      for (const job of queue.splice(0)) job.reject(Object.assign(new Error('Queue stopped'), { code:'QUEUE_STOPPED' }));
+    },
   };
 }
 

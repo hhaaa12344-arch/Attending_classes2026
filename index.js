@@ -3,6 +3,10 @@ require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const db = require('./db');
 const studies = require('./studies');
+const { initIntegritySchema } = require('./integrity');
+const access = require('./access').createAccess(db.pool);
+const adminData = require('./adminData').createAdminData(db, studies);
+const scheduler = require('./scheduler').createScheduler({pool:db.pool,studies});
 const {
   extractFirstUrl,
   extractHashtags,
@@ -49,10 +53,19 @@ if (ADMIN_IDS.length === 0) {
 }
 
 const bot = new Telegraf(BOT_TOKEN);
+bot.use(require('./updateGate').createUpdateGate());
 
 // طابور إرسال عام ينظّم معدّل الرسائل ويعالج 429؛ يُستعمل للبث الجماعي.
 const { createTelegramQueue, PRIORITY } = require('./telegramQueue');
 const tgQueue = createTelegramQueue(bot.telegram);
+const outboxWorker = require('./outbox').createOutboxWorker(db.pool,tgQueue);
+// Both background sends and replies share the same rate limiter.
+for(const method of ['sendMessage','sendDocument','sendPhoto']) bot.telegram[method]=tgQueue[method];
+bot.use((ctx,next)=>{
+  for(const method of ['sendMessage','sendDocument','sendPhoto']) ctx.telegram[method]=(chatId,content,extra)=>tgQueue[method](chatId,content,extra,{priority:PRIORITY.high});
+  return next();
+});
+let adminServer;
 
 // حارس وضع المعاينة: يمنع أي عملية كتابة قبل أن تصل لمعالجها.
 // أزرار الكتابة (تسجيل حضور، منح درجة، إرسال، اختيار نمط، حذف...) تُعرض معطّلة.
@@ -64,6 +77,7 @@ const PREVIEW_BLOCKED_ACTION_PREFIXES = [
   'sr_item', 'sr_apply', 'sr_manual', 'lr_grade', 'gr_edit',
   'season_choice', 'leave_approve', 'leave_reject', 'leave_cancel', 'leave_open',
   'noop_activity',
+  'slot_yes', 'slot_no', 'confirm_official_student',
 ];
 // خطوات الإدخال النصي التي تكتب في القاعدة (تُمنع في المعاينة)
 const PREVIEW_BLOCKED_TEXT_ACTIONS = new Set([
@@ -75,6 +89,16 @@ const PREVIEW_BLOCKED_HEARS = new Set(['🌴 طلب إجازة', '📄 إرسا�
 
 bot.use(async (ctx, next) => {
   if (!isInPreview(ctx)) return next();
+
+  // Unknown actions are read-only denied in preview, including forged callbacks
+  // from a different role. New write handlers cannot accidentally bypass a denylist.
+  const previewReads = new Set(['pv_exit','menu_today','menu_report','pm_subj','sr_subj','sr_group','sr_page','sr_stu',
+    'gr_subj','gr_page','gr_stu','teacher_att','tg_subj','tg_group','ts_subj','ts_group','ex_subj','ex_view',
+    'stex_list','rep_subj','noop','noop_activity']);
+  if (ctx.callbackQuery?.data && !previewReads.has(ctx.callbackQuery.data.split(':')[0])) {
+    return ctx.answerCbQuery('👁️ المعاينة للقراءة فقط؛ اخرج منها لإجراء تعديلات.',{show_alert:true});
+  }
+  if (ctx.message && !ctx.message.text) return ctx.reply('👁️ لا يمكن إرسال ملفات أو إجراء تعديل أثناء المعاينة.');
 
   // أزرار الكتابة عبر callback
   const data = ctx.callbackQuery && ctx.callbackQuery.data;
@@ -90,6 +114,9 @@ bot.use(async (ctx, next) => {
 
   // أزرار قوائم تُنفّذ عمليات
   const text = ctx.message && ctx.message.text;
+  if(text&&!STUDENT_MENU_BUTTONS.has(text.trim())&&!TEACHER_MENU_BUTTONS.has(text.trim())&&!['/start','↩️ رجوع','❌ إلغاء العملية','🚪 الخروج من المعاينة'].includes(text.trim())){
+    return ctx.reply('👁️ المعاينة للقراءة فقط. اخرج منها لإدارة البيانات.');
+  }
   if (text && PREVIEW_BLOCKED_HEARS.has(text.trim())) {
     return ctx.reply('👁️ وضع المعاينة: هذه العملية معطّلة، ولا يُحفظ شيء.');
   }
@@ -113,7 +140,9 @@ const userState = {
     return rawUserState.set(key, { ...value, expiresAt: Date.now() + 30 * 60 * 1000 });
   },
   get(key) {
-    return rawUserState.get(key);
+    const state=rawUserState.get(key);
+    if(state?.expiresAt<=Date.now()){rawUserState.delete(key);return undefined;}
+    return state;
   },
   delete(key) {
     return rawUserState.delete(key);
@@ -171,9 +200,10 @@ const ADMIN_MENU_BUTTONS = new Set([
   '👁️ الدخول بصفة أخرى',
   '📄 تقارير الطلبة',
   '🔗 روابط المجموعات',
+  '🖥️ لوحة الإدارة',
 ]);
 
-const isAdmin = (ctx) => ADMIN_IDS.includes(ctx.from.id);
+const isAdmin = (ctx) => Boolean(ctx.from&&ADMIN_IDS.includes(ctx.from.id));
 
 // ---------------------------------------------------------------------------
 // وضع المعاينة للأدمن: يدخل بصفة طالب أو أستاذ حقيقي فيرى ما يراه، بلا حفظ أي شيء.
@@ -182,7 +212,7 @@ const isAdmin = (ctx) => ADMIN_IDS.includes(ctx.from.id);
 const previewMode = new Map();
 
 const isInPreview = (ctx) => isAdmin(ctx) && previewMode.has(ctx.from.id);
-const getPreview = (ctx) => previewMode.get(ctx.from.id);
+const getPreview = (ctx) => ctx.from?previewMode.get(ctx.from.id):undefined;
 
 // يُستدعى في بداية كل معالج يكتب في قاعدة البيانات. إن كان الأدمن يعاين، يوقف العملية.
 // يعالج نداءات الأزرار (answerCbQuery) والرسائل (reply) معًا.
@@ -200,6 +230,7 @@ async function blockIfPreview(ctx) {
 
 // الطالب الفعّال: المنتحَل في وضع المعاينة، وإلا صاحب الحساب.
 async function effectiveStudent(ctx) {
+  if(!ctx.from)return null;
   const pv = getPreview(ctx);
   if (pv && pv.role === 'student') return db.getStudentById(pv.id);
   return db.getStudentByTelegramId(ctx.from.id);
@@ -207,6 +238,7 @@ async function effectiveStudent(ctx) {
 
 // الأستاذ الفعّال: المنتحَل في وضع المعاينة، وإلا صاحب الحساب (أو الأدمن بصلاحية أستاذ).
 async function effectiveTeacher(ctx) {
+  if(!ctx.from)return null;
   const pv = getPreview(ctx);
   if (pv && pv.role === 'teacher') return db.getTeacherById(pv.id);
   return db.getTeacherByTelegramId(ctx.from.id);
@@ -325,6 +357,7 @@ function adminMainMenu() {
     ['📝 الامتحانات', '🏁 إنهاء الموسم'],
     ['✏️ تحرير الدرجات', '📄 تقارير الطلبة'],
     ['🔗 روابط المجموعات'],
+    ['🖥️ لوحة الإدارة'],
     [BACK_BUTTON, '❌ إلغاء العملية'],
   ];
   return Markup.keyboard(rows.map((row) => row.map((text) => replyButton(text)))).resize().persistent();
@@ -359,8 +392,7 @@ async function sendToStageStudents(stageId, text, extra = undefined, options = {
   // استعلام واحد يُرجع المستحقين، بدل استعلامَي إجازة/حجز لكل طالب على حدة.
   let recipients;
   if (dailyLessonNotificationDate) {
-    // يُرجع فقط من لم يُشعَر اليوم ويحجز لهم الإشعار ذرّيًا في الاستعلام نفسه
-    recipients = await db.claimDailyLessonRecipients(stageId, dailyLessonNotificationDate);
+    return require('./dailyNotifications').queueDailyLessons(db.pool,{stageId,onDate:dailyLessonNotificationDate,text,extra,excluded:[...excludeStudentIds]});
   } else if (skipOnLeave) {
     recipients = await db.getEligibleStudentsForStage(stageId, today);
   } else {
@@ -503,6 +535,7 @@ function studentUiMessageKind(extra) {
 }
 
 async function beginStudentScreen(ctx, student, options = {}) {
+  if(isInPreview(ctx))return;
   const messageIds = await db.takeStudentUiMessages(student.id, Boolean(options.includeMenu));
   for (const messageId of messageIds) {
     await deleteMessageQuietly(ctx.chat.id, messageId);
@@ -520,6 +553,7 @@ async function trackStudentUiMessage(student, message, messageKind = 'screen') {
 }
 
 async function replyStudentScreen(ctx, student, text, extra = undefined, options = {}) {
+  if(isInPreview(ctx))return ctx.reply(text,extra);
   const messageKind = studentUiMessageKind(extra);
   if (options.clear !== false) {
     await beginStudentScreen(ctx, student, { includeMenu: messageKind === 'menu' });
@@ -674,7 +708,7 @@ async function showTodayLessons(ctx, options = {}) {
       options.confirmation
         ? `${options.confirmation}\n\nلا توجد دروس أخرى غير مؤشَّرة حاليًا لمرحلتك.`
         : 'لا توجد دروس غير مؤشَّرة حاليًا لمرحلتك. تحقق لاحقًا.',
-      studentMainMenu()
+      studentMainMenu(student)
     );
   }
 
@@ -865,7 +899,7 @@ async function sendStudentReportMessages(ctx, studentId, stageSeasonId = null, o
   if (student) await beginStudentScreen(ctx, student);
   for (const text of formatStudentReport(rows)) {
     const message = await ctx.reply(text);
-    if (student) await trackStudentUiMessage(student, message);
+    if (student&&!isInPreview(ctx)) await trackStudentUiMessage(student, message);
   }
   return rows;
 }
@@ -889,7 +923,7 @@ async function showTransitionPrompt(ctx, options = {}) {
       ctx,
       student,
       'لا يوجد اختيار موسم جديد مطلوب منك حاليًا.',
-      studentMainMenu()
+      studentMainMenu(await effectiveStudent(ctx))
     );
   }
   const text =
@@ -928,7 +962,7 @@ bot.start(async (ctx) => {
       return ctx.reply('حسابك مؤرشف حاليًا. تواصل مع الأدمن إذا كنت تريد العودة للدراسة.');
     }
     if (!student.official_confirmed_at) return sendOfficialConfirmationPrompt(ctx);
-    await replyStudentScreen(ctx, student, `أهلًا بعودتك ${student.full_name} 👋`, studentMainMenu());
+    await replyStudentScreen(ctx, student, `أهلًا بعودتك ${student.full_name} 👋`, studentMainMenu(await effectiveStudent(ctx)));
     const transition = await db.getPendingTransition(student.id);
     if (transition) return showTransitionPrompt(ctx);
     return undefined;
@@ -993,7 +1027,7 @@ bot.action('confirm_official_student', async (ctx) => {
   if (ctx.callbackQuery && ctx.callbackQuery.message) {
     await deleteMessageQuietly(ctx.callbackQuery.message.chat.id, ctx.callbackQuery.message.message_id);
   }
-  return replyStudentScreen(ctx, student, `أهلًا بك ${student.full_name} 👋`, studentMainMenu());
+  return replyStudentScreen(ctx, student, `أهلًا بك ${student.full_name} 👋`, studentMainMenu(await effectiveStudent(ctx)));
 });
 
 bot.command('admin', async (ctx) => {
@@ -1055,6 +1089,7 @@ async function deliverReportToTeachers(student, subjectId, subjectName, payload)
     `📄 تقرير جديد\n` +
     `الطالب: ${student.full_name}\n` +
     `المادة: ${subjectName}\n` +
+    `المجموعة: ${payload.groupTitle || 'غير محددة في السجل القديم'}\n` +
     `التاريخ: ${new Date().toISOString().slice(0, 10)}`;
 
   let delivered = 0;
@@ -1098,21 +1133,26 @@ bot.on(['document', 'photo'], async (ctx, next) => {
     ? msg.document.file_id
     : msg.photo[msg.photo.length - 1].file_id; // أعلى دقة متاحة
   const kind = msg.document ? 'document' : 'photo';
-  await studies.submitReport(student.id, state.subjectId, state.ssId, {
+  const assignment=await studies.assignStudentToGroup(student.id,state.subjectId,state.ssId);
+  if(!assignment.group)return ctx.reply('لا توجد مجموعة متاحة لهذه المادة. راجع الإدارة ثم أعد إرسال التقرير.');
+  const report=await studies.submitReport(student.id, state.subjectId, state.ssId, {
     fileId,
     kind,
     note: msg.caption || null,
+    sourceMessageId:msg.message_id,
   });
+  if(!report)return ctx.reply('لم يُضف تقرير جديد: إما أنه محفوظ مسبقًا أو تغيّر موسمك أو نمط مشاركتك.');
   const sent = await deliverReportToTeachers(student, state.subjectId, state.subjectName, {
     kind,
     fileId,
     note: msg.caption || null,
+    groupTitle:report.group_title_snapshot,
   });
   userState.delete(ctx.from.id);
   return ctx.reply(
     `✅ استُلم تقرير مادة «${state.subjectName}».` +
       (sent.delivered > 0 ? '\nوصل إلى الأستاذ.' : '\nمحفوظ في النظام وسيطّلع عليه الأستاذ.'),
-    studentMainMenu()
+    studentMainMenu(await effectiveStudent(ctx))
   );
 });
 
@@ -1124,19 +1164,24 @@ bot.on('text', async (ctx, next) => {
     if (isAdmin(ctx)) {
       return ctx.reply(hadStep ? 'تم الرجوع عن الخطوة الحالية.' : 'أنت في القائمة الرئيسية.', adminMainMenu());
     }
+    const teacher=await effectiveTeacher(ctx);
+    if(teacher)return ctx.reply('تم الرجوع إلى لوحة الأستاذ.',teacherMainMenu());
     const student = await effectiveStudent(ctx);
     if (!student) return ctx.reply('تم الرجوع. أرسل /start لبدء التسجيل من جديد.');
     return replyStudentScreen(
       ctx,
       student,
       hadStep ? 'تم الرجوع عن الخطوة الحالية.' : 'أنت في القائمة الرئيسية.',
-      studentMainMenu()
+      studentMainMenu(student)
     );
   }
 
-  if (inputText === '❌ إلغاء العملية' && isAdmin(ctx)) {
+  if (inputText === '❌ إلغاء العملية') {
     userState.delete(ctx.from.id);
-    return ctx.reply('تم إلغاء العملية الحالية.', adminMainMenu());
+    if(isAdmin(ctx))return ctx.reply('تم إلغاء العملية الحالية.',adminMainMenu());
+    const teacher=await effectiveTeacher(ctx);
+    const student=teacher?null:await effectiveStudent(ctx);
+    return ctx.reply('تم إلغاء العملية الحالية.',teacher?teacherMainMenu():studentMainMenu(student));
   }
 
   // الضغط على زر رئيسي: يُلغي أي إدخال قديم، وينظّف رسائل البوت السابقة
@@ -1152,6 +1197,21 @@ bot.on('text', async (ctx, next) => {
 
   const state = userState.get(ctx.from.id);
   if (!state) return next();
+  if(state.action.startsWith('teacher_')){
+    const exam=state.examId?await studies.getExamById(state.examId):null;
+    const subjectId=exam?.subject_id||state.subjectId,seasonId=exam?.stage_season_id||state.ssId;
+    if(subjectId&&seasonId&&!await teacherOwnsSubject(ctx,subjectId,seasonId)){
+      userState.delete(ctx.from.id);return ctx.reply('لم تعد لديك صلاحية تعديل هذه المادة.');
+    }
+  }
+  // Revalidate the target when a teacher submits the text step: old callbacks
+  // and forged ids must not edit an unrelated student's report/grade.
+  if(['teacher_report_score','grade_override','lessons_score','report_item_score'].includes(state.action)) {
+    if(!await access.studentSubject(state.studentId,state.subjectId,state.ssId) ||
+      (state.reportId && !await access.reportMatches(state.reportId,state.studentId,state.subjectId,state.ssId))) {
+      userState.delete(ctx.from.id);return ctx.reply('لم يعد هذا السجل متاحًا للتعديل في المادة والموسم المختارين.');
+    }
+  }
 
   // -------- تسجيل اسم الطالب --------
   if (state.action === 'awaiting_full_name') {
@@ -1167,7 +1227,7 @@ bot.on('text', async (ctx, next) => {
           return ctx.reply(
             `✅ تم نقل حسابك بنجاح.\nأهلًا بعودتك ${moved.full_name} 👋\n\n` +
               'سجلك كامل محفوظ: الحضور والمباحثات والامتحانات والدرجات.',
-            studentMainMenu()
+            studentMainMenu(await effectiveStudent(ctx))
           );
         }
       } catch (err) {
@@ -1220,7 +1280,7 @@ bot.on('text', async (ctx, next) => {
         student,
         `أرسل عدد أيام الإجازة فقط، مثال: 1 أو ١. يجب أن يكون العدد بين 1 و${MAX_LEAVE_DAYS_PER_SEASON}.\n` +
           `للرجوع اضغط «${BACK_BUTTON}».`,
-        studentMainMenu()
+        studentMainMenu(await effectiveStudent(ctx))
       );
     }
     const student = await effectiveStudent(ctx);
@@ -1244,7 +1304,7 @@ bot.on('text', async (ctx, next) => {
           `الرصيد المتبقي في هذا الموسم: ${Number(leave.remaining_days)} من ${Number(leave.max_days)} أيام.\n` +
           'سيصلك إشعار عند قبول الأدمن للطلب. عند الموافقة لا تُحسب أيام الإجازة غيابًا، ' +
           'ويبقى التأشير ممكنًا خلال مهلة كل درس فقط.',
-        studentMainMenu()
+        studentMainMenu(await effectiveStudent(ctx))
       );
       // إشعار الأدمن مع أزرار الموافقة/الرفض
       await notifyAdmins(
@@ -1263,7 +1323,7 @@ bot.on('text', async (ctx, next) => {
       return undefined;
     } catch (err) {
       userState.delete(ctx.from.id);
-      return replyStudentScreen(ctx, student, `تعذّر تسجيل الإجازة: ${err.message}`, studentMainMenu());
+      return replyStudentScreen(ctx, student, `تعذّر تسجيل الإجازة: ${err.message}`, studentMainMenu(await effectiveStudent(ctx)));
     }
   }
 
@@ -1370,24 +1430,7 @@ bot.on('text', async (ctx, next) => {
         `✅ أُجّل الامتحان إلى ${state.dateIso} ويبقى متاحًا ${hours} ساعة.`,
         isAdmin(ctx) ? adminMainMenu() : teacherMainMenu()
       );
-      // إشعار الطلبة بالموعد الجديد
-      const students = await studies.listSeasonStudents(exam.stage_season_id);
-      let sent = 0;
-      for (const st of students) {
-        try {
-          await bot.telegram.sendMessage(
-            Number(st.telegram_id),
-            `🕓 أُجِّل امتحان «${exam.subject_name}» — ` +
-              `${updated.title || 'الامتحان الشهري ' + updated.exam_number}\n` +
-              `الموعد الجديد: ${state.dateIso}\nمدة الإتاحة: ${hours} ساعة`
-          );
-          sent += 1;
-        } catch (err) {
-          console.warn('تعذر إشعار طالب بتأجيل الامتحان:', err.description || err.message);
-        }
-        await new Promise((r) => setTimeout(r, 40));
-      }
-      return ctx.reply(`📤 أُبلغ ${sent} من ${students.length} طالبًا بالموعد الجديد.`);
+      return ctx.reply(updated.status==='published'?'📤 حُفظت إشعارات الموعد الجديد لإرسالها إلى الطلبة.':'حُفظ الموعد الجديد للمسودة.');
     } catch (err) {
       userState.delete(ctx.from.id);
       return ctx.reply(`تعذر التأجيل: ${err.message}`);
@@ -1464,53 +1507,32 @@ bot.on('text', async (ctx, next) => {
     if (text.length < 10) {
       return ctx.reply('التقرير النصي قصير جدًا. أرسل نصًا أوفى أو أرسل ملفًا.');
     }
-    await studies.submitReport(student.id, state.subjectId, state.ssId, {
+    const assignment=await studies.assignStudentToGroup(student.id,state.subjectId,state.ssId);
+    if(!assignment.group)return ctx.reply('لا توجد مجموعة متاحة لهذه المادة. راجع الإدارة ثم أعد إرسال التقرير.');
+    const report=await studies.submitReport(student.id, state.subjectId, state.ssId, {
       fileId: null,
       kind: 'text',
       note: text,
+      sourceMessageId:ctx.message.message_id,
     });
+    if(!report)return ctx.reply('لم يُضف تقرير جديد: إما أنه محفوظ مسبقًا أو تغيّر موسمك أو نمط مشاركتك.');
     const sent = await deliverReportToTeachers(student, state.subjectId, state.subjectName, {
       kind: 'text',
       fileId: null,
       note: text,
+      groupTitle:report.group_title_snapshot,
     });
     userState.delete(ctx.from.id);
     return ctx.reply(
       `✅ استُلم تقرير مادة «${state.subjectName}».` +
         (sent.delivered > 0 ? '\nوصل إلى الأستاذ.' : '\nمحفوظ في النظام وسيطّلع عليه الأستاذ.'),
-      studentMainMenu()
+      studentMainMenu(await effectiveStudent(ctx))
     );
   }
 
-  // -------- درجة حضور الدروس بعد مراجعة التقرير --------
-  if (state.action === 'lessons_score') {
-    const score = Number(ctx.message.text.trim());
-    const max = studies.GRADE_WEIGHTS.lessonsTotal;
-    if (Number.isNaN(score) || score < 0 || score > max) {
-      return ctx.reply(`أرسل درجة بين 0 و${max}.`);
-    }
-    if (!(await teacherOwnsSubject(ctx, state.subjectId, state.ssId))) {
-      userState.delete(ctx.from.id);
-      return ctx.reply('غير مصرح.');
-    }
-    await studies.setLessonsScore(state.studentId, state.subjectId, state.ssId, score, ctx.from.id);
-    userState.delete(ctx.from.id);
-    // يُبلَّغ الطالب بدرجته لتثبت له
-    const student = await db.getStudentById(state.studentId);
-    if (student && student.telegram_id) {
-      try {
-        await bot.telegram.sendMessage(
-          Number(student.telegram_id),
-          `📋 مُنحت درجة حضور الدروس: ${score} من ${max}.\nتجدها في «🎯 درجات - المباحثات».`
-        );
-      } catch (err) {
-        console.warn('تعذر إبلاغ الطالب بدرجة الدروس:', err.description || err.message);
-      }
-    }
-    return ctx.reply(
-      `✅ ${state.studentName}: ${score} من ${max}. وأُبلغ الطالب بدرجته.`,
-      isAdmin(ctx) ? adminMainMenu() : teacherMainMenu()
-    );
+  // ميزة درجة حضور الدروس أزيلت في 2.16. لا نعالج حالاتها القديمة.
+  if(state.action==='lessons_score'){
+    userState.delete(ctx.from.id);return ctx.reply('درجة حضور الدروس غير معتمدة ضمن نظام الدرجات الحالي.');
   }
 
   // -------- درجة تقرير مفرد (تقييم جزئي) --------
@@ -1685,16 +1707,9 @@ bot.on('text', async (ctx, next) => {
   // -------- بحث عن طالب --------
   if (state.action === 'admin_awaiting_student_search') {
     const q = ctx.message.text.trim();
-    const results = await db.searchStudents(q, 10);
-    userState.delete(ctx.from.id);
-    if (results.length === 0) return ctx.reply('لا توجد نتائج مطابقة.', adminMainMenu());
-    const rows = results.map((s) => [
-      callbackButton(
-        limitButtonText(`${s.is_active ? '' : '🗄️ '}${s.full_name} — ${s.stage_name}`),
-        `stu_select:${s.id}`
-      ),
-    ]);
-    return ctx.reply('نتائج البحث:', Markup.inlineKeyboard(rows));
+    const stageId=state.stageId||0;
+    userState.set(ctx.from.id,{action:'students_search_results',stageId,q});
+    return showStageStudents(ctx,stageId,0,q);
   }
 
   // -------- تعديل اسم طالب --------
@@ -1774,7 +1789,7 @@ async function openStudentSeasonActivity(ctx) {
     student.id,
     currentDateInTimeZone(ATTENDANCE_TIME_ZONE)
   );
-  return replyStudentScreen(ctx, student, formatStudentSeasonActivity(activity), studentMainMenu());
+  return replyStudentScreen(ctx, student, formatStudentSeasonActivity(activity), studentMainMenu(await effectiveStudent(ctx)));
 }
 
 bot.hears(STUDENT_ACTIVITY_BUTTON, openStudentSeasonActivity);
@@ -1801,7 +1816,7 @@ async function openLeaveRequest(ctx) {
       ctx,
       student,
       'لا يوجد موسم دراسي نشط في حسابك حاليًا، لذلك لا يمكن تقديم طلب إجازة.',
-      studentMainMenu()
+      studentMainMenu(await effectiveStudent(ctx))
     );
   }
   if (active) {
@@ -1829,7 +1844,7 @@ async function openLeaveRequest(ctx) {
       ctx,
       student,
       `استنفدت رصيد الإجازات للموسم الحالي (${usage.maxDays} أيام)، ولا يمكن تقديم طلب جديد حتى الموسم القادم.`,
-      studentMainMenu()
+      studentMainMenu(await effectiveStudent(ctx))
     );
   }
   userState.set(ctx.from.id, { action: 'leave_awaiting_days' });
@@ -1840,7 +1855,7 @@ async function openLeaveRequest(ctx) {
       `المتبقي لك في هذا الموسم: ${usage.remainingDays} من ${usage.maxDays} أيام.\n` +
       'ستبدأ الإجازة تلقائيًا من اليوم بعد موافقة الأدمن.\n' +
       `للرجوع اضغط «${BACK_BUTTON}».`,
-    studentMainMenu()
+    studentMainMenu(await effectiveStudent(ctx))
   );
 }
 
@@ -1944,7 +1959,7 @@ bot.action(/season_choice:(repeat|promote)/, async (ctx) => {
     if (ctx.callbackQuery && ctx.callbackQuery.message) {
       await deleteMessageQuietly(ctx.callbackQuery.message.chat.id, ctx.callbackQuery.message.message_id);
     }
-    return replyStudentScreen(ctx, updated, 'قائمتك الدراسية جاهزة:', studentMainMenu());
+    return replyStudentScreen(ctx, updated, 'قائمتك الدراسية جاهزة:', studentMainMenu(await effectiveStudent(ctx)));
   } catch (err) {
     return replyStudentScreen(ctx, student, `تعذر حفظ الاختيار: ${err.message}`);
   }
@@ -2353,14 +2368,14 @@ bot.action(/admin_act_subject:(\d+)/, async (ctx) => {
   );
   return ctx.editMessageText(
     `تم تفعيل الدرس رقم ${Number(lesson.lesson_number)} لمادة «${subject.name}» لمدة ${LESSON_ACTIVE_HOURS} ساعة ✅\n` +
-      `وصل تنبيه دروس اليوم إلى ${delivery.delivered} من ${delivery.total} طالب` +
+      `حُفظ تنبيه دروس اليوم للإرسال إلى ${delivery.queued ?? delivery.delivered} طالب` +
       (delivery.alreadyNotifiedToday ? `، وسبق تنبيه ${delivery.alreadyNotifiedToday} اليوم` : '') +
       (delivery.skippedOnLeave ? `، وتُخطّي ${delivery.skippedOnLeave} في إجازة.` : '.')
   );
 });
 
 // ---------------------------------------------------------------------------
-// لوحة الأدمن — التقارير (CSV)
+// لوحة الأدمن — التقارير (Markdown)
 // ---------------------------------------------------------------------------
 async function openReports(ctx) {
   if (!isAdmin(ctx)) return denyUnauthorized(ctx);
@@ -2405,11 +2420,22 @@ bot.action(/admin_report_season:(\d+)/, async (ctx) => {
   if (rows.length === 0) {
     return ctx.reply('لا توجد بيانات كافية لهذا الموسم (تأكد من وجود طلبة ومواد).');
   }
-  return sendMarkdownDoc(
+  await sendMarkdownDoc(
     ctx,
     `تقرير_${safeFilePart(rows[0].stage_name)}_${safeFilePart(formatSeasonLabel(rows[0]))}`,
     buildStageSeasonMd(rows)
   );
+  return ctx.reply('تنزيل كل تسجيل حضور مع تاريخه ووقته:',Markup.inlineKeyboard([
+    [Markup.button.callback('📥 حضور الدروس MD',`admin_report_md:${stageSeasonId}:lessons`)],
+    [Markup.button.callback('📥 حضور المباحثات MD',`admin_report_md:${stageSeasonId}:discussions`)]
+  ]));
+});
+
+// Old CSV buttons also return Markdown after this update.
+bot.action(/^admin_report_(?:md|csv):(\d+):(lessons|discussions)$/,async(ctx)=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery('جارٍ تجهيز السجلات…');
+  return ctx.replyWithDocument({source:require('node:stream').Readable.from(adminData.attendanceMarkdown(Number(ctx.match[1]),ctx.match[2])),filename:`attendance-${ctx.match[1]}-${ctx.match[2]}.md`});
 });
 
 async function openSeasonArchive(ctx) {
@@ -2454,11 +2480,66 @@ bot.action(/admin_archive_stage:(\d+)/, async (ctx) => {
 // ---------------------------------------------------------------------------
 async function openStudentManagement(ctx) {
   if (!isAdmin(ctx)) return denyUnauthorized(ctx);
-  userState.set(ctx.from.id, { action: 'admin_awaiting_student_search' });
+  userState.delete(ctx.from.id);
   await answerIfCallback(ctx);
-  return ctx.reply('أرسل اسم الطالب (كليًا أو جزئيًا) للبحث عنه:');
+  const stages = await adminData.stages();
+  const rows = stages.map(s => [callbackButton(
+    limitButtonText(`${s.is_active ? '🎓' : '🗄️'} ${s.name} — ${s.student_count} طالب`),
+    `students_stage:${s.id}`)]);
+  rows.push([callbackButton('🔎 البحث في جميع الطلبة', 'students_search:0')]);
+  return ctx.reply('اختر المرحلة لعرض طلبتها وموادها ومجموعاتها:', Markup.inlineKeyboard(rows));
 }
 
+async function showStageStudents(ctx, stageId, page = 0, q = '') {
+  const data = await adminData.students({ stageId:stageId || null, page, q, status:'all' });
+  const rows = data.rows.map(s => [callbackButton(limitButtonText(`${s.is_active ? '' : '🗄️ '}${s.full_name} — ${s.groups.map(g=>g.subject+': '+g.group).join('، ') || s.stage_name}`), `stu_select:${s.id}`)]);
+  const nav=[];
+  if (page>0) nav.push(callbackButton('السابق', `students_page:${stageId}:${page-1}`));
+  if ((page+1)*data.size<data.total) nav.push(callbackButton('التالي', `students_page:${stageId}:${page+1}`));
+  if(nav.length)rows.push(nav);
+  rows.push([callbackButton('🔎 بحث',`students_search:${stageId}`),callbackButton('↩️ المراحل','admin_students')]);
+  return ctx.reply(`الطلبة: ${data.total} | الصفحة ${page+1}\n${data.total ? 'اختر الطالب لعرض ملفه:' : 'لا توجد نتائج مطابقة.'}`,Markup.inlineKeyboard(rows));
+}
+
+bot.action(/^students_stage:(\d+)$/,async ctx=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();
+  const s=await adminData.stage(Number(ctx.match[1]));
+  const rows=[
+    [callbackButton(`👥 الطلبة (${s.student_count})`,`students_page:${s.id}:0`)],
+    [callbackButton('📚 المواد والمجموعات',`students_content:${s.id}`)],
+    [callbackButton('📊 تقارير الحضور والمواسم',`admin_report_stage:${s.id}`)],
+    [callbackButton('🔎 بحث داخل المرحلة',`students_search:${s.id}`)],
+    [callbackButton('↩️ المراحل','admin_students')]
+  ];
+  return ctx.reply(`${s.name}\nالموسم: ${s.season_name||'لا يوجد موسم نشط'}\nالطلبة: ${s.student_count} | المواد: ${s.subject_count} | المجموعات: ${s.group_count}`,Markup.inlineKeyboard(rows));
+});
+bot.action(/^students_content:(\d+)$/,async ctx=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();const s=await adminData.stage(Number(ctx.match[1]));
+  const lines=s.subjects.map(sub=>`📘 ${sub.name} — ${sub.teacher_name||'بلا أستاذ'}\n`+s.groups.filter(g=>g.subject_id===sub.id).map(g=>`• ${g.title}: ${g.member_count}/${g.capacity}`).join('\n'));
+  return ctx.reply((lines.join('\n\n')||'لا توجد مواد بعد.').slice(0,3800),Markup.inlineKeyboard([[callbackButton('↩️ المرحلة',`students_stage:${s.id}`)]]));
+});
+bot.action(/^students_page:(\d+):(\d+)$/,async ctx=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');await ctx.answerCbQuery();
+  const state=userState.get(ctx.from.id);
+  const stageId=Number(ctx.match[1]);
+  return showStageStudents(ctx,stageId,Number(ctx.match[2]),state?.action==='students_search_results'&&state.stageId===stageId?state.q:'');
+});
+bot.action(/^students_search:(\d+)$/,async ctx=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');await ctx.answerCbQuery();
+  userState.set(ctx.from.id,{action:'admin_awaiting_student_search',stageId:Number(ctx.match[1])});
+  return ctx.reply('أرسل الاسم أو جزءًا منه. يمكنك الرجوع دون البحث.');
+});
+
+async function openAdminWeb(ctx){
+  if(!isAdmin(ctx)||isInPreview(ctx))return ctx.reply('لوحة الإدارة متاحة للأدمن خارج وضع المعاينة فقط.');
+  if(ctx.chat?.type!=='private')return ctx.reply('افتح هذه اللوحة من المحادثة الخاصة مع البوت.');
+  if(process.env.ADMIN_WEB_ENABLED!=='true'||!process.env.ADMIN_WEB_URL)return ctx.reply('لوحة الإدارة جاهزة ضمن المشروع. لتفعيلها اضبط ADMIN_WEB_ENABLED=true ورابط ADMIN_WEB_URL وفق دليل التحديث.');
+  return ctx.reply('افتح لوحة إدارة المعهد:',Markup.inlineKeyboard([[Markup.button.webApp('🖥️ فتح لوحة الإدارة',process.env.ADMIN_WEB_URL)]]));
+}
+bot.hears('🖥️ لوحة الإدارة',openAdminWeb);
+bot.command('admin_web',openAdminWeb);
 bot.action('admin_students', openStudentManagement);
 bot.hears('🎓 إدارة الطلبة', openStudentManagement);
 
@@ -2475,8 +2556,10 @@ bot.action(/stu_select:(\d+)/, async (ctx) => {
   const attendanceRows = activity
     ? await db.getStudentSeasonReport(studentId, activity.stageSeasonId, ATTENDANCE_TIME_ZONE)
     : [];
+  const groups=await studies.listStudentGroups(studentId);
   return ctx.reply(
-    formatAdminStudentDetails(student, activity, attendanceRows),
+    formatAdminStudentDetails(student, activity, attendanceRows)+'\n\n👥 المجموعات حسب المادة:\n'+
+      (groups.map(g=>`• ${g.subject_name}: ${g.group_title}`).join('\n')||'لم يُوزع على مجموعات بعد.'),
     studentActionsKeyboard(studentId, student.is_active)
   );
 });
@@ -2570,6 +2653,7 @@ bot.action(/stu_hard:(\d+)/, async (ctx) => {
 
 // زر إلغاء عام: يستعمله الطالب والأستاذ والأدمن، فلا يُقصر على الأدمن
 bot.action('admin_cancel_noop', async (ctx) => {
+  userState.delete(ctx.from.id);
   await ctx.answerCbQuery('تم الإلغاء');
   return ctx.editMessageText('تم إلغاء العملية.');
 });
@@ -2868,148 +2952,28 @@ async function runScheduleTick() {
 }
 
 async function runScheduleTickInner() {
-  // 1) سؤال الأستاذ قبل الموعد بخمس دقائق: هل توجد محاضرة اليوم؟
-  try {
-    const pending = await studies.getSlotsNeedingPrompt(SLOT_PROMPT_LEAD_MINUTES);
-    for (const slot of pending) {
-      const date = slot.scheduled_date.toISOString().slice(0, 10);
-      // يُسجَّل السؤال أولًا حتى لا يتكرر لو فشل الإرسال
-      // recordSlotPrompt يُرجع صفًا فقط إن أدرج فعليًا؛ إن لم يُدرج فقد سُئل مسبقًا فنتجاوز
-      const promptRow = await studies.recordSlotPrompt(slot.id, date);
-      if (!promptRow) continue;
-      if (!slot.teacher_telegram_id) continue;
-      try {
-        await bot.telegram.sendMessage(
-          Number(slot.teacher_telegram_id),
-          `⏰ بعد ${SLOT_PROMPT_LEAD_MINUTES} دقائق: مباحثة «${slot.subject_name}»` +
-            ` — ${slot.group_title || 'المجموعة ' + slot.group_number}\n` +
-            `الموعد: ${studies.formatHour(slot.hour, slot.minute)}\n\nهل توجد محاضرة اليوم؟`,
-          Markup.inlineKeyboard([
-            [Markup.button.callback('✅ نعم، ابدأ المباحثة', `slot_yes:${slot.id}:${date}`)],
-            [Markup.button.callback('🕓 تأجيل اليوم', `slot_no:${slot.id}:${date}`)],
-          ])
-        );
-      } catch (err) {
-        console.warn(`تعذر سؤال الأستاذ عن الموعد ${slot.id}:`, err.description || err.message);
-      }
-    }
-  } catch (err) {
-    console.error('خطأ في سؤال الأساتذة عن المواعيد:', err);
-  }
-
-  // 2) المواعيد المؤكَّدة التي حان وقتها: تُفتح جلستها ويُنبَّه طلبتها
-  try {
-    const ready = await studies.getSlotsReadyToStart();
-    for (const slot of ready) {
-      const session = await studies.startSessionFromSlot(slot);
-      if (!session) continue; // فُتحت من جولة أخرى — تجاوز
-      const students = await studies.listGroupStudents(slot.group_id);
-      const keyboard = Markup.inlineKeyboard([
-        [Markup.button.callback('✅ حضرتُ المباحثة', `mub_attend:${session.id}`)],
-      ]);
-      await Promise.allSettled(
-        students.map((st) =>
-          tgQueue.sendMessage(
-            Number(st.telegram_id),
-            `🟢 بدأت مباحثة «${slot.subject_name}» الآن.\n` +
-              `المجموعة: ${slot.group_title || 'المجموعة ' + slot.group_number}\n\n` +
-              'بعد حضورك المباحثة فعلًا اضغط الزر أدناه لتسجيل حضورك.',
-            keyboard,
-            { priority: PRIORITY.normal }
-          )
-        )
-      );
-      if (slot.teacher_id) {
-        const teacher = await db.getTeacherById(slot.teacher_id);
-        if (teacher && teacher.telegram_id) {
-          try {
-            await bot.telegram.sendMessage(
-              Number(teacher.telegram_id),
-              `🟢 فُتحت مباحثة «${slot.subject_name}» وأُرسل تنبيه حضور البداية إلى ${students.length} طالبًا.\n` +
-                'عند انتهاء المباحثة اضغط الزر لفتح حضور النهاية (أو يُفتح تلقائيًا عند حلول وقت الانتهاء).',
-              Markup.inlineKeyboard([
-                [Markup.button.callback('🔚 إنهاء المباحثة وفتح حضور النهاية', `mub_finish:${session.id}`)],
-              ])
-            );
-          } catch (err) {
-            console.warn('تعذر إبلاغ الأستاذ ببدء الجلسة:', err.description || err.message);
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.error('خطأ في فتح جلسات المباحثات:', err);
-  }
-
-  // 3) تنبيه الأستاذ قبل انتهاء المباحثة بعشر دقائق ليفتح حضور النهاية
-  try {
-    const needing = await studies.getSessionsNeedingEndPrompt(studies.END_ATTENDANCE_MINUTES);
-    for (const s of needing) {
-      await studies.markEndPromptSent(s.id);
-      if (!s.teacher_telegram_id) continue;
-      try {
-        await bot.telegram.sendMessage(
-          Number(s.teacher_telegram_id),
-          `⏰ تقترب نهاية مباحثة «${s.subject_name}» — ${s.group_title || 'المجموعة ' + s.group_number}.\n` +
-            'اضغط لإنهائها الآن وفتح حضور النهاية، أو ستُفتح تلقائيًا عند حلول وقت الانتهاء.',
-          Markup.inlineKeyboard([
-            [Markup.button.callback('🔚 إنهاء المباحثة وفتح حضور النهاية', `mub_finish:${s.id}`)],
-          ])
-        );
-      } catch (err) {
-        console.warn('تعذر تنبيه الأستاذ بحضور النهاية:', err.description || err.message);
-      }
-    }
-  } catch (err) {
-    console.error('خطأ في تنبيه حضور النهاية:', err);
-  }
-
-  // 4) فتح حضور النهاية تلقائيًا للجلسات التي بلغت وقت انتهائها ولم يُنهِها الأستاذ
-  try {
-    const auto = await studies.getSessionsNeedingAutoEnd();
-    for (const s of auto) {
-      await openEndAttendanceAndNotify(s.id, 'تلقائيًا');
-    }
-  } catch (err) {
-    console.error('خطأ في الفتح التلقائي لحضور النهاية:', err);
-  }
+  return scheduler.tick();
 }
 
 // يفتح حضور النهاية (مرة واحدة) ويرسل زر «حضرت النهاية» لطلبة المجموعة عبر الطابور.
 async function openEndAttendanceAndNotify(sessionId, byWhom) {
-  const opened = await studies.openEndAttendance(sessionId);
-  if (!opened) return null; // مفتوح مسبقًا
-  const session = await studies.getSessionById(sessionId);
-  const students = await studies.listGroupStudents(session.group_id);
-  const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback('✅ حضرتُ نهاية المباحثة', `mub_end_attend:${sessionId}`)],
-  ]);
-  const results = await Promise.allSettled(
-    students.map((st) =>
-      tgQueue.sendMessage(
-        Number(st.telegram_id),
-        `🔔 انتهت المباحثة (${byWhom}). سجّل حضور النهاية خلال ${studies.END_ATTENDANCE_MINUTES} دقائق.\n` +
-          'ملاحظة: حضور النهاية سجل مستقل عن حضور البداية، وكلاهما مطلوب لاكتمال حضورك.',
-        keyboard,
-        { priority: PRIORITY.normal }
-      )
-    )
-  );
-  return { notified: results.filter((r) => r.status === 'fulfilled').length };
+  return scheduler.openEnd(sessionId, byWhom === 'تلقائيًا');
 }
 
 bot.action(/slot_yes:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
   const teacher = await effectiveTeacher(ctx);
-  if (!teacher) return ctx.answerCbQuery('غير مصرح.');
-  await studies.recordSlotDecision(Number(ctx.match[1]), ctx.match[2], 'confirmed', ctx.from.id);
+  if (!isAdmin(ctx) && (!teacher || !await access.teacherObject(teacher.id,'slot',Number(ctx.match[1])))) return ctx.answerCbQuery('غير مصرح.');
+  const saved=await studies.recordSlotDecision(Number(ctx.match[1]), ctx.match[2], 'confirmed', ctx.from.id);
+  if(!saved)return ctx.answerCbQuery('الموعد قديم أو بدأت جلسته بالفعل.');
   await ctx.answerCbQuery('تم التأكيد ✅');
   return ctx.editMessageText('✅ تم تأكيد المباحثة. ستُفتح في وقتها ويصل التنبيه للطلبة تلقائيًا.');
 });
 
 bot.action(/slot_no:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
   const teacher = await effectiveTeacher(ctx);
-  if (!teacher) return ctx.answerCbQuery('غير مصرح.');
-  await studies.recordSlotDecision(Number(ctx.match[1]), ctx.match[2], 'postponed', ctx.from.id);
+  if (!isAdmin(ctx) && (!teacher || !await access.teacherObject(teacher.id,'slot',Number(ctx.match[1])))) return ctx.answerCbQuery('غير مصرح.');
+  const saved=await studies.recordSlotDecision(Number(ctx.match[1]), ctx.match[2], 'postponed', ctx.from.id);
+  if(!saved)return ctx.answerCbQuery('الموعد قديم أو بدأت جلسته بالفعل.');
   await ctx.answerCbQuery('تم التأجيل');
   return ctx.editMessageText('🕓 تم تأجيل مباحثة اليوم. لن يصل أي تنبيه للطلبة، ولن تُحتسب جلسة اليوم.');
 });
@@ -3027,7 +2991,7 @@ bot.action(/mub_attend:(\d+)/, async (ctx) => {
   if (!member) return ctx.answerCbQuery('هذه المباحثة ليست لمجموعتك.');
 
   const marked = await studies.markSessionAttendance(sessionId, student.id, 'start');
-  if (!marked) return ctx.answerCbQuery('سجّلت حضور البداية مسبقًا ✅');
+  if (!marked) return ctx.answerCbQuery('لم يُضف سجل جديد: سجّلت مسبقًا أو انتهت المهلة أو لست مؤهلًا لهذه الجلسة.');
   await ctx.answerCbQuery('تم تسجيل حضور البداية ✅');
   return ctx.editMessageText(
     '✅ سُجّل حضورك في بداية المباحثة.\nلا تنسَ تسجيل حضور النهاية عند إغلاقها.'
@@ -3048,9 +3012,12 @@ bot.action(/mub_end_attend:(\d+)/, async (ctx) => {
     return ctx.answerCbQuery('هذه المباحثة ليست لمجموعتك.');
   }
   const marked = await studies.markSessionAttendance(sessionId, student.id, 'end');
-  if (!marked) return ctx.answerCbQuery('سجّلت حضور النهاية مسبقًا ✅');
+  if (!marked) return ctx.answerCbQuery('لم يُضف سجل جديد: سجّلت مسبقًا أو انتهت المهلة أو لست مؤهلًا لهذه الجلسة.');
   await ctx.answerCbQuery('تم تسجيل حضور النهاية ✅');
-  return ctx.editMessageText('✅ سُجّل حضورك في نهاية المباحثة. اكتمل حضورك، بارك الله فيك.');
+  const start=(await db.pool.query("SELECT 1 FROM mubahatha_attendance WHERE session_id=$1 AND student_id=$2 AND phase='start'",[sessionId,student.id])).rows[0];
+  return ctx.editMessageText(start
+    ? '✅ سُجّل حضور النهاية. اكتمل حضورك بالبداية والنهاية، بارك الله فيك.'
+    : 'سُجّل حضور النهاية، لكن لم تسجّل حضور البداية؛ لذلك لا يُحسب حضور هذه المباحثة مكتملًا.');
 });
 
 // الأستاذ ينهي المباحثة يدويًا فيفتح حضور النهاية فورًا
@@ -3058,11 +3025,12 @@ bot.action(/mub_finish:(\d+)/, async (ctx) => {
   const teacher = await effectiveTeacher(ctx);
   if (!teacher && !isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
   const sessionId = Number(ctx.match[1]);
+  if(!isAdmin(ctx) && !await access.teacherObject(teacher.id,'session',sessionId)) return ctx.answerCbQuery('هذه الجلسة ليست ضمن صلاحياتك.');
   await ctx.answerCbQuery();
   const result = await openEndAttendanceAndNotify(sessionId, 'الأستاذ');
   if (!result) return ctx.editMessageText('حضور النهاية مفتوح مسبقًا أو الجلسة غير موجودة.');
   return ctx.editMessageText(
-    `✅ أُنهيت المباحثة وفُتح حضور النهاية لـ${result.notified} طالبًا لمدة ${studies.END_ATTENDANCE_MINUTES} دقائق.`
+    `✅ أُنهيت المباحثة وفُتح حضور النهاية لمدة ${studies.END_ATTENDANCE_MINUTES} دقائق. حُفظت إشعارات ${result.notified} طالبًا في طابور الإرسال.`
   );
 });
 
@@ -3479,7 +3447,7 @@ async function renderExam(ctx, examId, edit = false) {
     `الحالة: ${exam.status === 'published' ? 'منشور 📤' : 'مسودة 📝'}\n` +
     `يفتح: ${new Date(exam.opens_at).toISOString().slice(0, 16).replace('T', ' ')}\n` +
     `يُغلق: ${new Date(exam.closes_at).toISOString().slice(0, 16).replace('T', ' ')}\n` +
-    `الدرجة: ${Number(exam.max_score)}\n\nالأسئلة:\n${lines}`;
+    `الدرجة: ${Number(exam.max_score)}\n\nالأسئلة (${questions.length}):\n${lines.slice(0,2700)}${lines.length>2700?'\n… بقية الأسئلة متاحة كاملة في لوحة الإدارة.':''}`;
   const kb = Markup.inlineKeyboard(rows);
   return edit ? ctx.editMessageText(text, kb) : ctx.reply(text, kb);
 }
@@ -3516,6 +3484,8 @@ bot.action(/ex_qmcq:(\d+)/, async (ctx) => {
 bot.action(/ex_tfans:(\d+):(صح|خطأ)/, async (ctx) => {
   const state = userState.get(ctx.from.id);
   if (!state || state.action !== 'teacher_q_tf_answer') return ctx.answerCbQuery();
+  const exam=await studies.getExamById(Number(ctx.match[1]));
+  if(state.examId!==Number(ctx.match[1])||!exam||!await teacherOwnsSubject(ctx,exam.subject_id,exam.stage_season_id))return ctx.answerCbQuery('غير مصرح.');
   await studies.addExamQuestion(Number(ctx.match[1]), {
     type: 'tf', prompt: state.prompt, correct: ctx.match[2],
   });
@@ -3529,6 +3499,8 @@ bot.action(/ex_mcqans:(\d+):(\d+)/, async (ctx) => {
   const state = userState.get(ctx.from.id);
   if (!state || state.action !== 'teacher_q_mcq_correct') return ctx.answerCbQuery();
   const examId = Number(ctx.match[1]);
+  const exam=await studies.getExamById(examId);
+  if(state.examId!==examId||!exam||!await teacherOwnsSubject(ctx,exam.subject_id,exam.stage_season_id))return ctx.answerCbQuery('غير مصرح.');
   const index = Number(ctx.match[2]);
   const correct = state.options[index];
   if (correct === undefined) return ctx.answerCbQuery('خيار غير صالح.');
@@ -3547,29 +3519,9 @@ bot.action(/ex_pub:(\d+)/, async (ctx) => {
     return ctx.answerCbQuery('غير مصرح.');
   }
   try {
-    const published = await studies.publishExam(exam.id);
+    await studies.publishExam(exam.id);
     await ctx.answerCbQuery('نُشر ✅');
-    // إشعار طلبة المرحلة بموعد الامتحان
-    const students = await studies.listSeasonStudents(exam.stage_season_id);
-    let sent = 0;
-    for (const st of students) {
-      try {
-        await bot.telegram.sendMessage(
-          Number(st.telegram_id),
-          `📝 امتحان جديد في مادة «${exam.subject_name}»\n` +
-            `${published.title || 'الامتحان الشهري ' + published.exam_number}\n` +
-            `يفتح: ${new Date(published.opens_at).toISOString().slice(0, 10)}\n` +
-            `مدة الإتاحة: ${published.available_hours} ساعة\n` +
-            `الدرجة: ${Number(published.max_score)}\n\n` +
-            'ستجده في «📝 امتحاناتي» عند فتحه.'
-        );
-        sent += 1;
-      } catch (err) {
-        console.warn('تعذر إشعار طالب بالامتحان:', err.description || err.message);
-      }
-      await new Promise((r) => setTimeout(r, 40));
-    }
-    return ctx.editMessageText(`📤 نُشر الامتحان ووصل الإشعار إلى ${sent} من ${students.length} طالبًا.`);
+    return ctx.editMessageText('📤 نُشر الامتحان وحُفظت إشعارات الطلبة للإرسال تلقائيًا.');
   } catch (err) {
     return ctx.answerCbQuery(`تعذر النشر: ${err.message}`, { show_alert: true });
   }
@@ -3584,7 +3536,7 @@ bot.action(/ex_pp:(\d+)/, async (ctx) => {
   const days = studies.upcomingWeekDays();
   return ctx.reply(
     `🕓 تأجيل «${exam.title || 'الامتحان الشهري ' + exam.exam_number}».\n` +
-      'تُلغى المحاولات التي لم تُسلَّم ليبدأ الجميع في الموعد الجديد.\n\nاختر التاريخ الجديد:',
+      'يمكن تغيير الموعد ما دام لم يبدأ أي طالب محاولة.\n\nاختر التاريخ الجديد:',
     Markup.inlineKeyboard(
       days.map((d) => [callbackButton(d.label, `ex_ppday:${exam.id}:${d.iso}`)])
     )
@@ -3639,10 +3591,10 @@ bot.action(/fin_subj:(\d+):(\d+)/, async (ctx) => {
   if (!(await teacherOwnsSubject(ctx, subjectId, ssId))) return ctx.answerCbQuery('غير مصرح.');
   await ctx.answerCbQuery();
   const pending = await studies.listReportStudentsForGrading(subjectId, ssId);
-  const ungraded = pending.filter((p) => p.report_score === null);
+  const ungraded = await studies.listReportStudentsForGrading(subjectId,ssId,{onlyUngraded:true,size:1});
   return ctx.reply(
-    `طلبة التقارير في هذه المادة: ${pending.length}\n` +
-      `بانتظار التقييم: ${ungraded.length}\n\n` +
+    `طلبة التقارير في هذه المادة: ${Number(pending[0]?.total_count||0)}\n` +
+      `بانتظار التقييم: ${Number(ungraded[0]?.total_count||0)}\n\n` +
       `درجة التقارير من ${studies.GRADE_WEIGHTS.participationTotal}، ` +
       `ودرجة المباحثات تُحسب تلقائيًا بنسبة الحضور.`,
     Markup.inlineKeyboard([
@@ -3657,7 +3609,7 @@ bot.action(/fin_subj:(\d+):(\d+)/, async (ctx) => {
 
 // يعرض طالبًا واحدًا مع سجله السابق ليقيّمه الأستاذ، ثم ينتقل للذي يليه.
 async function showNextReportStudent(ctx, subjectId, ssId) {
-  const pending = await studies.listReportStudentsForGrading(subjectId, ssId);
+  const pending = await studies.listReportStudentsForGrading(subjectId, ssId,{onlyUngraded:true,size:1});
   const next = pending.find((p) => p.report_score === null);
   if (!next) {
     return ctx.reply('✅ اكتمل تقييم جميع طلبة التقارير في هذه المادة.', teacherMainMenu());
@@ -3820,7 +3772,7 @@ async function sendNextExamQuestion(ctx, attemptId, examId) {
         `📊 درجتك: ${Number(result.score)} من ${Number(exam.max_score)}\n` +
         `الإجابات الصحيحة: ${Number(result.correct_count)} من ${Number(result.total_questions)}\n\n` +
         'وفقك الله.',
-      studentMainMenu()
+      studentMainMenu(await effectiveStudent(ctx))
     );
   }
   const options =
@@ -3877,7 +3829,7 @@ bot.action(/stex_ans:(\d+):(\d+):(\d+)/, async (ctx) => {
     return ctx.reply(
       `⏰ انتهت مهلة الامتحان وسُلّم بما أجبت عنه.\n` +
         `درجتك: ${Number(done.score)} من ${Number(examNow ? examNow.max_score : 5)}`,
-      studentMainMenu()
+      studentMainMenu(await effectiveStudent(ctx))
     );
   }
 
@@ -4062,10 +4014,7 @@ bot.hears('🎯 درجات - المباحثات', async (ctx) => {
         `     الامتحانات الشهرية: ${Number(g.exams_score)} من ${studies.GRADE_WEIGHTS.examsTotal}` +
         ` | ${g.mode === 'report' ? 'التقارير' : 'المباحثات'}: ${Number(g.participation_score)} من ${
           studies.GRADE_WEIGHTS.participationTotal
-        }` +
-        (Number(g.lessons_score) > 0
-          ? ` | حضور الدروس: ${Number(g.lessons_score)} من ${studies.GRADE_WEIGHTS.lessonsTotal}`
-          : '')
+        }`
     );
     parts.push(`📘 ${season}\n${lines.join('\n')}`);
   }
@@ -4079,38 +4028,25 @@ bot.hears('✏️ تحرير الدرجات', (ctx) =>
   pickTeacherSubject(ctx, 'gr_subj', 'اختر المادة لتحرير درجات طلبتها:')
 );
 
-bot.action(/gr_subj:(\d+):(\d+)/, async (ctx) => {
-  const subjectId = Number(ctx.match[1]);
-  const ssId = Number(ctx.match[2]);
-  if (!(await teacherOwnsSubject(ctx, subjectId, ssId))) return ctx.answerCbQuery('غير مصرح.');
-  await ctx.answerCbQuery();
-  const rows = await studies.listSubjectGrades(subjectId, ssId);
-  if (rows.length === 0) return ctx.reply('لا يوجد طلبة في هذه المادة.');
-  return ctx.reply(
-    rows.length > 40
-      ? `اختر الطالب لتحرير درجته (يُعرض أول 40 من ${rows.length}؛ استعمل «🎓 إدارة الطلبة» للبحث بالاسم):`
-      : 'اختر الطالب لتحرير درجته:',
-    Markup.inlineKeyboard(
-      rows
-        .slice(0, 40)
-        .map((r) => [
-          callbackButton(
-            `${limitButtonText(r.full_name, 28)} — ${
-              r.total_score === null ? 'بلا درجة' : Number(r.total_score)
-            }${r.edited_at ? ' ✏️' : ''}`,
-            `gr_stu:${r.student_id}:${subjectId}:${ssId}`
-          ),
-        ])
-    )
-  );
-});
+async function showGradeStudents(ctx,subjectId,ssId,page=0){
+  if(!await teacherOwnsSubject(ctx,subjectId,ssId))return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();const students=await studies.listSubjectGrades(subjectId,ssId,{page});
+  const total=Number(students[0]?.total_count||0);
+  const rows=students.map(r=>[callbackButton(limitButtonText(`${r.full_name} — ${r.total_score??'بلا درجة'}`),`gr_stu:${r.student_id}:${subjectId}:${ssId}`)]);
+  const nav=[];if(page>0)nav.push(callbackButton('السابق',`gr_page:${subjectId}:${ssId}:${page-1}`));
+  if((page+1)*25<total)nav.push(callbackButton('التالي',`gr_page:${subjectId}:${ssId}:${page+1}`));
+  if(nav.length)rows.push(nav);
+  return ctx.reply(`اختر الطالب لتحرير درجته. الطلبة: ${total} | الصفحة ${page+1}`,Markup.inlineKeyboard(rows));
+}
+bot.action(/^gr_subj:(\d+):(\d+)$/,ctx=>showGradeStudents(ctx,Number(ctx.match[1]),Number(ctx.match[2])));
+bot.action(/^gr_page:(\d+):(\d+):(\d+)$/,ctx=>showGradeStudents(ctx,Number(ctx.match[1]),Number(ctx.match[2]),Number(ctx.match[3])));
 
 bot.action(/gr_stu:(\d+):(\d+):(\d+)/, async (ctx) => {
   const [, studentId, subjectId, ssId] = ctx.match.map(Number);
   if (!(await teacherOwnsSubject(ctx, subjectId, ssId))) return ctx.answerCbQuery('غير مصرح.');
   await ctx.answerCbQuery();
   const student = await db.getStudentById(studentId);
-  const rows = await studies.listSubjectGrades(subjectId, ssId);
+  const rows = await studies.listSubjectGrades(subjectId, ssId,{studentId});
   const g = rows.find((r) => r.student_id === studentId) || {};
   return ctx.reply(
     `👤 ${student ? student.full_name : ''}\n` +
@@ -4223,8 +4159,10 @@ bot.action(/pm_set:(\d+):(\d+):(mubahatha|report)/, async (ctx) => {
   await studies.setParticipationMode(student.id, subjectId, ssId, mode);
   await ctx.answerCbQuery('تم الحفظ ✅');
   if (mode === 'report') {
+    const assigned=await studies.assignStudentToGroup(student.id,subjectId,ssId);
     return ctx.editMessageText(
       `📄 اخترت نظام التقارير في «${row.subject_name}».\n` +
+        (assigned.group?`المجموعة: ${assigned.group.title}\n`:'بانتظار توفير مجموعة لهذه المادة قبل تسليم التقارير.\n')+
         'أرسل تقاريرك من «📖 مشاركتي» ← المادة ← «إرسال تقرير».\n' +
         'وأنت مشمول بالامتحانات الشهرية كبقية الطلبة.'
     );
@@ -4698,49 +4636,42 @@ bot.hears('📄 تقارير الطلبة', (ctx) =>
   pickTeacherSubject(ctx, 'sr_subj', 'اختر المادة لمراجعة تقارير طلبتها ومنح الدرجات:')
 );
 
-bot.action(/sr_subj:(\d+):(\d+)/, async (ctx) => {
-  const subjectId = Number(ctx.match[1]);
-  const ssId = Number(ctx.match[2]);
-  if (!(await teacherOwnsSubject(ctx, subjectId, ssId))) return ctx.answerCbQuery('غير مصرح.');
-  await ctx.answerCbQuery();
-
-  const students = await studies.listReportStudentsForGrading(subjectId, ssId);
-  if (students.length === 0) {
-    return ctx.reply('لا يوجد طلبة في نظام التقارير في هذه المادة.');
-  }
-  const graded = students.filter((r) => r.report_score !== null).length;
-  const rows = students.slice(0, 40).map((r) => [
-    callbackButton(
-      `${limitButtonText(r.full_name, 26)} — ${Number(r.report_count)} تقرير` +
-        `${r.report_score === null ? ' ⏳' : ` (${Number(r.report_score)})`}`,
-      `sr_stu:${r.student_id}:${subjectId}:${ssId}`
-    ),
-  ]);
-  return ctx.reply(
-    `📄 طلبة نظام التقارير: ${students.length}` +
-      (students.length > 40 ? ' (يُعرض أول 40)' : '') +
-      `\n` +
-      `مُقيَّمون: ${graded} | بانتظار التقييم: ${students.length - graded}\n\n` +
-      `اضغط على الطالب لعرض تقاريره ومنحه الدرجة (من ${studies.GRADE_WEIGHTS.participationTotal}):`,
-    Markup.inlineKeyboard(rows)
-  );
+bot.action(/^sr_subj:(\d+):(\d+)$/,async ctx=>{
+  const subjectId=Number(ctx.match[1]),ssId=Number(ctx.match[2]);
+  if(!await teacherOwnsSubject(ctx,subjectId,ssId))return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();const groups=await studies.listGroups(subjectId,ssId);
+  const rows=groups.map(g=>[callbackButton(limitButtonText(g.title),`sr_page:${subjectId}:${ssId}:${g.id}:0`)]);
+  rows.push([callbackButton('كل المجموعات والسجلات القديمة',`sr_page:${subjectId}:${ssId}:0:0`)]);
+  return ctx.reply('اختر المجموعة لمراجعة تقارير طلبتها بصورة مستقلة:',Markup.inlineKeyboard(rows));
+});
+bot.action(/^sr_page:(\d+):(\d+):(\d+):(\d+)$/,async ctx=>{
+  const subjectId=Number(ctx.match[1]),ssId=Number(ctx.match[2]),groupId=Number(ctx.match[3]),page=Number(ctx.match[4]);
+  if(!await teacherOwnsSubject(ctx,subjectId,ssId))return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();const students=await studies.listReportStudentsForGrading(subjectId,ssId,{groupId:groupId||null,page});
+  const total=Number(students[0]?.total_count||0);
+  const rows=students.map(r=>[callbackButton(limitButtonText(`${r.full_name} — ${r.report_count} تقرير`),`sr_stu:${r.student_id}:${subjectId}:${ssId}:${groupId}:0`)]);
+  const nav=[];if(page>0)nav.push(callbackButton('السابق',`sr_page:${subjectId}:${ssId}:${groupId}:${page-1}`));
+  if((page+1)*25<total)nav.push(callbackButton('التالي',`sr_page:${subjectId}:${ssId}:${groupId}:${page+1}`));
+  if(nav.length)rows.push(nav);rows.push([callbackButton('↩️ المجموعات',`sr_subj:${subjectId}:${ssId}`)]);
+  return ctx.reply(`طلبة التقارير: ${total} | الصفحة ${page+1}`,Markup.inlineKeyboard(rows));
 });
 
-bot.action(/sr_stu:(\d+):(\d+):(\d+)/, async (ctx) => {
+bot.action(/^sr_stu:(\d+):(\d+):(\d+)(?::(\d+):(\d+))?$/, async (ctx) => {
   const [, studentId, subjectId, ssId] = ctx.match.map(Number);
+  const groupId=Number(ctx.match[4]||0),page=Number(ctx.match[5]||0);
   if (!(await teacherOwnsSubject(ctx, subjectId, ssId))) return ctx.answerCbQuery('غير مصرح.');
   await ctx.answerCbQuery();
 
   const student = await db.getStudentById(studentId);
-  const reports = await studies.listStudentReports(studentId, subjectId, ssId);
+  const reports = await studies.listStudentReports(studentId, subjectId, ssId,{groupId:groupId||null,page});
   if (reports.length === 0) {
     return ctx.reply(`👤 ${student ? student.full_name : ''}\nلم يُسلّم أي تقرير بعد.`);
   }
   await ctx.reply(
-    `👤 ${student ? student.full_name : ''}\nعدد تقاريره: ${reports.length}\nسأرسلها الآن لمراجعتها:`
+    `👤 ${student ? student.full_name : ''}\nعدد التقارير: ${Number(reports[0].total_count)} | الصفحة ${page+1}\nسأرسل تقارير هذه الصفحة لمراجعتها:`
   );
   // تُرسل تقاريره ليطّلع عليها قبل وضع الدرجة
-  for (const r of reports.slice(0, 10)) {
+  for (const r of reports) {
     const stamp = new Date(r.submitted_at).toISOString().slice(0, 10);
     try {
       if (r.file_kind === 'document' && r.telegram_file_id) {
@@ -4756,7 +4687,6 @@ bot.action(/sr_stu:(\d+):(\d+):(\d+)/, async (ctx) => {
   }
   const summary = await studies.getReportGradingSummary(studentId, subjectId, ssId);
   const rows = reports
-    .slice(0, 10)
     .map((r) => [
       callbackButton(
         `${r.score === null ? '⏳' : `✅ ${Number(r.score)}`} تقرير ${new Date(r.submitted_at)
@@ -4765,6 +4695,10 @@ bot.action(/sr_stu:(\d+):(\d+):(\d+)/, async (ctx) => {
         `sr_item:${r.id}:${studentId}:${subjectId}:${ssId}`
       ),
     ]);
+  const nav=[];
+  if(page>0)nav.push(callbackButton('تقارير سابقة',`sr_stu:${studentId}:${subjectId}:${ssId}:${groupId}:${page-1}`));
+  if((page+1)*10<Number(reports[0].total_count))nav.push(callbackButton('تقارير تالية',`sr_stu:${studentId}:${subjectId}:${ssId}:${groupId}:${page+1}`));
+  if(nav.length)rows.push(nav);
   rows.push([
     callbackButton(
       `📊 اعتماد المعدل كدرجة نهائية (${summary.average === null ? '—' : Number(summary.average)})`,
@@ -4786,6 +4720,7 @@ bot.action(/sr_stu:(\d+):(\d+):(\d+)/, async (ctx) => {
 bot.action(/sr_item:(\d+):(\d+):(\d+):(\d+)/, async (ctx) => {
   const [, reportId, studentId, subjectId, ssId] = ctx.match.map(Number);
   if (!(await teacherOwnsSubject(ctx, subjectId, ssId))) return ctx.answerCbQuery('غير مصرح.');
+  if(!await access.reportMatches(reportId,studentId,subjectId,ssId))return ctx.answerCbQuery('التقرير لا يطابق الطالب أو المادة أو الموسم.');
   userState.set(ctx.from.id, { action: 'report_item_score', reportId, studentId, subjectId, ssId });
   await ctx.answerCbQuery();
   return ctx.reply(
@@ -4796,6 +4731,7 @@ bot.action(/sr_item:(\d+):(\d+):(\d+):(\d+)/, async (ctx) => {
 bot.action(/sr_apply:(\d+):(\d+):(\d+)/, async (ctx) => {
   const [, studentId, subjectId, ssId] = ctx.match.map(Number);
   if (!(await teacherOwnsSubject(ctx, subjectId, ssId))) return ctx.answerCbQuery('غير مصرح.');
+  if(!await access.studentSubject(studentId,subjectId,ssId))return ctx.answerCbQuery('الطالب ليس في الموسم الحالي لهذه المادة.');
   try {
     const res = await studies.applyReportAverage(studentId, subjectId, ssId);
     await ctx.answerCbQuery('اعتُمد ✅');
@@ -5037,7 +4973,7 @@ async function handleChannelLesson(ctx) {
     await notifyAdmins(
       `✅ فُعّل تلقائيًا الدرس رقم ${Number(lesson.lesson_number)} لمادة «${subject.name}» من قناة «${
         channel.title || chatId
-      }». وصل تنبيه دروس اليوم إلى ${delivery.delivered} من ${delivery.total} طالب` +
+      }». حُفظ تنبيه دروس اليوم للإرسال إلى ${delivery.queued ?? delivery.delivered} طالب` +
         (delivery.alreadyNotifiedToday ? `، وسبق تنبيه ${delivery.alreadyNotifiedToday} اليوم` : '') +
         (delivery.skippedOnLeave ? ` (تُخطّي ${delivery.skippedOnLeave} في إجازة).` : '.')
     );
@@ -5056,75 +4992,55 @@ bot.on('edited_channel_post', handleChannelLesson);
 let reminderCheckRunning = false;
 
 async function checkReminders() {
-  if (reminderCheckRunning) return;
-  reminderCheckRunning = true;
-  try {
-    const lessons = await db.getLessonsNeedingReminder();
-    const today = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
-    for (const lesson of lessons) {
-      const students = await db.getNonAttendedStudentsForLesson(lesson.id, lesson.stage_id);
-      const hoursLeft = Math.max(1, Math.round((new Date(lesson.active_until) - new Date()) / 3600000));
-      for (const st of students) {
-        if (await db.isStudentOnLeave(st.id, today)) continue;
-        try {
-          await bot.telegram.sendMessage(
-            st.telegram_id,
-            `⏰ تذكير: لم تسجّل استماعك للدرس رقم ${Number(lesson.lesson_number)} من مادة «${
-              lesson.subject_name
-            }». تبقّى حوالي ${hoursLeft} ساعة قبل انتهاء المهلة.`,
-            singleLessonKeyboard(lesson)
-          );
-        } catch (err) {
-          // تجاهل الطلبة الذين حظروا البوت
-        }
-        await new Promise((r) => setTimeout(r, 40));
-      }
-      await db.markReminderSent(lesson.id);
+  if(reminderCheckRunning)return;reminderCheckRunning=true;
+  try{
+    for(const lesson of await db.getLessonsNeedingReminder()){
+      const c=await db.pool.connect();
+      try{
+        await c.query('BEGIN');
+        const text=`⏰ لم تسجّل حضور الدرس ${lesson.lesson_number} من «${lesson.subject_name}». تأكد من الاستماع والتأشير قبل انتهاء المهلة.`;
+        await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
+          SELECT 'lesson-reminder:'||l.id::text||':'||st.id::text,st.telegram_id,$2::jsonb,l.active_until
+          FROM lessons l JOIN enrollments e ON e.stage_season_id=l.stage_season_id AND e.status='active'
+          JOIN students st ON st.id=e.student_id AND st.is_active=true
+          JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+          WHERE l.id=$1 AND l.activated_at>=e.started_at AND l.active_until>now()
+            AND NOT EXISTS(SELECT 1 FROM attendance a WHERE a.student_id=st.id AND a.lesson_id=l.id)
+            AND NOT EXISTS(SELECT 1 FROM student_leaves sl WHERE sl.student_id=st.id AND sl.stage_season_id=e.stage_season_id
+              AND sl.status='approved' AND $3::date BETWEEN sl.start_date AND sl.end_date)
+          ON CONFLICT(dedupe_key) DO NOTHING`,[lesson.id,JSON.stringify([text,singleLessonKeyboard(lesson)]),currentDateInTimeZone(ATTENDANCE_TIME_ZONE)]);
+        await c.query('UPDATE lessons SET reminder_sent=true WHERE id=$1',[lesson.id]);
+        await c.query('COMMIT');
+      }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
     }
-  } catch (err) {
-    console.error('خطأ أثناء فحص التذكيرات:', err);
-  } finally {
-    reminderCheckRunning = false;
-  }
+  }catch(e){console.error('تعذر تجهيز تذكيرات الحضور:',e.message);}finally{reminderCheckRunning=false;}
 }
 
 let absenceCheckRunning = false;
 
 async function checkConsecutiveAbsence() {
-  if (absenceCheckRunning) return;
-  absenceCheckRunning = true;
-  try {
+  if(absenceCheckRunning)return;absenceCheckRunning=true;
+  try{
     await db.processCompletedAttendanceDays(ATTENDANCE_TIME_ZONE);
-
-    // تنبيه الطالب عند اليوم الثالث مرة واحدة لكل سلسلة غياب.
-    const studentCandidates = await db.getStudentAbsenceAlertCandidates();
-    for (const student of studentCandidates) {
-      try {
-        await bot.telegram.sendMessage(
-          student.telegram_id,
-          '⚠️ تنبيه غياب\n' +
-            'لم تسجّل أي حضور ضمن مهلة الدروس لمدة 3 أيام دراسية متتالية ' +
-            `(${dateOnly(student.streak_start_date)} → ${dateOnly(student.streak_end_date)}).\n` +
-            'يرجى متابعة دروسك والالتزام بتأشير الحضور بعد الاستماع الفعلي.'
-        );
-        await db.markStudentAbsenceAlertSent(student.attendance_day_id);
-      } catch (err) {
-        console.warn(`تعذر إرسال تنبيه الغياب للطالب ${student.student_id}:`, err.description || err.message);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 40));
+    const {enqueueNotification}=require('./outbox');
+    for(const student of await db.getStudentAbsenceAlertCandidates()){
+      await enqueueNotification(db.pool,{key:`absence:student:${student.attendance_day_id}`,chatId:student.telegram_id,
+        text:'⚠️ تنبيه غياب\nلم تسجّل أي حضور ضمن مهلة الدروس لثلاثة أيام دراسية متتالية '+
+          `(${dateOnly(student.streak_start_date)} → ${dateOnly(student.streak_end_date)}).\nيرجى متابعة دروسك وتأشير الحضور بعد الاستماع الفعلي.`,
+        mark:{kind:'student_absence',id:student.attendance_day_id}});
     }
-
-    // قائمة مستقلة للأدمن عند اليوم العاشر، مجمعة من جميع المراحل.
-    const adminCandidates = await db.getAdminAbsenceAlertCandidates();
-    for (const message of buildAdminAbsenceMessages(adminCandidates)) {
-      const delivered = await notifyAdmins(message.text);
-      if (delivered > 0) await db.markAdminAbsenceAlertsSent(message.attendanceDayIds);
+    const candidates=await db.getAdminAbsenceAlertCandidates();
+    if(ADMIN_IDS.length)for(const message of buildAdminAbsenceMessages(candidates)){
+      const c=await db.pool.connect();
+      try{
+        await c.query('BEGIN');
+        for(const adminId of ADMIN_IDS)await enqueueNotification(c,{key:`absence:admin:${adminId}:${message.attendanceDayIds.join('-')}`,chatId:adminId,
+          text:message.text,mark:{kind:'admin_absence',ids:message.attendanceDayIds}});
+        await c.query('UPDATE student_attendance_days SET admin_alert_queued_at=now() WHERE id=ANY($1::bigint[])',[message.attendanceDayIds]);
+        await c.query('COMMIT');
+      }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
     }
-  } catch (err) {
-    console.error('خطأ أثناء فحص الغياب المتتالي:', err);
-  } finally {
-    absenceCheckRunning = false;
-  }
+  }catch(e){console.error('تعذر تجهيز تنبيهات الغياب:',e.message);}finally{absenceCheckRunning=false;}
 }
 
 // ---------------------------------------------------------------------------
@@ -5144,19 +5060,25 @@ bot.catch(async (err, ctx) => {
 async function main() {
   await db.initSchema();
   await studies.initStudiesSchema();
+  await initIntegritySchema(db.pool);
   console.log('تم تجهيز قاعدة البيانات ✅');
-  await bot.launch();
-  console.log('البوت يعمل الآن ✅');
+  if(process.env.ADMIN_WEB_ENABLED==='true') {
+    adminServer=await require('./adminServer').startAdminServer({db,studies,adminData,scheduler,botToken:BOT_TOKEN,adminIds:ADMIN_IDS});
+  }
 
   // مراجع المؤقتات لإيقافها عند الإغلاق المنظم
   timers.push(setInterval(checkReminders, 10 * 60 * 1000));
   timers.push(setInterval(checkConsecutiveAbsence, 10 * 60 * 1000));
-  timers.push(setInterval(runScheduleTick, 60 * 1000));
+  timers.push(setInterval(()=>runScheduleTick().catch(err=>console.error('Schedule failed:',err.message)), 30 * 1000));
   // تنظيف الذاكرة كل خمس دقائق: حالات إدخال منتهية، وسجلات مجموعات قديمة
   timers.push(setInterval(cleanupMemory, 5 * 60 * 1000));
-  runScheduleTick();
+  const tick=()=>runScheduleTick().catch(err=>console.error('Schedule failed:',err.message));
+  // launch() long-polling does not resolve until shutdown: timers MUST precede it.
+  timers.push(setInterval(()=>outboxWorker.tick().catch(err=>console.error('Outbox failed:',err.message)),1000));
+  tick();
   checkReminders();
   checkConsecutiveAbsence();
+  await bot.launch({},()=>console.log('البوت يعمل الآن ✅'));
 }
 
 // تنظيف الخرائط في الذاكرة كي لا تنمو بلا حدّ مع كثرة المستخدمين
@@ -5182,6 +5104,9 @@ function cleanupMemory() {
 async function gracefulShutdown(signal) {
   console.log(`استلام ${signal}: إغلاق منظم...`);
   for (const t of timers) clearInterval(t);
+  outboxWorker.stop();
+  tgQueue.stop();
+  if(adminServer) await new Promise(resolve=>adminServer.close(resolve));
   try {
     bot.stop(signal);
   } catch (err) {

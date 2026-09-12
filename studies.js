@@ -1,6 +1,8 @@
 // studies.js — نظام المباحثات والامتحانات: المباحثات والتقارير والامتحانات والدرجات.
 // وحدة مستقلة تشارك مجمع الاتصالات نفسه مع db.js (لا استيراد دائري: هذه تستورد db، وdb لا تستوردها).
 const { pool } = require('./db');
+const { appError, positiveInt, pageOptions, validScore } = require('./integrity');
+const {startOrResumeAttempt,submitAnswer,finalizeAttempt,overrideStudentGrade}=require('./academicTransactions').createAcademicTransactions(pool);
 
 // توزيع الدرجات في الموسم (قابل للتغيير من مكان واحد)
 // الامتحان يفتح ليلًا في الساعة المحددة من اليوم المختار ويستمر عدد الساعات المُدخَل.
@@ -302,18 +304,32 @@ const countParticipationBySubject = (subjectId, stageSeasonId) =>
 // مجموعات المباحثات + التوزيع التلقائي عند الامتلاء
 // ---------------------------------------------------------------------------
 async function createMubahathaGroup(subjectId, stageSeasonId, { title, inviteLink, chatId, capacity = 50 }) {
-  const next = await pool.query(
+  positiveInt(capacity, 'سعة المجموعة');
+  const client = await pool.connect();
+  try {
+  await client.query('BEGIN');
+  // Serialize numbering for this subject/season; MAX+1 alone races.
+  await client.query('SELECT pg_advisory_xact_lock($1::int,$2::int)', [subjectId, stageSeasonId]);
+  const valid = await client.query(`SELECT 1 FROM subjects sub JOIN stage_seasons ss ON ss.stage_id=sub.stage_id
+    JOIN stages st ON st.id=ss.stage_id
+    WHERE sub.id=$1 AND ss.id=$2 AND ss.is_active=true AND st.stage_type <> 'lessons_only'`, [subjectId, stageSeasonId]);
+  if (!valid.rows[0]) throw appError('المادة أو الموسم غير متاح للمباحثات.');
+  const next = await client.query(
     'SELECT COALESCE(MAX(group_number),0)+1 AS n FROM mubahatha_groups WHERE subject_id=$1 AND stage_season_id=$2',
     [subjectId, stageSeasonId]
   );
   const number = Number(next.rows[0].n);
-  return pool
+  const group = await client
     .query(
       `INSERT INTO mubahatha_groups(subject_id, stage_season_id, group_number, title, invite_link, telegram_chat_id, capacity)
        VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
       [subjectId, stageSeasonId, number, title || `المجموعة ${number}`, inviteLink, chatId, capacity]
     )
     .then((r) => r.rows[0]);
+  await client.query('COMMIT');
+  return group;
+  } catch (err) { await client.query('ROLLBACK'); throw err; }
+  finally { client.release(); }
 }
 
 const getGroupById = (groupId) =>
@@ -362,7 +378,8 @@ const listUnassignedMubahathaStudents = (subjectId, stageSeasonId) =>
       `SELECT st.id, st.telegram_id, st.full_name
        FROM participation_modes pm
        JOIN students st ON st.id=pm.student_id AND st.is_active=true
-       WHERE pm.subject_id=$1 AND pm.stage_season_id=$2 AND pm.mode='mubahatha'
+       WHERE pm.subject_id=$1 AND pm.stage_season_id=$2 AND pm.mode IN ('mubahatha','report')
+         AND EXISTS(SELECT 1 FROM enrollments en WHERE en.student_id=st.id AND en.stage_season_id=$2 AND en.status='active')
          AND NOT EXISTS (
            SELECT 1 FROM group_memberships m
            WHERE m.student_id=pm.student_id AND m.subject_id=$1 AND m.stage_season_id=$2
@@ -395,6 +412,12 @@ async function assignStudentToGroup(studentId, subjectId, stageSeasonId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const eligible = await client.query(`SELECT 1 FROM students st JOIN enrollments e ON e.student_id=st.id
+      JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+      JOIN subjects sub ON sub.stage_id=ss.stage_id
+      WHERE st.id=$1 AND st.is_active=true AND e.status='active' AND sub.id=$2 AND ss.id=$3`,
+    [studentId, subjectId, stageSeasonId]);
+    if (!eligible.rows[0]) throw appError('الطالب غير مسجل في هذه المادة والموسم.');
     // قائمة المجموعات مرتبة؛ نجرّب واحدة واحدة: نقفل صف المجموعة نفسه (FOR UPDATE)
     // ثم نعدّ أعضاءها داخل القفل. القفل على صف المجموعة يُسلسل المتسابقين على نفس المجموعة،
     // فلا يرى اثنان العدد القديم معًا، ومن ثمّ لا تتجاوز السعة أبدًا.
@@ -407,12 +430,13 @@ async function assignStudentToGroup(studentId, subjectId, stageSeasonId) {
 
     for (const g of groups.rows) {
       // اقفل صف هذه المجموعة تحديدًا (يُسلسل كل من يحاول الانضمام إليها)
-      await client.query('SELECT id FROM mubahatha_groups WHERE id=$1 FOR UPDATE', [g.id]);
+      const locked = await client.query('SELECT * FROM mubahatha_groups WHERE id=$1 AND is_active=true FOR UPDATE', [g.id]);
+      if (!locked.rows[0]) continue;
       const countRow = await client.query(
         'SELECT COUNT(*)::int AS c FROM group_memberships WHERE group_id=$1',
         [g.id]
       );
-      if (countRow.rows[0].c < Number(g.capacity)) {
+      if (countRow.rows[0].c < Number(locked.rows[0].capacity)) {
         // قد يكون الطالب أُدرج في مجموعة أخرى بين الفحص الأول والقفل؛ ON CONFLICT يحميه
         const ins = await client.query(
           `INSERT INTO group_memberships(group_id, student_id, subject_id, stage_season_id)
@@ -423,13 +447,14 @@ async function assignStudentToGroup(studentId, subjectId, stageSeasonId) {
         );
         await client.query('COMMIT');
         if (ins.rows[0]) {
-          const group = await pool
+          const group = await client
             .query('SELECT * FROM mubahatha_groups WHERE id=$1', [g.id])
             .then((r) => r.rows[0]);
           return { group, created: true };
         }
         // أُدرج في مجموعة أخرى متزامنًا — نُرجع مجموعته الفعلية
-        const already = await getStudentGroup(studentId, subjectId, stageSeasonId);
+        const already = (await client.query(`SELECT g.* FROM group_memberships m JOIN mubahatha_groups g ON g.id=m.group_id
+          WHERE m.student_id=$1 AND m.subject_id=$2 AND m.stage_season_id=$3`, [studentId, subjectId, stageSeasonId])).rows[0];
         return { group: already, created: false };
       }
     }
@@ -464,7 +489,10 @@ const closeSession = (sessionId) =>
 const listGroupSessions = (groupId) =>
   pool
     .query(
-      `SELECT s.*, (SELECT COUNT(*) FROM mubahatha_attendance a WHERE a.session_id=s.id) AS attended_count
+      `SELECT s.*, (SELECT COUNT(*) FROM (
+          SELECT student_id FROM mubahatha_attendance a WHERE a.session_id=s.id GROUP BY student_id
+          HAVING bool_or(phase='start') AND bool_or(phase='end')
+        ) complete_students) AS attended_count
        FROM mubahatha_sessions s WHERE s.group_id=$1 ORDER BY s.opened_at DESC`,
       [groupId]
     )
@@ -484,7 +512,19 @@ const markSessionAttendance = (sessionId, studentId, phase = 'start', markedBy =
   pool
     .query(
       `INSERT INTO mubahatha_attendance(session_id, student_id, phase, marked_by)
-       VALUES($1,$2,$3,$4)
+       SELECT s.id, st.id, $3, $4 FROM mubahatha_sessions s
+       JOIN mubahatha_groups g ON g.id=s.group_id AND g.is_active=true
+       JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
+       JOIN group_memberships m ON m.group_id=g.id AND m.student_id=$2
+       JOIN students st ON st.id=m.student_id AND st.is_active=true
+       JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=ss.id AND e.status='active'
+       JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=g.subject_id
+         AND pm.stage_season_id=ss.id AND pm.mode='mubahatha'
+       WHERE s.id=$1 AND s.opened_at <= now() AND m.assigned_at <= s.opened_at
+         AND pm.joined_mubahatha_at <= s.opened_at
+         AND (($3='start' AND s.is_closed=false AND s.closes_at > now())
+           OR ($3='end' AND s.end_opened_at <= now() AND s.end_closes_at > now()
+             AND EXISTS(SELECT 1 FROM mubahatha_attendance start_mark WHERE start_mark.session_id=s.id AND start_mark.student_id=st.id AND start_mark.phase='start')))
        ON CONFLICT (session_id, student_id, phase) DO NOTHING RETURNING *`,
       [sessionId, studentId, phase, markedBy]
     )
@@ -492,16 +532,25 @@ const markSessionAttendance = (sessionId, studentId, phase = 'start', markedBy =
 
 // يفتح حضور النهاية للجلسة ويحدد إغلاقه بعد المدة (10 دقائق افتراضيًا)، مرة واحدة.
 const END_ATTENDANCE_MINUTES = Number(process.env.END_ATTENDANCE_MINUTES || 10);
+if (!Number.isInteger(END_ATTENDANCE_MINUTES) || END_ATTENDANCE_MINUTES < 1 || END_ATTENDANCE_MINUTES > 60) {
+  throw new Error('END_ATTENDANCE_MINUTES must be an integer from 1 to 60');
+}
 
-async function openEndAttendance(sessionId) {
+async function openEndAttendance(sessionId, automatic = false) {
   const r = await pool.query(
     `UPDATE mubahatha_sessions
      SET end_opened_at = now(),
-         end_closes_at = now() + make_interval(mins => $2::int),
+         end_closes_at = CASE WHEN $3 OR closes_at<=now() THEN closes_at + make_interval(mins => $2::int)
+                             ELSE now() + make_interval(mins => $2::int) END,
          is_closed = true
-     WHERE id=$1 AND end_opened_at IS NULL
+     WHERE id=$1 AND end_opened_at IS NULL AND is_closed=false
+       AND opened_at <= now()
+       AND closes_at + make_interval(mins => $2::int) > now()
+       AND (NOT $3 OR closes_at <= now())
+       AND EXISTS (SELECT 1 FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id
+         WHERE g.id=mubahatha_sessions.group_id AND g.is_active=true AND ss.is_active=true)
      RETURNING *`,
-    [sessionId, END_ATTENDANCE_MINUTES]
+    [sessionId, END_ATTENDANCE_MINUTES, automatic]
   );
   return r.rows[0]; // null إن كان مفتوحًا مسبقًا
 }
@@ -525,8 +574,10 @@ const getSessionsNeedingEndPrompt = (leadMinutes = 10) =>
        FROM mubahatha_sessions s
        JOIN mubahatha_groups g ON g.id=s.group_id
        JOIN subjects sub ON sub.id=g.subject_id
+       JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
        LEFT JOIN teachers t ON t.id=s.teacher_id AND t.is_active=true
        WHERE s.is_closed=false AND s.end_prompt_sent=false
+         AND s.closes_at > now()
          AND s.closes_at - make_interval(mins => $1::int) <= now()`,
       [leadMinutes]
     )
@@ -544,7 +595,11 @@ const getSessionsNeedingAutoEnd = () =>
        FROM mubahatha_sessions s
        JOIN mubahatha_groups g ON g.id=s.group_id
        JOIN subjects sub ON sub.id=g.subject_id
-       WHERE s.end_opened_at IS NULL AND s.closes_at <= now()`
+       JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
+       WHERE s.end_opened_at IS NULL AND s.is_closed=false AND g.is_active=true
+         AND s.closes_at <= now()
+         AND s.closes_at + make_interval(mins => $1::int) > now()`,
+      [END_ATTENDANCE_MINUTES]
     )
     .then((r) => r.rows);
 
@@ -556,12 +611,15 @@ const WEEKDAY_NAMES = ['الأحد', 'الاثنين', 'الثلاثاء', 'ال
 
 function upcomingWeekDays(from = new Date()) {
   const days = [];
+  const local=new Intl.DateTimeFormat('en-CA',{timeZone:SCHEDULE_TZ,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(from);
+  const part=t=>local.find(p=>p.type===t).value;
+  const base=new Date(`${part('year')}-${part('month')}-${part('day')}T00:00:00Z`);
   for (let i = 0; i < 7; i += 1) {
-    const d = new Date(from);
-    d.setDate(d.getDate() + i);
+    const d = new Date(base);
+    d.setUTCDate(d.getUTCDate() + i);
     days.push({
       iso: d.toISOString().slice(0, 10),
-      label: `${WEEKDAY_NAMES[d.getDay()]} ${d.toISOString().slice(0, 10)}`,
+      label: `${WEEKDAY_NAMES[d.getUTCDay()]} ${d.toISOString().slice(0, 10)}`,
     });
   }
   return days;
@@ -606,23 +664,31 @@ async function createExam(subjectId, stageSeasonId, teacherId, { examNumber, tit
 
 async function addExamQuestion(examId, { type, prompt, options, correct }) {
   if (!['tf', 'mcq'].includes(type)) throw new Error('نوع السؤال يجب أن يكون tf أو mcq.');
-  const exam = await pool.query('SELECT status FROM exams WHERE id=$1', [examId]).then((r) => r.rows[0]);
+  if(typeof prompt!=='string'||prompt.trim().length<3||prompt.length>3000)throw appError('نص السؤال يجب أن يكون بين 3 و3000 حرف.');
+  const answers=type==='tf'?['صح','خطأ']:options;
+  if(!Array.isArray(answers)||answers.length<2||answers.length>6||new Set(answers).size!==answers.length||!answers.includes(correct)||answers.some(x=>typeof x!=='string'||!x.trim()||x.length>300))throw appError('الخيارات أو الإجابة الصحيحة غير صالحة.');
+  const client=await pool.connect();
+  try{
+  await client.query('BEGIN');
+  const exam = await client.query('SELECT status FROM exams WHERE id=$1 FOR UPDATE', [examId]).then((r) => r.rows[0]);
   if (!exam) throw new Error('الامتحان غير موجود.');
   if (exam.status === 'published') {
     const err = new Error('لا يمكن تعديل أسئلة امتحان منشور.');
     err.code = 'EXAM_PUBLISHED';
     throw err;
   }
-  const pos = await pool
+  const pos = await client
     .query('SELECT COALESCE(MAX(position),0)+1 AS n FROM exam_questions WHERE exam_id=$1', [examId])
     .then((r) => Number(r.rows[0].n));
-  return pool
+  const result=await client
     .query(
       `INSERT INTO exam_questions(exam_id, position, question_type, prompt, options, correct_answer)
        VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,
       [examId, pos, type, prompt, options ? JSON.stringify(options) : null, String(correct)]
     )
     .then((r) => r.rows[0]);
+  await client.query('COMMIT');return result;
+  }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
 }
 
 const listExamQuestions = (examId) =>
@@ -630,25 +696,35 @@ const listExamQuestions = (examId) =>
     .query('SELECT * FROM exam_questions WHERE exam_id=$1 ORDER BY position', [examId])
     .then((r) => r.rows);
 
-const deleteExamQuestion = (questionId) =>
-  pool.query('DELETE FROM exam_questions WHERE id=$1 RETURNING id', [questionId]).then((r) => r.rowCount > 0);
+async function deleteExamQuestion(questionId) {
+  const c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    const exam=(await c.query('SELECT e.* FROM exams e JOIN exam_questions q ON q.exam_id=e.id WHERE q.id=$1 FOR UPDATE OF e',[questionId])).rows[0];
+    if(!exam||exam.status!=='draft')throw appError('يمكن حذف أسئلة المسودة فقط.');
+    const r=await c.query('DELETE FROM exam_questions WHERE id=$1 RETURNING id',[questionId]);
+    await c.query('COMMIT');return r.rowCount>0;
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+}
 
 async function publishExam(examId) {
-  const count = await pool
-    .query('SELECT COUNT(*) AS c FROM exam_questions WHERE exam_id=$1', [examId])
-    .then((r) => Number(r.rows[0].c));
-  if (count === 0) {
-    const err = new Error('لا يمكن نشر امتحان بلا أسئلة.');
-    err.code = 'NO_QUESTIONS';
-    throw err;
-  }
-  return pool
-    .query(
-      `UPDATE exams SET status='published', published_at=now()
-       WHERE id=$1 AND status='draft' RETURNING *`,
-      [examId]
-    )
-    .then((r) => r.rows[0]);
+  const c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    const exam=(await c.query(`SELECT e.*,sub.name AS subject_name FROM exams e JOIN subjects sub ON sub.id=e.subject_id
+      JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true WHERE e.id=$1 FOR UPDATE OF e`,[examId])).rows[0];
+    if(!exam||exam.status!=='draft')throw appError('الامتحان منشور مسبقًا أو موسمه غير نشط.','CONFLICT',409);
+    const count=Number((await c.query('SELECT COUNT(*) AS n FROM exam_questions WHERE exam_id=$1',[examId])).rows[0].n);
+    if(!count)throw appError('لا يمكن نشر امتحان بلا أسئلة.','NO_QUESTIONS');
+    if(new Date(exam.closes_at)<=new Date())throw appError('انتهى موعد الامتحان. غيّر الموعد أولًا.');
+    const result=(await c.query("UPDATE exams SET status='published',published_at=now() WHERE id=$1 RETURNING *",[examId])).rows[0];
+    const text='📝 نُشر الامتحان الشهري '+exam.exam_number+' في مادة «'+exam.subject_name+'».\nيفتح: '+new Date(exam.opens_at).toLocaleString('ar-IQ',{timeZone:SCHEDULE_TZ})+'\nمدة الإتاحة: '+exam.available_hours+' ساعة. ستجده في «📝 الامتحانات الشهرية» عند فتحه.';
+    await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
+      SELECT 'exam:'||$1::text||':'||st.id::text,st.telegram_id,$2::jsonb,$3 FROM enrollments en
+      JOIN students st ON st.id=en.student_id AND st.is_active=true
+      WHERE en.stage_season_id=$4 AND en.status='active' ON CONFLICT DO NOTHING`,[examId,JSON.stringify([text,{}]),exam.closes_at,exam.stage_season_id]);
+    await c.query('COMMIT');return result;
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }
 
 const getExamById = (examId) =>
@@ -692,53 +768,6 @@ const getOpenExamsForStudent = (studentId) =>
     .then((r) => r.rows);
 
 // بدء المحاولة أو استئنافها (لا تُنشأ محاولة ثانية أبدًا).
-async function startOrResumeAttempt(examId, studentId) {
-  const exam = await getExamById(examId);
-  if (!exam) throw new Error('الامتحان غير موجود.');
-  if (exam.status !== 'published') {
-    const err = new Error('الامتحان غير منشور.');
-    err.code = 'NOT_PUBLISHED';
-    throw err;
-  }
-  const now = new Date();
-  if (now < new Date(exam.opens_at) || now > new Date(exam.closes_at)) {
-    const err = new Error('الامتحان مغلق حاليًا.');
-    err.code = 'EXAM_CLOSED';
-    throw err;
-  }
-  // لا يدخل الامتحان إلا طالب مسجَّل فعليًا في موسم المرحلة التي يخصها الامتحان،
-  // فلا يُفتح بضغطة زر معدّلة من طالب مرحلة أخرى.
-  const enrolled = await pool
-    .query(
-      `SELECT 1 FROM enrollments WHERE student_id=$1 AND stage_season_id=$2 AND status='active' LIMIT 1`,
-      [studentId, exam.stage_season_id]
-    )
-    .then((r) => Boolean(r.rows[0]));
-  if (!enrolled) {
-    const err = new Error('هذا الامتحان ليس لمرحلتك.');
-    err.code = 'NOT_ENROLLED';
-    throw err;
-  }
-
-  const existing = await pool
-    .query('SELECT * FROM exam_attempts WHERE exam_id=$1 AND student_id=$2', [examId, studentId])
-    .then((r) => r.rows[0]);
-  if (existing) {
-    if (existing.submitted_at) {
-      const err = new Error('سبق أن سلّمت هذا الامتحان.');
-      err.code = 'ALREADY_SUBMITTED';
-      throw err;
-    }
-    return existing;
-  }
-  return pool
-    .query(
-      `INSERT INTO exam_attempts(exam_id, student_id, total_questions)
-       VALUES($1,$2,$3) RETURNING *`,
-      [examId, studentId, Number(exam.question_count)]
-    )
-    .then((r) => r.rows[0]);
-}
 
 // السؤال التالي الذي لم يُجب عنه — يجعل الامتحان قابلًا للاستئناف بعد انقطاع الاتصال.
 const getNextUnansweredQuestion = (attemptId) =>
@@ -755,61 +784,20 @@ const getNextUnansweredQuestion = (attemptId) =>
     .then((r) => r.rows[0]);
 
 // تُحفظ الإجابة وتُصحَّح فورًا (تصحيح آلي بالكامل).
-async function submitAnswer(attemptId, questionId, answer) {
-  const q = await pool
-    .query('SELECT * FROM exam_questions WHERE id=$1', [questionId])
-    .then((r) => r.rows[0]);
-  if (!q) throw new Error('السؤال غير موجود.');
-  const isCorrect = String(answer).trim() === String(q.correct_answer).trim();
-  return pool
-    .query(
-      `INSERT INTO exam_answers(attempt_id, question_id, answer, is_correct)
-       VALUES($1,$2,$3,$4) ON CONFLICT (attempt_id, question_id) DO NOTHING RETURNING *`,
-      [attemptId, questionId, String(answer), isCorrect]
-    )
-    .then((r) => r.rows[0]);
-}
 
 // التسليم: الدرجة نسبة الإجابات الصحيحة من 5، مهما كان عدد الأسئلة.
-async function finalizeAttempt(attemptId) {
-  const attempt = await pool
-    .query('SELECT * FROM exam_attempts WHERE id=$1', [attemptId])
-    .then((r) => r.rows[0]);
-  if (!attempt) throw new Error('المحاولة غير موجودة.');
-  if (attempt.submitted_at) return attempt;
-
-  const stats = await pool
-    .query(
-      `SELECT COUNT(*) FILTER (WHERE is_correct) AS correct,
-              (SELECT COUNT(*) FROM exam_questions q WHERE q.exam_id=$2) AS total
-       FROM exam_answers WHERE attempt_id=$1`,
-      [attemptId, attempt.exam_id]
-    )
-    .then((r) => r.rows[0]);
-
-  const total = Number(stats.total) || 0;
-  const correct = Number(stats.correct) || 0;
-  const maxScore = await pool
-    .query('SELECT max_score FROM exams WHERE id=$1', [attempt.exam_id])
-    .then((r) => Number(r.rows[0].max_score));
-  const score = total === 0 ? 0 : Math.round((correct / total) * maxScore * 100) / 100;
-
-  return pool
-    .query(
-      `UPDATE exam_attempts SET submitted_at=now(), score=$2, correct_count=$3, total_questions=$4
-       WHERE id=$1 RETURNING *`,
-      [attemptId, score, correct, total]
-    )
-    .then((r) => r.rows[0]);
-}
 
 // تأجيل امتحان منشور إلى تاريخ جديد (ما لم يكن قد سلّمه أحد).
 async function postponeExam(examId, newDateIso, hours) {
-  const submitted = await pool
-    .query('SELECT COUNT(*) AS c FROM exam_attempts WHERE exam_id=$1 AND submitted_at IS NOT NULL', [examId])
+  const client=await pool.connect();
+  try {
+  await client.query('BEGIN');
+  await client.query('SELECT id FROM exams WHERE id=$1 FOR UPDATE',[examId]);
+  const submitted = await client
+    .query('SELECT COUNT(*) AS c FROM exam_attempts WHERE exam_id=$1', [examId])
     .then((r) => Number(r.rows[0].c));
   if (submitted > 0) {
-    const err = new Error(`سلّم ${submitted} طالبًا هذا الامتحان، فلا يمكن تأجيله.`);
+    const err = new Error(`بدأ ${submitted} طالبًا هذا الامتحان، فلا يمكن تأجيله أو حذف إجاباتهم.`);
     err.code = 'ALREADY_TAKEN';
     throw err;
   }
@@ -819,9 +807,7 @@ async function postponeExam(examId, newDateIso, hours) {
     err.code = 'BAD_HOURS';
     throw err;
   }
-  // تُحذف المحاولات غير المسلَّمة كي يبدأ الجميع من جديد في الموعد الجديد
-  await pool.query('DELETE FROM exam_attempts WHERE exam_id=$1 AND submitted_at IS NULL', [examId]);
-  return pool
+  const result=await client
     .query(
       `UPDATE exams SET
          original_opens_at = COALESCE(original_opens_at, opens_at),
@@ -834,6 +820,15 @@ async function postponeExam(examId, newDateIso, hours) {
       [examId, newDateIso, h, EXAM_START_HOUR, SCHEDULE_TZ]
     )
     .then((r) => r.rows[0]);
+  if(result?.status==='published'){
+    await client.query("UPDATE notification_outbox SET status='expired' WHERE dedupe_key LIKE $1 AND status='pending'",[`exam:${examId}:%`]);
+    const message=`🕓 تغيّر موعد الامتحان «${result.title||'الشهري '+result.exam_number}».\nيفتح: ${new Date(result.opens_at).toLocaleString('ar-IQ',{timeZone:SCHEDULE_TZ})}\nمدة الإتاحة: ${h} ساعة.`;
+    await client.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
+      SELECT $1||':'||st.id::text,st.telegram_id,$2::jsonb,$3 FROM enrollments en JOIN students st ON st.id=en.student_id AND st.is_active=true
+      WHERE en.stage_season_id=$4 AND en.status='active' ON CONFLICT DO NOTHING`,[`exam-postpone:${examId}:${result.postponed_count}`,JSON.stringify([message,{}]),result.closes_at,result.stage_season_id]);
+  }
+  await client.query('COMMIT');return result;
+  }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
 }
 
 const getExamResults = (examId) =>
@@ -1051,6 +1046,7 @@ const listStudentGroups = (studentId) =>
        JOIN mubahatha_groups g ON g.id=m.group_id
        JOIN subjects sub ON sub.id=m.subject_id
        JOIN stage_seasons ss ON ss.id=m.stage_season_id AND ss.is_active=true
+       JOIN enrollments en ON en.student_id=m.student_id AND en.stage_season_id=m.stage_season_id AND en.status='active'
        WHERE m.student_id=$1
        ORDER BY sub.name`,
       [studentId]
@@ -1063,14 +1059,23 @@ async function moveStudentToGroup(studentId, subjectId, stageSeasonId, newGroupI
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1::int,$2::int)', [studentId, subjectId]);
     const target = await client.query(
-      `SELECT g.*, (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) AS member_count
-       FROM mubahatha_groups g WHERE g.id=$1 FOR UPDATE`,
-      [newGroupId]
+      `SELECT g.* FROM mubahatha_groups g WHERE g.id=$1 AND g.subject_id=$2
+         AND g.stage_season_id=$3 AND g.is_active=true FOR UPDATE`,
+      [newGroupId, subjectId, stageSeasonId]
     );
     const group = target.rows[0];
     if (!group) throw new Error('المجموعة غير موجودة.');
-    if (Number(group.member_count) >= Number(group.capacity)) {
+    const eligible = await client.query(`SELECT 1 FROM enrollments e JOIN students st ON st.id=e.student_id
+      JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+      WHERE st.id=$1 AND st.is_active=true AND e.stage_season_id=$2 AND e.status='active'`, [studentId, stageSeasonId]);
+    if (!eligible.rows[0]) throw appError('الطالب غير مسجل في موسم المجموعة.');
+    const current = (await client.query('SELECT group_id FROM group_memberships WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3',
+      [studentId, subjectId, stageSeasonId])).rows[0];
+    if (current && current.group_id === group.id) { await client.query('COMMIT'); return group; }
+    const members = await client.query('SELECT COUNT(*)::int AS n FROM group_memberships WHERE group_id=$1', [newGroupId]);
+    if (Number(members.rows[0].n) >= Number(group.capacity)) {
       const err = new Error('المجموعة ممتلئة.');
       err.code = 'GROUP_FULL';
       throw err;
@@ -1141,43 +1146,60 @@ async function resetStudentStudies(studentId, stageSeasonId) {
 // ---------------------------------------------------------------------------
 // التقارير
 // ---------------------------------------------------------------------------
-const submitReport = (studentId, subjectId, stageSeasonId, { fileId, kind, note }) =>
+const submitReport = (studentId, subjectId, stageSeasonId, { fileId, kind, note, sourceMessageId = null }) =>
   pool
     .query(
-      `INSERT INTO student_reports(student_id, subject_id, stage_season_id, telegram_file_id, file_kind, note)
-       VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [studentId, subjectId, stageSeasonId, fileId, kind, note]
+      `INSERT INTO student_reports(student_id, subject_id, stage_season_id, telegram_file_id, file_kind, note,
+                                   group_id, group_title_snapshot, source_message_id)
+       SELECT pm.student_id,pm.subject_id,pm.stage_season_id,$4,$5,$6,g.id,g.title,$7
+       FROM participation_modes pm
+       JOIN students st ON st.id=pm.student_id AND st.is_active=true
+       JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=pm.stage_season_id AND e.status='active'
+       JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+       JOIN subjects sub ON sub.id=pm.subject_id AND sub.stage_id=ss.stage_id
+       JOIN group_memberships m ON m.student_id=pm.student_id AND m.subject_id=pm.subject_id AND m.stage_season_id=pm.stage_season_id
+       JOIN mubahatha_groups g ON g.id=m.group_id AND g.is_active=true
+       WHERE pm.student_id=$1 AND pm.subject_id=$2 AND pm.stage_season_id=$3 AND pm.mode='report'
+       ON CONFLICT(student_id,source_message_id) WHERE source_message_id IS NOT NULL DO NOTHING RETURNING *`,
+      [studentId, subjectId, stageSeasonId, fileId, kind, note, sourceMessageId]
     )
     .then((r) => r.rows[0]);
 
 // طلبة التقارير في المادة مع عدد ما سلّموه — يستعرضهم الأستاذ واحدًا تلو الآخر عند التقييم.
-const listReportStudentsForGrading = (subjectId, stageSeasonId) =>
+const listReportStudentsForGrading = (subjectId, stageSeasonId, { groupId = null, page = 0, size = 25, onlyUngraded = false } = {}) =>
   pool
     .query(
       `SELECT st.id AS student_id, st.full_name, pm.mode, pm.switched_at,
               COUNT(r.id) AS report_count,
               MAX(r.submitted_at) AS last_submission,
-              fg.report_score
+              fg.report_score, COUNT(*) OVER() AS total_count,
+              g.id AS group_id, g.title AS group_title
        FROM participation_modes pm
        JOIN students st ON st.id=pm.student_id
+       LEFT JOIN group_memberships gm ON gm.student_id=st.id AND gm.subject_id=pm.subject_id AND gm.stage_season_id=pm.stage_season_id
+       LEFT JOIN mubahatha_groups g ON g.id=gm.group_id
        LEFT JOIN student_reports r
               ON r.student_id=st.id AND r.subject_id=pm.subject_id AND r.stage_season_id=pm.stage_season_id
+             AND ($3::int IS NULL OR r.group_id=$3)
        LEFT JOIN final_grades fg
               ON fg.student_id=st.id AND fg.subject_id=pm.subject_id AND fg.stage_season_id=pm.stage_season_id
        WHERE pm.subject_id=$1 AND pm.stage_season_id=$2
          AND (pm.mode='report' OR pm.switched_at IS NOT NULL)
-       GROUP BY st.id, st.full_name, pm.mode, pm.switched_at, fg.report_score
-       ORDER BY st.full_name`,
-      [subjectId, stageSeasonId]
+         AND ($3::int IS NULL OR gm.group_id=$3 OR r.group_id=$3)
+         AND (NOT $6::boolean OR fg.report_score IS NULL)
+       GROUP BY st.id, st.full_name, pm.mode, pm.switched_at, fg.report_score, g.id
+       ORDER BY st.full_name,st.id LIMIT $4 OFFSET $5`,
+      [subjectId, stageSeasonId, groupId, pageOptions(page,size).size, pageOptions(page,size).offset, onlyUngraded]
     )
     .then((r) => r.rows);
 
-const listStudentReports = (studentId, subjectId, stageSeasonId) =>
+const listStudentReports = (studentId, subjectId, stageSeasonId, { page = 0, size = 10, groupId = null } = {}) =>
   pool
     .query(
-      `SELECT * FROM student_reports
-       WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3 ORDER BY submitted_at`,
-      [studentId, subjectId, stageSeasonId]
+      `SELECT *,COUNT(*) OVER() AS total_count FROM student_reports
+       WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3
+         AND ($4::int IS NULL OR group_id=$4) ORDER BY submitted_at,id LIMIT $5 OFFSET $6`,
+      [studentId, subjectId, stageSeasonId, groupId, pageOptions(page,size).size, pageOptions(page,size).offset]
     )
     .then((r) => r.rows);
 
@@ -1187,7 +1209,7 @@ const setReportItemScore = (reportId, score, gradedBy) =>
     .query(
       `UPDATE student_reports SET score=$2, graded_at=now(), graded_by=$3
        WHERE id=$1 RETURNING *`,
-      [reportId, Math.max(0, Math.min(GRADE_WEIGHTS.participationTotal, Number(score))), gradedBy]
+      [reportId, validScore(score, GRADE_WEIGHTS.participationTotal), gradedBy]
     )
     .then((r) => r.rows[0]);
 
@@ -1282,59 +1304,44 @@ const findTeacherConflicts = (teacherId, dayOfWeek, hour, excludeGroupId = null)
     .then((r) => r.rows);
 
 async function addScheduleSlot(groupId, { dayOfWeek, hour, minute = 0, durationHours = 1, teacherId }) {
-  // المباحثة ساعة واحدة كحد أقصى، فكل ساعة موعد مستقل.
-  const hours = Math.min(1, Math.max(1, Number(durationHours) || 1));
-  const group = await pool
-    .query('SELECT * FROM mubahatha_groups WHERE id=$1', [groupId])
-    .then((r) => r.rows[0]);
-  if (!group) throw new Error('المجموعة غير موجودة.');
-
-  // إن لم يُمرَّر أستاذ (كأن ينشئ الأدمن الموعد) يُسنَد تلقائيًا لأستاذ المادة النشط،
-  // وإلا لن يصل سؤال «هل توجد محاضرة اليوم؟» لأحد ولن تُفتح الجلسة أبدًا.
-  let ownerId = teacherId || null;
-  if (!ownerId) {
-    const assigned = await pool.query(
-      `SELECT ta.teacher_id FROM teaching_assignments ta
-       JOIN teachers t ON t.id=ta.teacher_id AND t.is_active=true
-       WHERE ta.subject_id=$1 AND ta.stage_season_id=$2 LIMIT 1`,
-      [group.subject_id, group.stage_season_id]
-    );
-    ownerId = assigned.rows[0] ? assigned.rows[0].teacher_id : null;
-  }
-  if (!ownerId) {
-    const err = new Error('لا يوجد أستاذ نشط مُسنَد لهذه المادة، فلن يصل سؤال تأكيد المباحثة لأحد. أسنِد أستاذًا أولًا.');
-    err.code = 'NO_TEACHER';
-    throw err;
-  }
-
-  const conflicts = await findScheduleConflicts(group.stage_season_id, dayOfWeek, hour, group.subject_id);
-  const teacherConflicts = await findTeacherConflicts(ownerId, dayOfWeek, hour, groupId);
-  try {
-    const slot = await pool
-      .query(
-        `INSERT INTO schedule_slots(group_id, subject_id, stage_season_id, teacher_id,
-                                    day_of_week, hour, minute, duration_hours)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-        [groupId, group.subject_id, group.stage_season_id, ownerId, dayOfWeek, hour, minute, hours]
-      )
-      .then((r) => r.rows[0]);
-    return { slot, conflicts, teacherConflicts };
-  } catch (err) {
-    if (err.code === '23505') {
-      const e = new Error('هذا الموعد مسجَّل مسبقًا لهذه المجموعة.');
-      e.code = 'SLOT_EXISTS';
-      throw e;
-    }
-    throw err;
-  }
+  const day=Number(dayOfWeek),h=Number(hour),m=Number(minute);
+  if(!Number.isInteger(day)||day<0||day>6||!Number.isInteger(h)||h<0||h>23||!Number.isInteger(m)||m<0||m>59||Number(durationHours)!==1)throw appError('موعد غير صالح. مدة المباحثة ساعة واحدة.');
+  const c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    // One lock for schedule edits: infrequent administration, not student traffic.
+    await c.query('SELECT pg_advisory_xact_lock(734222,1)');
+    const group=(await c.query(`SELECT g.* FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
+      WHERE g.id=$1 AND g.is_active=true`,[groupId])).rows[0];
+    if(!group)throw appError('المجموعة غير نشطة أو غير موجودة.');
+    const owners=(await c.query(`SELECT ta.teacher_id FROM teaching_assignments ta JOIN teachers t ON t.id=ta.teacher_id AND t.is_active=true
+      WHERE ta.subject_id=$1 AND ta.stage_season_id=$2 ORDER BY ta.teacher_id`,[group.subject_id,group.stage_season_id])).rows;
+    const ownerId=teacherId?positiveInt(teacherId):owners.length===1?owners[0].teacher_id:null;
+    if(!ownerId||!owners.some(x=>Number(x.teacher_id)===Number(ownerId)))throw appError('اختر أستاذًا نشطًا مسندًا لهذه المادة.','NO_TEACHER');
+    const start=day*1440+h*60+m;
+    const conflict=(await c.query(`SELECT sl.id FROM schedule_slots sl JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
+      CROSS JOIN unnest(ARRAY[-10080,0,10080]) shift(n)
+      WHERE sl.is_active=true AND (sl.teacher_id=$1 OR sl.group_id=$2)
+        AND sl.day_of_week*1440+sl.hour*60+sl.minute+shift.n<$3+60
+        AND sl.day_of_week*1440+sl.hour*60+sl.minute+shift.n+sl.duration_hours*60>$3 LIMIT 1`,[ownerId,groupId,start])).rows[0];
+    if(conflict)throw appError('يتداخل الموعد مع مباحثة أخرى للأستاذ أو المجموعة. اختر وقتًا آخر.','SCHEDULE_CONFLICT',409);
+    const conflicts=(await c.query(`SELECT sl.*,sub.name AS subject_name FROM schedule_slots sl JOIN subjects sub ON sub.id=sl.subject_id
+      WHERE sl.stage_season_id=$1 AND sl.is_active=true AND sl.subject_id<>$2 AND sl.day_of_week=$3
+        AND sl.hour*60+sl.minute<$4+60 AND sl.hour*60+sl.minute+sl.duration_hours*60>$4`,[group.stage_season_id,group.subject_id,day,h*60+m])).rows;
+    const slot=(await c.query(`INSERT INTO schedule_slots(group_id,subject_id,stage_season_id,teacher_id,day_of_week,hour,minute,duration_hours)
+      VALUES($1,$2,$3,$4,$5,$6,$7,1) ON CONFLICT(group_id,day_of_week,hour,minute)
+      DO UPDATE SET is_active=true,teacher_id=EXCLUDED.teacher_id,duration_hours=1 RETURNING *`,[groupId,group.subject_id,group.stage_season_id,ownerId,day,h,m])).rows[0];
+    await c.query('COMMIT');return {slot,conflicts,teacherConflicts:[]};
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }
 
+// Keep previous daily decisions and attendance linked to their original slot.
 const removeScheduleSlot = (slotId) =>
-  pool.query('DELETE FROM schedule_slots WHERE id=$1 RETURNING id', [slotId]).then((r) => r.rowCount > 0);
+  pool.query('UPDATE schedule_slots SET is_active=false WHERE id=$1 AND is_active=true RETURNING id',[slotId]).then(r=>r.rowCount>0);
 
 const listGroupSlots = (groupId) =>
   pool
-    .query('SELECT * FROM schedule_slots WHERE group_id=$1 ORDER BY day_of_week, hour, minute', [groupId])
+    .query('SELECT * FROM schedule_slots WHERE group_id=$1 AND is_active=true ORDER BY day_of_week, hour, minute', [groupId])
     .then((r) => r.rows);
 
 const listTeacherSlots = (teacherId) =>
@@ -1375,7 +1382,7 @@ const listAllSlots = () =>
 const listStageSeasonSlots = (stageSeasonId) =>
   pool
     .query(
-      `SELECT s.*, sub.name AS subject_name, g.group_number, t.full_name AS teacher_name
+      `SELECT s.*, sub.name AS subject_name, g.title AS group_title, g.group_number, t.full_name AS teacher_name
        FROM schedule_slots s
        JOIN subjects sub ON sub.id=s.subject_id
        JOIN mubahatha_groups g ON g.id=s.group_id
@@ -1429,11 +1436,16 @@ const recordSlotDecision = (slotId, scheduledDate, decision, decidedBy) =>
   pool
     .query(
       `INSERT INTO slot_decisions(slot_id, scheduled_date, decision, decided_at, decided_by)
-       VALUES($1,$2::date,$3, now(), $4)
+       SELECT sl.id,$2::date,$3,now(),$4 FROM schedule_slots sl
+       JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
+       WHERE sl.id=$1 AND sl.is_active=true AND $2::date=(now() AT TIME ZONE $5)::date
+         AND EXTRACT(DOW FROM $2::date)::int=sl.day_of_week
+         AND (now() AT TIME ZONE $5) < $2::date+make_time(sl.hour,sl.minute,0)+make_interval(hours=>sl.duration_hours)
        ON CONFLICT (slot_id, scheduled_date)
        DO UPDATE SET decision=$3, decided_at=now(), decided_by=$4
+       WHERE slot_decisions.session_id IS NULL
        RETURNING *`,
-      [slotId, scheduledDate, decision, decidedBy]
+      [slotId, scheduledDate, decision, decidedBy, SCHEDULE_TZ]
     )
     .then((r) => r.rows[0]);
 
@@ -1446,18 +1458,26 @@ const getSlotDecision = (slotId, scheduledDate) =>
 const getSlotsReadyToStart = () =>
   pool
     .query(
-      `WITH loc AS (SELECT (now() AT TIME ZONE $1) AS ln)
-       SELECT s.*, d.id AS decision_id, d.scheduled_date,
+      `WITH loc AS (SELECT (now() AT TIME ZONE $1) AS ln),
+       dates AS (SELECT ln::date AS day FROM loc UNION ALL SELECT ln::date-1 FROM loc)
+       SELECT s.*, d.id AS decision_id, dates.day AS scheduled_date,
+              ((dates.day+make_time(s.hour,s.minute,0)) AT TIME ZONE $1) AT TIME ZONE 'UTC' AS scheduled_start,
+              ((dates.day+make_time(s.hour,s.minute,0)+make_interval(hours=>s.duration_hours)) AT TIME ZONE $1) AT TIME ZONE 'UTC' AS scheduled_end,
               sub.name AS subject_name, g.title AS group_title, g.group_number
-       FROM slot_decisions d
-       JOIN schedule_slots s ON s.id=d.slot_id
+       FROM schedule_slots s
        JOIN subjects sub ON sub.id=s.subject_id
-       JOIN mubahatha_groups g ON g.id=s.group_id
+       JOIN mubahatha_groups g ON g.id=s.group_id AND g.is_active=true
+       JOIN stage_seasons ss ON ss.id=s.stage_season_id AND ss.is_active=true
        CROSS JOIN loc
-       WHERE d.decision='confirmed' AND d.session_id IS NULL
-         AND d.scheduled_date = loc.ln::date
-         AND loc.ln >= (d.scheduled_date + make_time(s.hour, s.minute, 0))`,
-      [SCHEDULE_TZ]
+       CROSS JOIN dates
+       LEFT JOIN slot_decisions d ON d.slot_id=s.id AND d.scheduled_date=dates.day
+       WHERE s.is_active=true AND d.session_id IS NULL
+         AND COALESCE(d.decision,'confirmed') <> 'postponed'
+         AND (NOT $2::boolean OR d.decision='confirmed')
+         AND EXTRACT(DOW FROM dates.day)::int=s.day_of_week
+         AND loc.ln >= (dates.day + make_time(s.hour, s.minute, 0))
+         AND loc.ln < (dates.day + make_time(s.hour, s.minute, 0)+make_interval(hours=>s.duration_hours))`,
+      [SCHEDULE_TZ, process.env.SCHEDULE_REQUIRE_CONFIRMATION === 'true']
     )
     .then((r) => r.rows);
 
@@ -1466,22 +1486,28 @@ async function startSessionFromSlot(slot) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // نحجز القرار بشرط أن جلسته لم تُفتح بعد؛ لو فتحها تِك آخر لن يُرجع صفًا فنُلغي.
+    await client.query(`INSERT INTO slot_decisions(slot_id,scheduled_date) VALUES($1,$2)
+      ON CONFLICT(slot_id,scheduled_date) DO NOTHING`, [slot.id, slot.scheduled_date]);
     const claim = await client.query(
-      'SELECT id FROM slot_decisions WHERE id=$1 AND session_id IS NULL FOR UPDATE',
-      [slot.decision_id]
+      `SELECT d.id FROM slot_decisions d JOIN schedule_slots sl ON sl.id=d.slot_id
+       JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
+       WHERE d.slot_id=$1 AND d.scheduled_date=$2 AND d.session_id IS NULL AND sl.is_active=true
+         AND COALESCE(d.decision,'confirmed') <> 'postponed'
+         AND (NOT $3::boolean OR d.decision='confirmed')
+         AND $4::timestamp > now() FOR UPDATE OF d`,
+      [slot.id, slot.scheduled_date, process.env.SCHEDULE_REQUIRE_CONFIRMATION === 'true', slot.scheduled_end]
     );
     if (!claim.rows[0]) {
       await client.query('ROLLBACK');
       return null;
     }
     const sess = await client.query(
-      `INSERT INTO mubahatha_sessions(group_id, teacher_id, title, closes_at)
-       VALUES($1,$2,$3, now() + make_interval(hours => $4::int)) RETURNING *`,
-      [slot.group_id, slot.teacher_id, `${slot.subject_name} — ${formatSlot(slot)}`, slot.duration_hours]
+      `INSERT INTO mubahatha_sessions(group_id, teacher_id, title, opened_at,closes_at,held_on)
+       VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [slot.group_id, slot.teacher_id, `${slot.subject_name} — ${formatSlot(slot)}`, slot.scheduled_start, slot.scheduled_end, slot.scheduled_date]
     );
     await client.query('UPDATE slot_decisions SET session_id=$2 WHERE id=$1', [
-      slot.decision_id,
+      claim.rows[0].id,
       sess.rows[0].id,
     ]);
     await client.query('COMMIT');
@@ -1522,6 +1548,10 @@ const listGroupStudents = (groupId) =>
       `SELECT st.id, st.telegram_id, st.full_name
        FROM group_memberships m
        JOIN students st ON st.id=m.student_id AND st.is_active=true
+       JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=m.subject_id
+         AND pm.stage_season_id=m.stage_season_id AND pm.mode='mubahatha'
+       JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=m.stage_season_id AND e.status='active'
+       JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
        WHERE m.group_id=$1`,
       [groupId]
     )
@@ -1553,53 +1583,20 @@ const getStudentFinalGrades = (studentId) =>
 
 // تحرير درجة طالب يدويًا من الأستاذ أو الأدمن (لمن يحتاج مساعدة).
 // يُحفظ من عدّلها ومتى، ويُعاد حساب المجموع من القيم الجديدة.
-async function overrideStudentGrade(studentId, subjectId, stageSeasonId, fields, editedBy) {
-  const current = await pool
-    .query(
-      'SELECT * FROM final_grades WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3',
-      [studentId, subjectId, stageSeasonId]
-    )
-    .then((r) => r.rows[0]);
-
-  const exams = fields.examsScore !== undefined ? Number(fields.examsScore) : Number(current ? current.exams_score : 0);
-  const participation =
-    fields.participationScore !== undefined
-      ? Number(fields.participationScore)
-      : Number(current ? current.participation_score : 0);
-
-  const cappedExams = Math.max(0, Math.min(GRADE_WEIGHTS.examsTotal, exams));
-  const cappedPart = Math.max(0, Math.min(GRADE_WEIGHTS.participationTotal, participation));
-  const total = Math.round((cappedExams + cappedPart) * 100) / 100;
-
-  return pool
-    .query(
-      `INSERT INTO final_grades(student_id, subject_id, stage_season_id,
-          exams_score, participation_score, total_score, finalized_at, edited_by, edited_at)
-       VALUES($1,$2,$3,$4,$5,$6, COALESCE((SELECT finalized_at FROM final_grades
-           WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3), now()), $7, now())
-       ON CONFLICT (student_id, subject_id, stage_season_id) DO UPDATE SET
-          exams_score=$4, participation_score=$5, total_score=$6,
-          finalized_at=COALESCE(final_grades.finalized_at, now()),
-          edited_by=$7, edited_at=now()
-       RETURNING *`,
-      [studentId, subjectId, stageSeasonId, cappedExams, cappedPart, total, editedBy]
-    )
-    .then((r) => r.rows[0]);
-}
 
 // طلبة المادة في الموسم مع درجاتهم (لاختيار من يُحرَّر له)
-const listSubjectGrades = (subjectId, stageSeasonId) =>
+const listSubjectGrades = (subjectId, stageSeasonId, {page=0,size=25,studentId=null}={}) =>
   pool
     .query(
       `SELECT st.id AS student_id, st.full_name, fg.exams_score, fg.participation_score,
-              fg.total_score, fg.lessons_score, fg.edited_at
+              fg.total_score, fg.lessons_score, fg.edited_at,COUNT(*) OVER() AS total_count
        FROM enrollments e
        JOIN students st ON st.id=e.student_id AND st.is_active=true
        LEFT JOIN final_grades fg
               ON fg.student_id=st.id AND fg.subject_id=$1 AND fg.stage_season_id=$2
-       WHERE e.stage_season_id=$2 AND e.status='active'
-       ORDER BY st.full_name`,
-      [subjectId, stageSeasonId]
+       WHERE e.stage_season_id=$2 AND e.status='active' AND ($3::int IS NULL OR st.id=$3)
+       ORDER BY st.full_name,st.id LIMIT $4 OFFSET $5`,
+      [subjectId, stageSeasonId, studentId,pageOptions(page,size).size,pageOptions(page,size).offset]
     )
     .then((r) => r.rows);
 

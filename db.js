@@ -1,16 +1,23 @@
 // db.js — الاتصال بقاعدة بيانات PostgreSQL وإدارة الجداول والاستعلامات
-const { Pool } = require('pg');
+const { Pool, types, defaults } = require('pg');
+// TIMESTAMP columns in this project store UTC. Do not let the host's local
+// timezone reinterpret deadlines or serialize JS Dates using a local offset.
+defaults.parseInputDatesAsUTC = true;
+types.setTypeParser(1114, value => new Date(value.replace(' ','T')+'Z'));
+types.setTypeParser(1082, value => new Date(value+'T00:00:00Z'));
 const { normalizeHashtag } = require('./utils');
 
 const MAX_LEAVE_DAYS_PER_SEASON = 10;
+const poolMax=Number(process.env.PG_POOL_MAX||5);
+if(!Number.isInteger(poolMax)||poolMax<1||poolMax>30)throw new Error('PG_POOL_MAX must be an integer from 1 to 30');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   // تُحفظ أعمدة الوقت القديمة بصيغة TIMESTAMP؛ تثبيت جلسة PostgreSQL على UTC
   // يمنع اختلاف تفسير المهل بين خادم وآخر، ثم نحول يوم الغياب إلى توقيت المعهد صراحةً.
   options: '-c timezone=UTC',
-  // عشرة اتصالات تكفي خدمة واحدة و1000+ طالب؛ الحل بتقليل الاستعلامات لا بزيادة الاتصالات.
-  max: Number(process.env.PG_POOL_MAX || 10),
+  // حد صغير قابل للضبط؛ لا يعني ضمان سعة أو تكلفة دون قياس على الاستضافة.
+  max: poolMax,
   idleTimeoutMillis: 30000, // يغلق الاتصال الخامل بعد نصف دقيقة فلا يتراكم
   connectionTimeoutMillis: 5000, // لا ينتظر اتصالًا للأبد إن كانت القاعدة مشغولة
   statement_timeout: 15000, // يقتل أي استعلام يتجاوز 15 ثانية فلا يعلّق البوت
@@ -699,10 +706,12 @@ async function transferStudentAccount(code, newTelegramId) {
     throw err;
   }
 
+  // Recheck the code in the write itself: two accounts cannot consume it.
   const r = await pool.query(
     `UPDATE students SET telegram_id=$2, transfer_code=NULL, transfer_code_at=NULL
-     WHERE id=$1 RETURNING *`,
-    [target.id, newTelegramId]
+     WHERE id=$1 AND transfer_code=$3 AND is_active=true
+       AND transfer_code_at > now()-interval '24 hours' RETURNING *`,
+    [target.id, newTelegramId, clean]
   );
   return r.rows[0];
 }
@@ -735,7 +744,7 @@ const searchStudents = (query, limit = 10) =>
 const getStudentById = (id) =>
   pool
     .query(
-      `SELECT st.*, sg.name AS stage_name FROM students st
+      `SELECT st.*, sg.name AS stage_name, sg.stage_type FROM students st
        JOIN stages sg ON sg.id = st.stage_id WHERE st.id=$1`,
       [id]
     )
@@ -748,8 +757,11 @@ async function updateStudentStage(id, stageId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const current=(await client.query('SELECT stage_id FROM students WHERE id=$1 FOR UPDATE',[id])).rows[0];
+    if(!current)throw new Error('الطالب غير موجود.');
+    if(Number(current.stage_id)===Number(stageId)){await client.query('COMMIT');return;}
     const target = await client.query(
-      'SELECT id FROM stage_seasons WHERE stage_id=$1 AND is_active=true FOR UPDATE',
+      'SELECT ss.id FROM stage_seasons ss JOIN stages st ON st.id=ss.stage_id AND st.is_active=true WHERE ss.stage_id=$1 AND ss.is_active=true FOR UPDATE OF ss',
       [stageId]
     );
     if (!target.rows[0]) throw new Error('لا يوجد موسم نشط للمرحلة الجديدة.');
@@ -1121,7 +1133,7 @@ async function resolveStudentTransition(studentId, decision) {
 function generateLinkCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // بلا أحرف/أرقام متشابهة
   let code = '';
-  for (let i = 0; i < 8; i += 1) code += alphabet[Math.floor(Math.random() * alphabet.length)];
+  for (let i = 0; i < 8; i += 1) code += alphabet[require('node:crypto').randomInt(alphabet.length)];
   return code;
 }
 
@@ -1494,7 +1506,9 @@ const markAttendance = (studentId, lessonId) =>
        FROM lessons l
        JOIN enrollments e
          ON e.stage_season_id=l.stage_season_id AND e.student_id=$1 AND e.status='active'
-       WHERE l.id=$2 AND l.active_until >= now()
+       JOIN students st ON st.id=e.student_id AND st.is_active=true
+       JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true
+       WHERE l.id=$2 AND l.active_until > now() AND l.activated_at <= now()
          AND l.activated_at >= e.started_at
          AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
        ON CONFLICT (student_id, lesson_id) DO NOTHING RETURNING *`,
@@ -1564,8 +1578,9 @@ async function requestLeave(studentId, startDate, days, reason) {
     const overlap = await client.query(
       `SELECT 1 FROM student_leaves
        WHERE student_id=$1 AND status IN ('pending','approved')
-         AND end_date >= $2::date LIMIT 1`,
-      [studentId, startDate]
+         AND stage_season_id=$4
+         AND end_date >= $2::date AND start_date <= $2::date + ($3::int-1) LIMIT 1`,
+      [studentId, startDate,d,stageSeasonId]
     );
     if (overlap.rows[0]) {
       const err = new Error('لديك إجازة قائمة أو طلب معلّق يتداخل مع هذا التاريخ.');
@@ -1641,6 +1656,17 @@ async function decideLeave(leaveId, approve, adminTelegramId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(734221,1)');
+    await client.query('SELECT id FROM students WHERE id=(SELECT student_id FROM student_leaves WHERE id=$1) FOR UPDATE',[leaveId]);
+    const before=(await client.query('SELECT * FROM student_leaves WHERE id=$1 FOR UPDATE',[leaveId])).rows[0];
+    if(before?.status==='pending'&&approve){
+      const valid=(await client.query(`SELECT 1 FROM enrollments e JOIN students st ON st.id=e.student_id AND st.is_active=true
+        JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+        WHERE e.student_id=$1 AND e.stage_season_id=$2 AND e.status='active'`,[before.student_id,before.stage_season_id])).rows[0];
+      if(!valid)throw new Error('الطالب غير مسجل في موسم الإجازة النشط.');
+      const used=Number((await client.query("SELECT COALESCE(SUM(days),0) AS n FROM student_leaves WHERE student_id=$1 AND stage_season_id=$2 AND status IN ('approved','ended')",[before.student_id,before.stage_season_id])).rows[0].n);
+      if(used+Number(before.days)>MAX_LEAVE_DAYS_PER_SEASON)throw new Error('تتجاوز الموافقة رصيد الإجازات: عشرة أيام للموسم.');
+    }
     const result = await client.query(
       `UPDATE student_leaves
        SET status=$2, decided_at=now(), decided_by=$3
@@ -1653,10 +1679,30 @@ async function decideLeave(leaveId, approve, adminTelegramId) {
       await client.query(
         `UPDATE student_attendance_days
          SET is_excused_leave=true, is_full_absence=false
-         WHERE student_id=$1 AND attendance_date BETWEEN $2::date AND $3::date`,
-        [leave.student_id, leave.start_date, leave.end_date]
+         WHERE student_id=$1 AND attendance_date BETWEEN $2::date AND $3::date
+           AND ($4::int IS NULL OR stage_season_id=$4)`,
+        [leave.student_id, leave.start_date, leave.end_date,leave.stage_season_id]
       );
+      await client.query(`INSERT INTO absence_dirty_students(student_id,stage_season_id)
+        SELECT DISTINCT student_id,stage_season_id FROM student_attendance_days WHERE student_id=$1
+          AND ($2::int IS NULL OR stage_season_id=$2) ON CONFLICT DO NOTHING`,[leave.student_id,leave.stage_season_id]);
+      // Cancel queued lesson notices if approval arrives after the broadcast was queued.
+      await client.query(`UPDATE notification_outbox SET status='expired'
+        WHERE status='pending' AND chat_id=(SELECT telegram_id FROM students WHERE id=$1)
+          AND (dedupe_key LIKE 'daily:%' OR dedupe_key LIKE 'lesson-reminder:%')
+          AND (now() AT TIME ZONE $4)::date BETWEEN $2::date AND $3::date`,
+      [leave.student_id,leave.start_date,leave.end_date,process.env.ATTENDANCE_TIME_ZONE||'Asia/Baghdad']);
+      // Remove unsent snapshots for this student; recomputation builds the corrected list.
+      const withdrawn=await client.query(`DELETE FROM notification_outbox o WHERE o.status='pending' AND (
+        (o.delivery_mark->>'kind'='student_absence' AND (o.delivery_mark->>'id')::bigint IN
+          (SELECT id FROM student_attendance_days WHERE student_id=$1 AND stage_season_id=$2))
+        OR (o.delivery_mark->>'kind'='admin_absence' AND EXISTS(SELECT 1 FROM jsonb_array_elements_text(o.delivery_mark->'ids') item(id)
+          JOIN student_attendance_days d ON d.id=item.id::bigint WHERE d.student_id=$1 AND d.stage_season_id=$2))) RETURNING delivery_mark`,[leave.student_id,leave.stage_season_id]);
+      const resetIds=withdrawn.rows.flatMap(r=>r.delivery_mark?.kind==='admin_absence'?r.delivery_mark.ids:[]);
+      if(resetIds.length)await client.query('UPDATE student_attendance_days SET admin_alert_queued_at=NULL WHERE id=ANY($1::bigint[]) AND admin_alert_sent_at IS NULL',[resetIds]);
     }
+    if(leave)await client.query(`INSERT INTO admin_audit_log(actor_id,action,entity_type,entity_id,before_data,after_data)
+      VALUES($1,'leave_decision','leave',$2,$3::jsonb,$4::jsonb)`,[adminTelegramId,leaveId,JSON.stringify(before),JSON.stringify(leave)]);
     await client.query('COMMIT');
     return leave;
   } catch (err) {
@@ -1836,114 +1882,7 @@ const getNonAttendedStudentsForLesson = (lessonId, stageId) =>
 // وتبدأ من اليوم التالي لآخر يوم مُعالَج لكل موسم بدل مسح الموسم كله في كل جولة.
 // وتحسب عدّاد الغياب المتتالي وقت الإدراج فيُخزَّن ولا يُعاد حسابه لاحقًا.
 async function processCompletedAttendanceDays(timeZone = 'Asia/Baghdad') {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    // الأيام المكتملة الجديدة (بعد المؤشر) لكل طالب وموسم
-    const inserted = await client.query(
-      `WITH completed_days AS (
-         SELECT e.student_id,
-                l.stage_season_id,
-                lesson_day.attendance_date,
-                COUNT(l.id)::integer AS lesson_count,
-                COUNT(a.id) FILTER (WHERE a.listened_at <= l.active_until)::integer
-                  AS attended_on_time_count,
-                EXISTS (
-                  SELECT 1 FROM student_leaves sl
-                  WHERE sl.student_id=e.student_id AND sl.status IN ('approved','ended')
-                    AND lesson_day.attendance_date BETWEEN sl.start_date AND sl.end_date
-                ) AS is_excused_leave
-         FROM students st
-         JOIN enrollments e ON e.student_id=st.id AND e.status='active'
-         JOIN lessons l ON l.stage_season_id=e.stage_season_id
-           AND l.activated_at >= e.started_at
-           AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
-         JOIN absence_monitoring_config cfg ON cfg.id=1
-         LEFT JOIN attendance_processing_cursor cur ON cur.stage_season_id=l.stage_season_id
-         CROSS JOIN LATERAL (
-           SELECT ((l.activated_at AT TIME ZONE 'UTC') AT TIME ZONE $1)::date AS attendance_date
-         ) lesson_day
-         LEFT JOIN attendance a ON a.student_id=st.id AND a.lesson_id=l.id
-         WHERE st.is_active=true
-           AND lesson_day.attendance_date >=
-             (((cfg.started_at AT TIME ZONE 'UTC') AT TIME ZONE $1)::date)
-           -- التدرّج: نتجاوز الأيام التي سبق معالجتها لهذا الموسم
-           AND (cur.last_processed_date IS NULL OR lesson_day.attendance_date > cur.last_processed_date)
-         GROUP BY e.student_id, l.stage_season_id, lesson_day.attendance_date
-         HAVING MAX(l.active_until) <= now()
-       )
-       INSERT INTO student_attendance_days(
-         student_id, stage_season_id, attendance_date, lesson_count,
-         attended_on_time_count, missed_lesson_count, is_excused_leave, is_full_absence
-       )
-       SELECT student_id, stage_season_id, attendance_date, lesson_count,
-              attended_on_time_count,
-              lesson_count - attended_on_time_count,
-              is_excused_leave,
-              NOT is_excused_leave AND attended_on_time_count = 0
-       FROM completed_days
-       ON CONFLICT (student_id, stage_season_id, attendance_date) DO NOTHING
-       RETURNING *`,
-      [timeZone]
-    );
-
-    // حساب عدّاد الغياب المتتالي لكل الأيام المتأثرة دفعة واحدة (يعمل ولو أُدرجت كلها معًا).
-    // الطريقة: نرقّم مجموعات التتابع، فيبدأ عدّاد جديد عند كل يوم حضور فعلي (لا إجازة)،
-    // وأيام الإجازة لا تفتح مجموعة جديدة ولا تُعدّ، ثم نعدّ أيام الغياب داخل كل مجموعة.
-    await client.query(
-      `WITH affected AS (
-         SELECT DISTINCT student_id, stage_season_id FROM student_attendance_days
-       ),
-       ordered AS (
-         SELECT d.id, d.student_id, d.stage_season_id, d.attendance_date,
-                d.is_full_absence, d.is_excused_leave,
-                SUM(CASE WHEN d.is_full_absence = false AND d.is_excused_leave = false THEN 1 ELSE 0 END)
-                  OVER (PARTITION BY d.student_id, d.stage_season_id
-                        ORDER BY d.attendance_date ROWS UNBOUNDED PRECEDING) AS break_group
-         FROM student_attendance_days d
-       ),
-       streaks AS (
-         SELECT o.id,
-                CASE WHEN o.is_full_absence THEN
-                  COUNT(*) FILTER (WHERE o.is_full_absence)
-                    OVER (PARTITION BY o.student_id, o.stage_season_id, o.break_group
-                          ORDER BY o.attendance_date ROWS UNBOUNDED PRECEDING)
-                ELSE 0 END::integer AS streak
-         FROM ordered o
-       )
-       UPDATE student_attendance_days d
-       SET absence_streak = s.streak
-       FROM streaks s
-       WHERE s.id = d.id AND d.absence_streak <> s.streak`
-    );
-
-    // تحديث المؤشر لكل موسم عولج فيه يوم جديد (تجميع مباشر بلا قائمة IN عملاقة)
-    if (inserted.rows.length > 0) {
-      const seasonIds = [...new Set(inserted.rows.map((r) => r.stage_season_id))];
-      await client.query(
-        `INSERT INTO attendance_processing_cursor(stage_season_id, last_processed_date, updated_at)
-         SELECT stage_season_id, MAX(attendance_date), now()
-         FROM student_attendance_days
-         WHERE stage_season_id = ANY($1::int[])
-         GROUP BY stage_season_id
-         ON CONFLICT (stage_season_id) DO UPDATE
-           SET last_processed_date = GREATEST(
-                 attendance_processing_cursor.last_processed_date,
-                 EXCLUDED.last_processed_date),
-               updated_at = now()`,
-        [seasonIds]
-      );
-    }
-
-    await client.query('COMMIT');
-    return inserted.rows;
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+  return require('./absence').processCompletedDays(pool,timeZone);
 }
 
 async function getAbsenceAlertCandidates(threshold, alertKind) {
@@ -1963,6 +1902,12 @@ async function getAbsenceAlertCandidates(threshold, alertKind) {
               d.student_id, st.telegram_id, st.full_name,
               COALESCE(ss.stage_name_snapshot, sg.name) AS stage_name,
               d.stage_season_id, d.absence_streak AS streak_length,
+              (SELECT MIN(start_day.attendance_date) FROM student_attendance_days start_day
+               WHERE start_day.student_id=d.student_id AND start_day.stage_season_id=d.stage_season_id
+                 AND start_day.is_full_absence=true AND start_day.attendance_date<=d.attendance_date
+                 AND start_day.attendance_date>COALESCE((SELECT MAX(b.attendance_date) FROM student_attendance_days b
+                   WHERE b.student_id=d.student_id AND b.stage_season_id=d.stage_season_id
+                   AND NOT b.is_full_absence AND NOT b.is_excused_leave AND b.attendance_date<=d.attendance_date),'-infinity'::date)) AS streak_start_date,
               d.attendance_date AS streak_end_date
        FROM student_attendance_days d
        JOIN students st ON st.id=d.student_id AND st.is_active=true
@@ -1971,8 +1916,10 @@ async function getAbsenceAlertCandidates(threshold, alertKind) {
        JOIN stage_seasons ss ON ss.id=d.stage_season_id
        JOIN stages sg ON sg.id=ss.stage_id
        WHERE d.is_full_absence=true
+         AND NOT EXISTS(SELECT 1 FROM absence_dirty_students dirty WHERE dirty.student_id=d.student_id AND dirty.stage_season_id=d.stage_season_id)
          AND d.absence_streak=$1
          AND d.${sentColumn} IS NULL
+         ${alertKind === 'admin' ? 'AND d.admin_alert_queued_at IS NULL' : ''}
        ORDER BY stage_name, st.full_name`,
       [threshold]
     )

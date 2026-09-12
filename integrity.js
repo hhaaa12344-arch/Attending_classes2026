@@ -1,0 +1,68 @@
+'use strict';
+
+// Additive, repeatable migrations. Never guess a historical report's group.
+async function initIntegritySchema(pool) {
+  await pool.query(`
+    ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS group_id INTEGER REFERENCES mubahatha_groups(id) ON DELETE SET NULL;
+    ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS group_title_snapshot TEXT;
+    ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS source_message_id BIGINT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_report_source_once ON student_reports(student_id, source_message_id)
+      WHERE source_message_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_reports_group_page ON student_reports(group_id, submitted_at, id);
+    CREATE INDEX IF NOT EXISTS idx_students_stage_name_id ON students(stage_id, full_name, id);
+    CREATE INDEX IF NOT EXISTS idx_memberships_group_student ON group_memberships(group_id, student_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_group_opened ON mubahatha_sessions(group_id, opened_at);
+    CREATE TABLE IF NOT EXISTS absence_dirty_students (
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      stage_season_id INTEGER NOT NULL REFERENCES stage_seasons(id) ON DELETE CASCADE,
+      PRIMARY KEY(student_id,stage_season_id)
+    );
+    ALTER TABLE student_attendance_days ADD COLUMN IF NOT EXISTS admin_alert_queued_at TIMESTAMP;
+    CREATE TABLE IF NOT EXISTS admin_audit_log (
+      id BIGSERIAL PRIMARY KEY, actor_id BIGINT NOT NULL, action TEXT NOT NULL,
+      entity_type TEXT NOT NULL, entity_id INTEGER NOT NULL,
+      before_data JSONB, after_data JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS notification_outbox (
+      id BIGSERIAL PRIMARY KEY, dedupe_key TEXT NOT NULL UNIQUE,
+      chat_id BIGINT NOT NULL, method TEXT NOT NULL DEFAULT 'sendMessage',
+      payload JSONB NOT NULL, priority INTEGER NOT NULL DEFAULT 5,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sending','sent','failed','expired')),
+      attempts INTEGER NOT NULL DEFAULT 0, available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      lease_until TIMESTAMPTZ, expires_at TIMESTAMPTZ,
+      last_error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), sent_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_outbox_due ON notification_outbox(available_at, priority, id)
+      WHERE status IN ('pending','sending');
+    ALTER TABLE notification_outbox ADD COLUMN IF NOT EXISTS delivery_mark JSONB;
+    -- Existing historical sessions must NOT be broadcast on migration.
+    ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS start_notifications_queued BOOLEAN NOT NULL DEFAULT true;
+    ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_notifications_queued BOOLEAN NOT NULL DEFAULT true;
+    ALTER TABLE mubahatha_sessions ALTER COLUMN start_notifications_queued SET DEFAULT false;
+    ALTER TABLE mubahatha_sessions ALTER COLUMN end_notifications_queued SET DEFAULT false;
+  `);
+}
+
+function appError(message, code = 'INVALID_INPUT', status = 400) {
+  return Object.assign(new Error(message), { code, status });
+}
+function positiveInt(value, name = 'المعرّف') {
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n <= 0) throw appError(`${name} غير صالح.`);
+  return n;
+}
+function pageOptions(page = 0, size = 25) {
+  const p = Number(page), s = Number(size);
+  if (!Number.isSafeInteger(p) || p < 0 || p > 100000 || !Number.isSafeInteger(s) || s < 1 || s > 100) {
+    throw appError('رقم الصفحة أو حجمها غير صالح.');
+  }
+  return { page: p, size: s, offset: p * s };
+}
+function validScore(value, max) {
+  const n = Number(value);
+  if (value === '' || value == null || !Number.isFinite(n) || n < 0 || n > max) {
+    throw appError(`الدرجة يجب أن تكون بين 0 و${max}.`);
+  }
+  return Math.round(n * 100) / 100;
+}
+module.exports = { initIntegritySchema, appError, positiveInt, pageOptions, validScore };

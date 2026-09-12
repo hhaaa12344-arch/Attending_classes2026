@@ -1,17 +1,21 @@
 {
   "name": "telegram-attendance-bot",
-  "version": "2.22.0",
+  "version": "2.23.1",
   "description": "بوت تليجرام لإدارة مواسم الدراسة وحضور الطلبة في الدروس اليومية",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test",
-    "check": "node --check index.js && node --check db.js && node --check utils.js"
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "check": "node scripts/check.cjs"
   },
   "dependencies": {
-    "telegraf": "^4.16.3",
+    "dotenv": "^16.4.5",
     "pg": "^8.12.0",
-    "dotenv": "^16.4.5"
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "jsdom": "^26.1.0"
   }
 }
