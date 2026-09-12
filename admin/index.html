@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>شؤون الطلبة | لوحة إدارة المعهد</title>
+  <meta name="description" content="إدارة مراحل المعهد وطلبته ومجموعاته والحضور والإجازات والتقارير.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231e3648'/%3E%3Cpath d='M8 8h16v18H8zM12 13h8M12 18h8' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/admin/styles.css">
+  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+  <script src="/admin/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar"><div class="brand"><span class="brand-mark">ت</span><div>شؤون الطلبة<small>إدارة المعهد</small></div></div>
+    <nav aria-label="القائمة الرئيسية"><button class="nav active" data-action="home">المراحل والطلبة</button><button class="nav" data-action="all-leaves">طلبات الإجازة</button><button class="nav" data-action="audit">سجل التعديلات</button><button class="nav" data-action="notifications">حالة الإشعارات</button></nav>
+    <p class="side-note">كل مادة لها مجموعاتها المستقلة. وتبقى بيانات المواسم السابقة محفوظة.</p>
+    <button class="quiet" data-action="logout">إنهاء جلسة الإدارة</button>
+  </aside>
+  <main>
+    <header class="topbar"><div id="breadcrumb">المعهد / الإدارة</div><span id="identity">الدخول من تليجرام</span></header>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <section id="content" aria-busy="true"><div class="empty"><h1>لوحة إدارة المعهد</h1><p>جارٍ التحقق من حساب الإدارة…</p></div></section>
+  </main>
+  <dialog id="detail" aria-labelledby="dialog-title"><header><h2 id="dialog-title">ملف الطالب</h2><button class="quiet" data-action="close-dialog" aria-label="إغلاق">إغلاق ×</button></header><div id="dialog-notice" role="status" aria-live="polite" hidden></div><div id="dialog-body"></div></dialog>
+</body></html>
