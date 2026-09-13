@@ -4,12 +4,14 @@ const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;
 const date=value=>value?new Date(value).toLocaleDateString('ar-IQ',{timeZone:'Asia/Baghdad'}):'—';
 const stamp=value=>value?new Date(value).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad'}):'—';
 const labels={pending:'بانتظار القرار',approved:'معتمدة',rejected:'مرفوضة',ended:'منتهية',cancelled:'ملغاة',sent:'أُرسلت',sending:'قيد الإرسال',failed:'تعذّر إرسالها',expired:'انتهت المهلة',draft:'مسودة',published:'منشور'};
-const actionLabels={update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',assign_teacher:'إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',remove_question:'حذف سؤال'};
-const entityLabels={student:'طالب',stage:'مرحلة',subject:'مادة',group:'مجموعة',leave:'إجازة',report:'تقرير',session:'مباحثة',slot:'موعد',exam:'امتحان',question:'سؤال'};
-let token='',stages=[],currentStage=null,currentStudent=null,currentExam=null,tab='students',page=0,view='home',sequence=0,dialogSequence=0,busy=false;
+const actionLabels={update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',update_group:'تعديل مجموعة',assign_teacher:'إسناد أستاذ',unassign_teacher:'إلغاء إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',remove_question:'حذف سؤال',create_teacher:'إضافة أستاذ',update_teacher:'تعديل أستاذ',toggle_teacher:'تفعيل/إيقاف أستاذ',regenerate_code:'توليد كود ربط'};
+const entityLabels={student:'طالب',stage:'مرحلة',subject:'مادة',group:'مجموعة',leave:'إجازة',report:'تقرير',session:'مباحثة',slot:'موعد',exam:'امتحان',question:'سؤال',teacher:'أستاذ',assignment:'إسناد'};
+const DAY_NAMES=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+let token='',stages=[],teachers=[],currentStage=null,currentStudent=null,currentExam=null,currentTeacher=null,matrixStageId=null,matrixDay=new Date().getDay(),matrixEligible=[],tab='students',page=0,view='home',sequence=0,dialogSequence=0,busy=false;
 let filters={q:'',status:'active',groupId:''};
 function notify(text,error=false){const n=$('#detail').open?$('#dialog-notice'):$('#notice');n.hidden=false;n.className=error?'error':'';n.textContent=text;}
 function clearNotice(){$('#notice').hidden=true;$('#dialog-notice').hidden=true;}
+function setNav(action){document.querySelectorAll('.nav').forEach(b=>b.classList.toggle('active',b.dataset.action===action));}
 async function api(route,body,method='GET'){
   const response=await fetch('/api/admin'+route,{method,headers:{...(token?{Authorization:'Bearer '+token}:{}),...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
   if(!response.ok){let data;try{data=await response.json();}catch{}throw Error(data?.error||'تعذر الاتصال. حاول مرة أخرى.');}
@@ -25,7 +27,7 @@ function groupOptions(groups,selected='',all='جميع المجموعات'){retu
 function stageHeader(){const s=currentStage;return head(s.name,`الموسم: ${s.season_name||'لا يوجد موسم نشط'}`,button('كل المراحل','home'))+
   `<div class="summary"><div><b>${s.student_count}</b>طالب</div><div><b>${s.subject_count}</b>مادة</div><div><b>${s.group_count}</b>مجموعة</div></div>`+
   `<div class="tabs" role="navigation" aria-label="أقسام المرحلة">${Object.entries({students:'الطلبة',subjects:'المواد والمجموعات',leaves:'الإجازات',...(s.stage_type!=='lessons_only'?{reports:'التقارير',schedule:'المباحثات',exams:'الامتحانات'}:{}),exports:'التصدير'}).map(([key,name])=>button(name,'tab',`data-tab="${key}"`,tab===key?'active':'')).join('')}</div>`;}
-async function home(){view='home';currentStage=null;page=0;const id=++sequence;stages=await api('/stages');if(id!==sequence)return;
+async function home(){view='home';currentStage=null;page=0;setNav('home');const id=++sequence;stages=await api('/stages');if(id!==sequence)return;
   $('#breadcrumb').textContent='المعهد / المراحل والطلبة';
   setContent(head('المراحل الدراسية','اختر المرحلة للاطلاع على طلبتها وموادها ومجموعاتها.',button('إضافة مرحلة','new-stage','','primary'))+
     (stages.length?`<div class="cards">${stages.map(s=>`<button class="stage-card" data-action="stage" data-id="${s.id}"><div><h2>${esc(s.name)}</h2><small>${esc(s.season_name||'لا يوجد موسم نشط')}</small></div><div class="stats"><div><span class="metric">${s.student_count}</span><small>طالب</small></div><div><span class="metric">${s.subject_count}</span><small>مادة</small></div><div><span class="metric">${s.group_count}</span><small>مجموعة</small></div></div><div class="card-footer"><span>${s.is_active?'مرحلة نشطة':'مرحلة مؤرشفة'}</span><span>عرض التفاصيل ←</span></div></button>`).join('')}</div>`:empty('لم تُضف مراحل بعد','ابدأ بإضافة المرحلة الأولى.')));
@@ -40,7 +42,7 @@ async function renderStage(){
     table(['الطالب','المجموعات حسب المادة','الحالة','ملف الطالب'],data.rows.map(st=>[esc(st.full_name),st.groups.map(g=>`<div>${esc(g.subject)}: ${esc(g.group)}</div>`).join('')||'<span class="subtle">لم يُوزّع بعد</span>',`<span class="tag ${st.is_active?'ok':''}">${st.is_active?'نشط':'مؤرشف'}</span>`,button('عرض وتعديل','student',`data-id="${st.id}"`)]))+pager(data.total);
   }else if(tab==='subjects'){
     body=`<div class="toolbar">${button('إضافة مادة','new-subject','','primary')}${s.stage_type!=='lessons_only'?button('إضافة مجموعة','new-group')+button('إسناد أستاذ لمادة','new-assignment'):''}</div>`+
-      s.subjects.map(sub=>`<section class="detail-section"><h2>${esc(sub.name)}</h2><p class="subtle">الأستاذ: ${esc(sub.teacher_name||'لم يُسنَد')} · الهاشتاغ: #${esc(sub.hashtag)}</p>`+table(['المجموعة','الطلبة / السعة','رابط المجموعة'],s.groups.filter(g=>g.subject_id===sub.id).map(g=>[esc(g.title),`${g.member_count} / ${g.capacity}`,g.invite_link&&/^https:\/\/t\.me\//.test(g.invite_link)?`<a href="${esc(g.invite_link)}" target="_blank" rel="noopener noreferrer">فتح المجموعة</a>`:'لم يُضف']))+'</section>').join('');
+      s.subjects.map(sub=>`<section class="detail-section"><h2>${esc(sub.name)}</h2><p class="subtle">الأستاذ: ${esc(sub.teacher_name||'لم يُسنَد')} · الهاشتاغ: #${esc(sub.hashtag)}</p>`+table(['المجموعة','الطلبة / السعة','رابط المجموعة','الحالة','الإجراء'],s.groups.filter(g=>g.subject_id===sub.id).map(g=>[esc(g.title),`${g.member_count} / ${g.capacity}`,g.invite_link&&/^https:\/\/t\.me\//.test(g.invite_link)?`<a href="${esc(g.invite_link)}" target="_blank" rel="noopener noreferrer">فتح المجموعة</a>`:'لم يُضف',g.is_active?'<span class="tag ok">نشطة</span>':'<span class="tag danger">معطّلة</span>',button('تعديل','edit-group',`data-id="${g.id}"`)]))+'</section>').join('');
     if(!s.subjects.length)body+=empty('لا توجد مواد في المرحلة');
   }else if(tab==='leaves')body=await leavesContent(s.id);
   else if(tab==='reports'){
@@ -65,7 +67,39 @@ async function leavesContent(stageId){
   return `<form id="leave-filter" class="toolbar"><label>حالة الطلب<select name="leaveStatus">${['pending','approved','ended','rejected','cancelled','all'].map(v=>`<option value="${v}" ${v===(filters.leaveStatus||'pending')?'selected':''}>${labels[v]||'الجميع'}</option>`).join('')}</select></label><button>عرض</button></form>`+
     table(['الطالب / المرحلة','الفترة','الأيام','الحالة','القرار'],data.rows.map(l=>[`${esc(l.full_name)}<div class="subtle">${esc(l.stage_name)}</div>`,`${date(l.start_date)} — ${date(l.end_date)}`,esc(l.days),esc(labels[l.status]),l.status==='pending'?button('موافقة','leave',`data-id="${l.id}" data-approve="true"`)+button('رفض','leave',`data-id="${l.id}" data-approve="false"`):'—']))+pager(data.total);
 }
-async function allLeaves(){view='leaves';currentStage=null;const n=++sequence;const html=await leavesContent(null);if(n===sequence)setContent(head('طلبات الإجازة','جميع المراحل · الحد الأقصى عشرة أيام لكل طالب في الموسم')+html);}
+async function allLeaves(){view='leaves';currentStage=null;setNav('all-leaves');$('#breadcrumb').textContent='المعهد / طلبات الإجازة';const n=++sequence;const html=await leavesContent(null);if(n===sequence)setContent(head('طلبات الإجازة','جميع المراحل · الحد الأقصى عشرة أيام لكل طالب في الموسم')+html);}
+async function loadTeachers(){view='teachers';currentStage=null;setNav('teachers');$('#breadcrumb').textContent='المعهد / الأساتذة';const n=++sequence;teachers=await api('/teachers');if(n!==sequence)return;
+  setContent(head('الأساتذة','إدارة حسابات الأساتذة وربطها بتليجرام وإسنادها للمواد.',button('إضافة أستاذ','add-teacher','','primary'))+
+    table(['الاسم','الهاتف','الربط بتليجرام','المواد النشطة','الحالة','الإجراءات'],teachers.map(t=>[esc(t.full_name),esc(t.phone||'—'),
+      t.linked?'<span class="tag ok">مرتبط</span>':t.link_code?`<span class="tag warn">بانتظار الربط</span><div class="subtle">كود: <b>${esc(t.link_code)}</b></div>`:'<span class="tag warn">بانتظار الربط</span>',
+      esc(t.active_subject_count),t.is_active?'<span class="tag ok">نشط</span>':'<span class="tag danger">موقوف</span>',
+      button('تعديل الاسم','edit-teacher',`data-id="${t.id}"`)+button(t.is_active?'إيقاف':'تفعيل','toggle-teacher',`data-id="${t.id}" data-active="${!t.is_active}"`,t.is_active?'danger':'')+button('كود جديد','regenerate-code',`data-id="${t.id}"`)+button('المواد','teacher-subjects',`data-id="${t.id}"`)
+    ]))+(teachers.length?'':empty('لا يوجد أساتذة بعد','ابدأ بإضافة الأستاذ الأول.')));
+}
+async function loadScheduleMatrix(){view='schedule-matrix';currentStage=null;setNav('schedule-matrix');$('#breadcrumb').textContent='المعهد / جداول المباحثات';const n=++sequence;
+  if(!stages.length)stages=await api('/stages');if(n!==sequence)return;
+  matrixEligible=stages.filter(s=>s.stage_type!=='lessons_only'&&s.stage_season_id);
+  if(!matrixEligible.length){setContent(head('جداول المباحثات','مصفوفة المجموعات والساعات المعتمدة لكل يوم.')+empty('لا توجد مراحل مباحثات نشطة','أضف مرحلة موسمها نشط وليست من نوع الدروس فقط.'));return;}
+  if(!matrixStageId||!matrixEligible.some(s=>String(s.id)===String(matrixStageId)))matrixStageId=matrixEligible[0].id;
+  await renderScheduleMatrix();
+}
+async function renderScheduleMatrix(){
+  const n=++sequence;const s=await api('/stages/'+matrixStageId);const slots=await api('/schedule?seasonId='+s.stage_season_id);if(n!==sequence)return;
+  const dayTabs=DAY_NAMES.map((d,i)=>button(d,'matrix-day',`data-day="${i}"`,String(i)===String(matrixDay)?'active':'')).join('');
+  const daySlots=slots.filter(sl=>Number(sl.day_of_week)===Number(matrixDay));
+  const hours=[...new Set(daySlots.map(sl=>Number(sl.hour)))].sort((a,b)=>a-b);
+  let body=`<form id="matrix-stage" class="toolbar"><label>المرحلة<select name="stageId">${matrixEligible.map(e=>`<option value="${e.id}" ${String(e.id)===String(matrixStageId)?'selected':''}>${esc(e.name)}</option>`).join('')}</select></label></form>`+
+    `<div class="tabs" role="navigation" aria-label="أيام الأسبوع">${dayTabs}</div>`;
+  if(!s.groups.length)body+=empty('لا توجد مجموعات في هذه المرحلة');
+  else if(!hours.length)body+=empty('لا توجد مباحثات مجدولة في هذا اليوم','اختر يومًا آخر أو أضف موعدًا من صفحة المرحلة.');
+  else body+=`<div class="matrix-wrap"><table class="matrix"><thead><tr><th scope="col">المجموعة</th>${hours.map(h=>`<th scope="col">${String(h).padStart(2,'0')}:00</th>`).join('')}</tr></thead><tbody>${
+    s.groups.map(g=>`<tr><td>${esc(g.subject_name)} · ${esc(g.title)}</td>${hours.map(h=>{
+      const match=daySlots.find(sl=>Number(sl.group_id)===Number(g.id)&&Number(sl.hour)===h);
+      return `<td>${match?`<span class="matrix-check" title="${esc(match.teacher_name||'')}">✓</span>`:'<span class="matrix-empty">—</span>'}</td>`;
+    }).join('')}</tr>`).join('')
+  }</tbody></table></div>`;
+  if(n===sequence)setContent(head('جداول المباحثات','العمود الأول أسماء المجموعات، والصف الأول ساعات المباحثات المعتمدة لليوم المختار.')+body);
+}
 function dialog(title,html){clearNotice();$('#dialog-title').textContent=title;$('#dialog-body').innerHTML=html;if(!$('#detail').open)$('#detail').showModal();}
 async function showStudent(id){
   const n=++dialogSequence;const st=await api('/students/'+id);if(n!==dialogSequence)return;currentStudent=st;
@@ -132,11 +166,42 @@ document.addEventListener('click',async event=>{
       if(!response.ok)throw Error('تعذر تنزيل الملف. أعد فتح اللوحة إذا انتهت جلسة الدخول.');
       const url=URL.createObjectURL(await response.blob());const link=document.createElement('a');link.href=url;link.download=`attendance-${season}-${target.dataset.kind}.md`;link.click();setTimeout(()=>URL.revokeObjectURL(url),10000);notify('تم تجهيز ملف MD.');
     }else if(a==='audit'){
-      view='audit';const id=++sequence;const rows=await api('/audit');if(id===sequence)setContent(head('سجل التعديلات','آخر 25 عملية مسجلة')+table(['التاريخ','المسؤول','العملية','السجل'],rows.map(r=>[stamp(r.created_at),esc(r.actor_id),esc(actionLabels[r.action]||r.action),`${esc(entityLabels[r.entity_type]||r.entity_type)} #${r.entity_id}`])));
+      view='audit';setNav('audit');$('#breadcrumb').textContent='المعهد / سجل التعديلات';const id=++sequence;const rows=await api('/audit');if(id===sequence)setContent(head('سجل التعديلات','آخر 25 عملية مسجلة')+table(['التاريخ','المسؤول','العملية','السجل'],rows.map(r=>[stamp(r.created_at),esc(r.actor_id),esc(actionLabels[r.action]||r.action),`${esc(entityLabels[r.entity_type]||r.entity_type)} #${r.entity_id}`])));
     }else if(a==='notifications'){
-      view='notifications';const id=++sequence;const rows=await api('/notifications');if(id===sequence)setContent(head('حالة الإشعارات','الإشعارات المجدولة المحفوظة؛ المحاولات المؤقتة يعاد إرسالها تلقائيًا.')+table(['الحالة','العدد'],rows.map(r=>[esc(labels[r.status]||r.status),esc(r.count)])));
+      view='notifications';setNav('notifications');$('#breadcrumb').textContent='المعهد / حالة الإشعارات';const id=++sequence;const rows=await api('/notifications');if(id===sequence)setContent(head('حالة الإشعارات','الإشعارات المجدولة المحفوظة؛ المحاولات المؤقتة يعاد إرسالها تلقائيًا.')+table(['الحالة','العدد'],rows.map(r=>[esc(labels[r.status]||r.status),esc(r.count)])));
+    }else if(a==='teachers')await loadTeachers();
+    else if(a==='schedule-matrix')await loadScheduleMatrix();
+    else if(a==='matrix-day'){matrixDay=Number(target.dataset.day);await renderScheduleMatrix();}
+    else if(a==='add-teacher'){dialog('إضافة أستاذ','<form id="create-teacher"><div class="form-grid"><label>الاسم الرباعي<input name="fullName" maxlength="200" required></label><label>الهاتف (اختياري)<input name="phone" maxlength="30"></label></div><div class="form-actions"><button class="primary">حفظ</button></div></form>');}
+    else if(a==='edit-teacher'){const t=teachers.find(x=>String(x.id)===target.dataset.id);if(!t)return;dialog('تعديل اسم الأستاذ',`<form id="edit-teacher" data-id="${t.id}"><label>الاسم الرباعي<input name="fullName" value="${esc(t.full_name)}" maxlength="200" required></label><div class="form-actions"><button class="primary">حفظ</button></div></form>`);}
+    else if(a==='toggle-teacher'){
+      const active=target.dataset.active==='true';if(!confirm(active?'إعادة تفعيل حساب الأستاذ؟':'إيقاف حساب الأستاذ؟ لن يستطيع الدخول لواجهته حتى إعادة التفعيل.'))return;
+      busy=true;await api('/teachers/'+target.dataset.id+'/toggle',{active},'POST');notify('حُفظت حالة الأستاذ.');await loadTeachers();
+    }else if(a==='regenerate-code'){
+      if(!confirm('توليد كود ربط جديد؟ سيُفصل الحساب المرتبط حاليًا إن وجد، ويحتاج الأستاذ لإرسال الكود الجديد للبوت.'))return;
+      busy=true;const r=await api('/teachers/'+target.dataset.id+'/regenerate-code',{},'POST');await loadTeachers();
+      dialog('كود الربط الجديد',`<p>أرسل هذا الكود إلى الأستاذ ليُدخله في البوت لربط حسابه:</p><div class="link-code">${esc(r.link_code)}</div>`);
+    }else if(a==='teacher-subjects'){
+      const t=teachers.find(x=>String(x.id)===target.dataset.id);if(!t)return;currentTeacher=t;
+      const subjects=await api('/teachers/'+t.id+'/subjects');
+      dialog('مواد '+t.full_name,subjects.length?table(['المادة','المرحلة','الموسم','الطلبة النشطون','إلغاء الإسناد'],subjects.map(sj=>[esc(sj.subject_name),esc(sj.stage_name),esc(sj.season_name),esc(sj.student_count),button('إلغاء','unassign-teacher',`data-id="${sj.assignment_id}"`,'danger')])):empty('لا توجد مواد مسندة لهذا الأستاذ حاليًا','أسند مادة له من تبويب «المواد والمجموعات» داخل المرحلة.'));
+    }else if(a==='unassign-teacher'){
+      if(!confirm('إلغاء إسناد هذه المادة عن الأستاذ؟'))return;busy=true;await api('/assignments/'+target.dataset.id+'/remove',{},'POST');
+      if(currentTeacher){const subjects=await api('/teachers/'+currentTeacher.id+'/subjects');dialog('مواد '+currentTeacher.full_name,subjects.length?table(['المادة','المرحلة','الموسم','الطلبة النشطون','إلغاء الإسناد'],subjects.map(sj=>[esc(sj.subject_name),esc(sj.stage_name),esc(sj.season_name),esc(sj.student_count),button('إلغاء','unassign-teacher',`data-id="${sj.assignment_id}"`,'danger')])):empty('لا توجد مواد مسندة لهذا الأستاذ حاليًا'));}
+      notify('أُلغي إسناد المادة.');
+    }else if(a==='edit-group'){
+      const g=currentStage?.groups.find(x=>String(x.id)===target.dataset.id);if(!g)return;
+      dialog('تعديل '+g.title,`<form id="edit-group" data-id="${g.id}"><div class="form-grid"><label>السعة<input name="capacity" type="number" min="1" max="10000" value="${g.capacity}" required></label><label>رابط المجموعة<input name="inviteLink" type="url" value="${esc(g.invite_link||'')}" placeholder="https://t.me/..."></label></div><div class="form-actions"><button class="primary">حفظ</button>${button(g.is_active?'تعطيل المجموعة':'تفعيل المجموعة','toggle-group',`data-id="${g.id}" data-active="${!g.is_active}"`,g.is_active?'danger':'')}</div></form>`);
+    }else if(a==='toggle-group'){
+      const active=target.dataset.active==='true';if(!confirm(active?'إعادة تفعيل المجموعة؟':'تعطيل المجموعة؟ يبقى سجلها محفوظًا.'))return;
+      busy=true;await api('/groups/'+target.dataset.id,{active},'PATCH');$('#detail').close();await refresh();notify('حُفظت حالة المجموعة.');
     }else if(a==='logout'){if(token)await api('/logout',{},'POST');token='';sequence++;$('#detail').close();setContent(empty('انتهت جلسة الإدارة','أغلق النافذة وافتحها مجددًا من البوت للدخول.'));}
   }catch(e){notify(e.message,true);}finally{busy=false;}
+});
+document.addEventListener('change',async event=>{
+  if(event.target.name==='stageId'&&event.target.closest('#matrix-stage')){if(busy)return;busy=true;clearNotice();
+    try{matrixStageId=event.target.value;await renderScheduleMatrix();}catch(e){notify(e.message,true);}finally{busy=false;}
+  }
 });
 document.addEventListener('submit',async event=>{
   const form=event.target;event.preventDefault();if(busy)return;clearNotice();const body=Object.fromEntries(new FormData(form));
@@ -151,15 +216,23 @@ document.addEventListener('submit',async event=>{
     else if(form.id==='exam-question'){body.options=body.type==='mcq'?body.options.split(/\r?\n/).map(s=>s.trim()).filter(Boolean):undefined;await api('/exams/'+currentExam.id+'/question',body,'POST');await showExam(currentExam.id);notify('أُضيف السؤال.');}
     else if(form.id==='postpone-exam'){if(!confirm('تغيير موعد الامتحان؟'))return;await api('/exams/'+currentExam.id+'/postpone',body,'POST');await showExam(currentExam.id);notify('حُفظ الموعد.');}
     else if(form.id==='grade-report'){await api('/reports/'+form.dataset.id+'/score',body,'POST');$('#detail').close();await refresh();notify('حُفظ تقييم التقرير.');}
+    else if(form.id==='edit-teacher'){await api('/teachers/'+form.dataset.id,body,'PATCH');$('#detail').close();await loadTeachers();notify('حُفظ اسم الأستاذ.');}
+    else if(form.id==='edit-group'){await api('/groups/'+form.dataset.id,{capacity:body.capacity,inviteLink:body.inviteLink||null},'PATCH');$('#detail').close();await refresh();notify('حُفظت بيانات المجموعة.');}
     else if(form.id.startsWith('create-')){
-      const kind=form.id.slice(7);const routes={stage:'/stages',subject:'/subjects',group:'/groups',assignment:'/assignments',slot:'/schedule',exam:'/exams'};
+      const kind=form.id.slice(7);const routes={stage:'/stages',subject:'/subjects',group:'/groups',assignment:'/assignments',slot:'/schedule',exam:'/exams',teacher:'/teachers'};
       if(kind==='subject')body.stageId=currentStage.id;if(['group','exam'].includes(kind))body.seasonId=currentStage.stage_season_id;
-      await api(routes[kind],body,'POST');$('#detail').close();await refresh();notify('أُضيف السجل بنجاح.');
+      await api(routes[kind],body,'POST');$('#detail').close();
+      if(kind==='teacher'){await loadTeachers();notify('أُضيف الأستاذ بنجاح.');}else{await refresh();notify('أُضيف السجل بنجاح.');}
     }
   }catch(e){notify(e.message,true);}finally{busy=false;if(submit)submit.disabled=false;}
 });
 (async()=>{
-  const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();
+  const tg=window.Telegram?.WebApp;
+  tg?.ready();tg?.expand();
+  try{tg?.disableVerticalSwipes?.();}catch{}
+  try{tg?.setHeaderColor?.('#101b2b');}catch{}
+  try{tg?.setBackgroundColor?.('#f4f6f9');}catch{}
+  try{tg?.requestFullscreen?.();}catch{}
   if(!tg?.initData){setContent(empty('افتح اللوحة من البوت','سجّل دخولك إلى تليجرام، ثم اضغط «لوحة الإدارة» في حساب الأدمن. فتح الرابط وحده لا يمنح صلاحية الاطلاع على بيانات الطلبة.'));return;}
   try{const session=await api('/auth',{initData:tg.initData},'POST');token=session.token;$('#identity').textContent=session.user.name;await home();}
   catch(e){setContent(empty('تعذر فتح لوحة الإدارة',e.message));}
