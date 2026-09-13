@@ -3,6 +3,7 @@ require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const db = require('./db');
 const studies = require('./studies');
+const instituteLinks = require('./instituteLinks').createInstituteLinks(db.pool);
 const { initIntegritySchema } = require('./integrity');
 const access = require('./access').createAccess(db.pool);
 const adminData = require('./adminData').createAdminData(db, studies);
@@ -94,7 +95,7 @@ bot.use(async (ctx, next) => {
   // from a different role. New write handlers cannot accidentally bypass a denylist.
   const previewReads = new Set(['pv_exit','menu_today','menu_report','pm_subj','sr_subj','sr_group','sr_page','sr_stu',
     'gr_subj','gr_page','gr_stu','teacher_att','tg_subj','tg_group','ts_subj','ts_group','ex_subj','ex_view',
-    'stex_list','rep_subj','noop','noop_activity']);
+    'stex_list','rep_subj','noop','noop_activity','il_view']);
   if (ctx.callbackQuery?.data && !previewReads.has(ctx.callbackQuery.data.split(':')[0])) {
     return ctx.answerCbQuery('👁️ المعاينة للقراءة فقط؛ اخرج منها لإجراء تعديلات.',{show_alert:true});
   }
@@ -159,6 +160,7 @@ const STUDENT_ACTIVITY_BUTTON = '📋 المتغيرات';
 const LEGACY_STUDENT_ACTIVITY_BUTTON = '📋 إجازاتي وإنذاراتي';
 const LEGACY_STUDENT_ACTIVITY_BUTTON_2 = '📋 إجازاتي وتنبيهاتي';
 const STUDENT_MENU_BUTTONS = new Set([
+  '🔗 روابط المعهد',
   '🚪 الخروج من المعاينة',
   '📚 دروس اليوم',
   '📊 تقريري',
@@ -175,6 +177,7 @@ const STUDENT_MENU_BUTTONS = new Set([
 
 // أزرار لوحة الأستاذ — تُعامل كأزرار قوائم فلا تُفسَّر كإدخال نصي
 const TEACHER_MENU_BUTTONS = new Set([
+  '🔗 روابط المعهد',
   '🚪 الخروج من المعاينة',
   '📚 موادي', '📊 حضور موادي', '👥 المجموعات',
   '🗓️ جدول المباحثات', '📝 الامتحانات', '🏁 إنهاء الموسم', '✏️ تحرير الدرجات',
@@ -182,6 +185,7 @@ const TEACHER_MENU_BUTTONS = new Set([
 ]);
 
 const ADMIN_MENU_BUTTONS = new Set([
+  '⚙️ إدارة روابط المعهد',
   '➕ إضافة مرحلة دراسية',
   '➕ إضافة مادة',
   '🟢 تفعيل درس يدويًا',
@@ -306,6 +310,7 @@ function studentMainMenu(student = null) {
     rows.push([replyButton('🎯 درجات - المباحثات'), replyButton('📖 مشاركتي')]);
     rows.push([replyButton('📄 إرسال تقرير')]);
   }
+  rows.push([replyButton('🔗 روابط المعهد')]);
   rows.push([replyButton(BACK_BUTTON)]);
   return Markup.keyboard(rows).resize().persistent();
 }
@@ -340,6 +345,7 @@ function teacherMainMenu() {
     [replyButton('📝 الامتحانات'), replyButton('🏁 إنهاء الموسم')],
     [replyButton('✏️ تحرير الدرجات'), replyButton('📄 تقارير الطلبة')],
     [replyButton('🔗 روابط المجموعات')],
+    [replyButton('🔗 روابط المعهد')],
   ]).resize().persistent();
 }
 
@@ -358,6 +364,7 @@ function adminMainMenu() {
     ['✏️ تحرير الدرجات', '📄 تقارير الطلبة'],
     ['🔗 روابط المجموعات'],
     ['🖥️ لوحة الإدارة'],
+    ['⚙️ إدارة روابط المعهد'],
     [BACK_BUTTON, '❌ إلغاء العملية'],
   ];
   return Markup.keyboard(rows.map((row) => row.map((text) => replyButton(text)))).resize().persistent();
@@ -1155,6 +1162,10 @@ bot.on(['document', 'photo'], async (ctx, next) => {
     studentMainMenu(await effectiveStudent(ctx))
   );
 });
+
+instituteLinks.install({ bot, Markup, userState, isAdmin, isInPreview, getPreview,
+  effectiveStudent, effectiveTeacher, replyStudentScreen, studentMainMenu, teacherMainMenu,
+  adminMainMenu, menus: [STUDENT_MENU_BUTTONS, TEACHER_MENU_BUTTONS, ADMIN_MENU_BUTTONS] });
 
 bot.on('text', async (ctx, next) => {
   const inputText = ctx.message.text.trim();
@@ -5061,6 +5072,7 @@ async function main() {
   await db.initSchema();
   await studies.initStudiesSchema();
   await initIntegritySchema(db.pool);
+  await instituteLinks.initSchema();
   console.log('تم تجهيز قاعدة البيانات ✅');
   if(process.env.ADMIN_WEB_ENABLED==='true') {
     adminServer=await require('./adminServer').startAdminServer({db,studies,adminData,scheduler,botToken:BOT_TOKEN,adminIds:ADMIN_IDS});
