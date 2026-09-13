@@ -113,6 +113,9 @@ table.matrix th:first-child,table.matrix td:first-child{text-align:right;min-wid
 table.matrix th{background:#f7f9fb}
 .matrix-check{display:inline-grid;place-items:center;width:26px;height:26px;border-radius:999px;background:var(--accent-soft);color:var(--accent-dark);font-weight:700}
 .matrix-empty{color:var(--line-strong)}
+table.matrix td{min-width:100px;vertical-align:middle}
+table.matrix td:first-child,table.matrix th:first-child{z-index:1}
+table.matrix button.matrix-check{width:auto;min-width:80px;height:auto;white-space:nowrap;border-radius:6px;margin-bottom:4px}
 
 .empty{padding:2.6rem;background:var(--paper);border:1px dashed var(--line-strong);border-radius:var(--radius-lg);text-align:center}
 .empty p{margin-bottom:0;color:var(--muted)}
