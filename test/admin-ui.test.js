@@ -6,7 +6,7 @@ async function setup({authorized=true}={}){
   const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../admin/index.html'),'utf8'),{url:'https://institute.example/admin/',runScripts:'outside-only'});
   const w=dom.window;w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};w.confirm=()=>true;
   w.Telegram={WebApp:{ready(){},expand(){},initData:authorized?'signed-test-data':''}};
-  const requests=[];
+  const requests=[];let slots=[];
   w.fetch=async(url,options={})=>{
     requests.push({url,options});const u=new URL(url,'https://institute.example');let data,status=200;
     if(u.pathname.endsWith('/auth'))data={token:'a'.repeat(64),user:{name:'إدارة الاختبار'}};
@@ -17,6 +17,14 @@ async function setup({authorized=true}={}){
     }else if(u.pathname.endsWith('/students')){const p=Number(u.searchParams.get('page'));data={rows:[{id:1,full_name:'طالب <img src=x> اختبار اسم',groups:[],is_active:true}],total:35,page:p,size:25};}
     else if(u.pathname.endsWith('/exams'))data=[{id:1,subject_name:'الفقه',title:'الشهري الأول',status:'draft'}];
     else if(u.pathname.endsWith('/exams/1'))data={id:1,title:'الشهري الأول',subject_name:'الفقه',status:'draft',questions:[{id:3,prompt:'سؤال <script>bad()</script>',question_type:'tf',correct_answer:'صح'}]};
+    else if(u.pathname.endsWith('/schedule')){
+      if(options.method==='POST'){
+        const b=JSON.parse(options.body);
+        if(Number(b.minute)===59){status=409;data={error:'يتداخل الموعد مع مباحثة أخرى'};}
+        else{const slot={id:8,group_id:Number(b.groupId),hour:Number(b.hour),minute:Number(b.minute),day_of_week:Number(b.dayOfWeek),teacher_name:'الأستاذ الأول'};slots.push(slot);data={slot};}
+      }else data=slots;
+    }
+    else if(u.pathname.endsWith('/schedule/8/remove')){slots=[];data={removed:true};}
     else if(u.pathname.endsWith('/teachers'))data=[{id:1,full_name:'الأستاذ الأول',is_active:true}];
     else if(u.pathname.endsWith('/logout'))data={ok:true};
     else throw Error('Unexpected UI request '+url);
@@ -47,4 +55,27 @@ test('admin DOM: Telegram entry, stages, pagination, escaped names and visible m
 });
 test('admin DOM: opening a bare link never requests student data',async()=>{
   const {dom,w,requests}=await setup({authorized:false});try{assert.equal(requests.length,0);assert.match(w.document.querySelector('#content').textContent,/افتح اللوحة من البوت/);}finally{dom.window.close();}
+});
+test('admin matrix: empty day can add a slot; exact minutes, conflict and removal remain usable',async()=>{
+  const {dom,w,click,until,requests}=await setup();
+  try{
+    await until(()=>w.document.querySelector('.stage-card'));
+    click('[data-action="schedule-matrix"]');
+    await until(()=>w.document.querySelector('[data-action="matrix-add"]'));
+    assert.equal(w.document.querySelectorAll('table.matrix thead th').length,25);
+    click('[data-action="matrix-add"][data-hour="10"]');
+    w.document.querySelector('#matrix-slot [name="minute"]').value='30';
+    w.document.querySelector('#matrix-slot').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+    await until(()=>w.document.querySelector('[data-action="matrix-remove"]'));
+    await until(()=>w.document.querySelector('#notice').textContent.includes('حُفظ موعد المباحثة'));
+    assert.match(w.document.querySelector('[data-action="matrix-remove"]').textContent,/10:30/);
+    click('[data-action="matrix-add"][data-hour="11"]');
+    w.document.querySelector('#matrix-slot [name="minute"]').value='59';
+    w.document.querySelector('#matrix-slot').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+    await until(()=>w.document.querySelector('#dialog-notice').textContent.includes('يتداخل'));
+    assert.equal(w.document.querySelector('#detail').open,true);
+    click('[data-action="close-dialog"]');click('[data-action="matrix-remove"]');
+    await until(()=>!w.document.querySelector('[data-action="matrix-remove"]'));
+    assert.ok(requests.some(r=>r.url.endsWith('/schedule/8/remove')));
+  }finally{dom.window.close();}
 });

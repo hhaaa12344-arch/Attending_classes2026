@@ -70,6 +70,15 @@ test('admin HTTP: leave double decision, export date columns, archived access an
   assert.equal((await (await request('/students?status=active')).json()).total,0);
   assert.equal((await request('/students/'+student.id,{active:true},'PATCH')).status,200);
 });
+test('admin HTTP: group edits validate together and cannot reduce capacity below membership',async()=>{
+  const extra=await db.createStudent(99907,'طالب فحص سعة مجموعة',stage.id);
+  await studies.assignStudentToGroup(extra.id,subject.id,ss);
+  const before=await studies.getGroupById(group.id);
+  assert.equal((await request('/groups/'+group.id,{capacity:1},'PATCH')).status,400);
+  assert.equal((await request('/groups/'+group.id,{capacity:70,inviteLink:'javascript:bad'},'PATCH')).status,400);
+  assert.equal((await studies.getGroupById(group.id)).capacity,before.capacity);
+  assert.equal((await request('/groups/'+group.id,{capacity:70,inviteLink:'https://t.me/test_group'},'PATCH')).status,200);
+});
 test('admin HTTP: exam editor, protected publication, question immutability, postponement and logout',async()=>{
   const dateIso=new Date(Date.now()+86400000).toISOString().slice(0,10);
   const created=await request('/exams',{subjectId:subject.id,seasonId:ss,teacherId:teacher.id,examNumber:1,title:'امتحان تجريبي',dateIso,hours:24});
