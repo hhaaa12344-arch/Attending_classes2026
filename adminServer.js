@@ -115,14 +115,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if((m=/^\/groups\/(\d+)$/.exec(route))&&req.method==='PATCH'){
           const id=positiveInt(m[1]);const before=await studies.getGroupById(id);
           if(!before)throw appError('المجموعة غير موجودة.','NOT_FOUND',404);
-          let after=before;
-          if(body.capacity!==undefined){if(positiveInt(body.capacity)>10000)throw appError('السعة لا تتجاوز 10000 طالب.');after=await studies.setGroupCapacity(id,positiveInt(body.capacity));}
-          if(body.inviteLink!==undefined){
-            if(body.inviteLink&&!/^https:\/\/t\.me\/[A-Za-z0-9_+/?=-]+$/.test(body.inviteLink))throw appError('رابط المجموعة يجب أن يكون رابط تليجرام https://t.me/');
-            after=await studies.setGroupInviteLink(id,body.inviteLink||null);
-          }
-          if(body.active!==undefined){if(typeof body.active!=='boolean')throw appError('حالة المجموعة غير صالحة.');after=await studies.setGroupActive(id,body.active);}
-          result=after;
+          result=await studies.updateGroupSettings(id,body);
           await audit(actor.id,'update_group','group',id,before,result);
         }
         else if((m=/^\/students\/(\d+)\/stage$/.exec(route))&&req.method==='POST'){

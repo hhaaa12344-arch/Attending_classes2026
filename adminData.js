@@ -26,7 +26,7 @@ function createAdminData(db, studies) {
     const total = Number((await pool.query(`SELECT COUNT(*) AS n ${where}`,args)).rows[0].n);
     const rows = (await pool.query(`SELECT st.id,st.full_name,st.telegram_id,st.stage_id,sg.name AS stage_name,st.is_active,
       st.official_confirmed_at,
-      COALESCE((SELECT jsonb_agg(jsonb_build_object('subject',sub.name,'group',g.title,'group_id',g.id) ORDER BY sub.name)
+      COALESCE((SELECT jsonb_agg(jsonb_build_object('subject',sub.name,'group',g.title,'group_id',g.id,'group_number',g.group_number) ORDER BY sub.name)
         FROM group_memberships gm JOIN mubahatha_groups g ON g.id=gm.group_id
         JOIN subjects sub ON sub.id=gm.subject_id JOIN stage_seasons ss ON ss.id=gm.stage_season_id
         WHERE gm.student_id=st.id AND (($2::int IS NOT NULL AND ss.id=$2) OR ($2 IS NULL AND ss.is_active=true))), '[]'::jsonb) AS groups

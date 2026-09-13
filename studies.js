@@ -255,6 +255,7 @@ async function initStudiesSchema() {
     CREATE INDEX IF NOT EXISTS idx_exam_answers_attempt ON exam_answers(attempt_id);
     CREATE INDEX IF NOT EXISTS idx_reports_subject ON student_reports(subject_id, stage_season_id);
   `);
+  await require('./groupAllocation').initGroupAllocation(pool);
 }
 
 // ---------------------------------------------------------------------------
@@ -346,10 +347,29 @@ const listGroups = (subjectId, stageSeasonId) =>
     )
     .then((r) => r.rows);
 
-const setGroupCapacity = (groupId, capacity) =>
-  pool
-    .query('UPDATE mubahatha_groups SET capacity=$2 WHERE id=$1 RETURNING *', [groupId, capacity])
-    .then((r) => r.rows[0]);
+const setGroupCapacity = (groupId, capacity) => updateGroupSettings(groupId,{capacity});
+
+// Validate all fields first; a bad link must not partially change capacity.
+async function updateGroupSettings(groupId,body) {
+  positiveInt(groupId);
+  if(body.capacity!==undefined&&positiveInt(body.capacity)>10000)throw appError('السعة لا تتجاوز 10000 طالب.');
+  if(body.inviteLink!==undefined&&body.inviteLink!==null&&
+    (typeof body.inviteLink!=='string'||(body.inviteLink&&!/^https:\/\/t\.me\/[A-Za-z0-9_+/?=-]+$/.test(body.inviteLink))))throw appError('رابط المجموعة يجب أن يكون رابط تليجرام https://t.me/');
+  if(body.active!==undefined&&typeof body.active!=='boolean')throw appError('حالة المجموعة غير صالحة.');
+  const c=await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const before=(await c.query('SELECT * FROM mubahatha_groups WHERE id=$1 FOR UPDATE',[groupId])).rows[0];
+    if(!before)throw appError('المجموعة غير موجودة.','NOT_FOUND',404);
+    if(body.capacity!==undefined){
+      const n=Number((await c.query('SELECT COUNT(*) AS n FROM group_memberships WHERE group_id=$1',[groupId])).rows[0].n);
+      if(Number(body.capacity)<n)throw appError(`لا يمكن خفض السعة دون عدد الطلبة الحالي (${n}).`,'GROUP_CAPACITY');
+    }
+    const result=(await c.query(`UPDATE mubahatha_groups SET capacity=$2,invite_link=$3,is_active=$4 WHERE id=$1 RETURNING *`,
+      [groupId,body.capacity??before.capacity,body.inviteLink===undefined?before.invite_link:body.inviteLink||null,body.active??before.is_active])).rows[0];
+    await c.query('COMMIT');return result;
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+}
 
 const setGroupChatId = (groupId, chatId) =>
   pool
@@ -409,71 +429,8 @@ const getStudentGroup = (studentId, subjectId, stageSeasonId) =>
     )
     .then((r) => r.rows[0]);
 
-// يوجّه الطالب لأول مجموعة فيها متسع؛ ولو امتلأت كلها يُرجع null ليُنبَّه الأدمن بإنشاء مجموعة جديدة.
-// يُنفَّذ داخل معاملة مع قفل الصف حتى لا يتجاوز التوزيع المتزامن السعة.
-async function assignStudentToGroup(studentId, subjectId, stageSeasonId) {
-  const existing = await getStudentGroup(studentId, subjectId, stageSeasonId);
-  if (existing) return { group: existing, created: false };
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const eligible = await client.query(`SELECT 1 FROM students st JOIN enrollments e ON e.student_id=st.id
-      JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
-      JOIN subjects sub ON sub.stage_id=ss.stage_id
-      WHERE st.id=$1 AND st.is_active=true AND e.status='active' AND sub.id=$2 AND ss.id=$3`,
-    [studentId, subjectId, stageSeasonId]);
-    if (!eligible.rows[0]) throw appError('الطالب غير مسجل في هذه المادة والموسم.');
-    // قائمة المجموعات مرتبة؛ نجرّب واحدة واحدة: نقفل صف المجموعة نفسه (FOR UPDATE)
-    // ثم نعدّ أعضاءها داخل القفل. القفل على صف المجموعة يُسلسل المتسابقين على نفس المجموعة،
-    // فلا يرى اثنان العدد القديم معًا، ومن ثمّ لا تتجاوز السعة أبدًا.
-    const groups = await client.query(
-      `SELECT id, capacity FROM mubahatha_groups
-       WHERE subject_id=$1 AND stage_season_id=$2 AND is_active=true
-       ORDER BY group_number`,
-      [subjectId, stageSeasonId]
-    );
-
-    for (const g of groups.rows) {
-      // اقفل صف هذه المجموعة تحديدًا (يُسلسل كل من يحاول الانضمام إليها)
-      const locked = await client.query('SELECT * FROM mubahatha_groups WHERE id=$1 AND is_active=true FOR UPDATE', [g.id]);
-      if (!locked.rows[0]) continue;
-      const countRow = await client.query(
-        'SELECT COUNT(*)::int AS c FROM group_memberships WHERE group_id=$1',
-        [g.id]
-      );
-      if (countRow.rows[0].c < Number(locked.rows[0].capacity)) {
-        // قد يكون الطالب أُدرج في مجموعة أخرى بين الفحص الأول والقفل؛ ON CONFLICT يحميه
-        const ins = await client.query(
-          `INSERT INTO group_memberships(group_id, student_id, subject_id, stage_season_id)
-           VALUES($1,$2,$3,$4)
-           ON CONFLICT (student_id, subject_id, stage_season_id) DO NOTHING
-           RETURNING id`,
-          [g.id, studentId, subjectId, stageSeasonId]
-        );
-        await client.query('COMMIT');
-        if (ins.rows[0]) {
-          const group = await client
-            .query('SELECT * FROM mubahatha_groups WHERE id=$1', [g.id])
-            .then((r) => r.rows[0]);
-          return { group, created: true };
-        }
-        // أُدرج في مجموعة أخرى متزامنًا — نُرجع مجموعته الفعلية
-        const already = (await client.query(`SELECT g.* FROM group_memberships m JOIN mubahatha_groups g ON g.id=m.group_id
-          WHERE m.student_id=$1 AND m.subject_id=$2 AND m.stage_season_id=$3`, [studentId, subjectId, stageSeasonId])).rows[0];
-        return { group: already, created: false };
-      }
-    }
-
-    await client.query('ROLLBACK');
-    return { group: null, created: false, full: true };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-}
+// رقم موحد للطالب في جميع مواد المرحلة والموسم.
+const {assignStudentToGroup,moveStudentToGroup}=require('./groupAllocation').createGroupAllocation(pool);
 
 // ---------------------------------------------------------------------------
 // جلسات المباحثة
@@ -891,7 +848,7 @@ const listStudentSubjects = (studentId) =>
               ss.id AS stage_season_id,
               COALESCE(ss.stage_name_snapshot, sg.name) AS stage_name,
               pm.mode, pm.switched_at,
-              g.id AS group_id, g.title AS group_title, g.invite_link,
+              g.id AS group_id, g.title AS group_title, g.group_number, g.invite_link,
               (SELECT COUNT(*) FROM student_reports r
                WHERE r.student_id=$1 AND r.subject_id=sub.id AND r.stage_season_id=ss.id) AS report_count
        FROM enrollments e
@@ -1046,7 +1003,7 @@ const getInstituteExceptions = () =>
 const listStudentGroups = (studentId) =>
   pool
     .query(
-      `SELECT m.subject_id, m.stage_season_id, g.id AS group_id, g.title AS group_title,
+      `SELECT m.subject_id, m.stage_season_id, g.id AS group_id, g.title AS group_title, g.group_number,
               sub.name AS subject_name
        FROM group_memberships m
        JOIN mubahatha_groups g ON g.id=m.group_id
@@ -1059,64 +1016,21 @@ const listStudentGroups = (studentId) =>
     )
     .then((r) => r.rows);
 
-// نقل الطالب إلى مجموعة أخرى في نفس المادة: يبدأ من جديد فلا تُحسب عليه
-// جلسات المجموعة السابقة ولا تُنقل درجاتها معه.
-async function moveStudentToGroup(studentId, subjectId, stageSeasonId, newGroupId) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock($1::int,$2::int)', [studentId, subjectId]);
-    const target = await client.query(
-      `SELECT g.* FROM mubahatha_groups g WHERE g.id=$1 AND g.subject_id=$2
-         AND g.stage_season_id=$3 AND g.is_active=true FOR UPDATE`,
-      [newGroupId, subjectId, stageSeasonId]
-    );
-    const group = target.rows[0];
-    if (!group) throw new Error('المجموعة غير موجودة.');
-    const eligible = await client.query(`SELECT 1 FROM enrollments e JOIN students st ON st.id=e.student_id
-      JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
-      WHERE st.id=$1 AND st.is_active=true AND e.stage_season_id=$2 AND e.status='active'`, [studentId, stageSeasonId]);
-    if (!eligible.rows[0]) throw appError('الطالب غير مسجل في موسم المجموعة.');
-    const current = (await client.query('SELECT group_id FROM group_memberships WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3',
-      [studentId, subjectId, stageSeasonId])).rows[0];
-    if (current && current.group_id === group.id) { await client.query('COMMIT'); return group; }
-    const members = await client.query('SELECT COUNT(*)::int AS n FROM group_memberships WHERE group_id=$1', [newGroupId]);
-    if (Number(members.rows[0].n) >= Number(group.capacity)) {
-      const err = new Error('المجموعة ممتلئة.');
-      err.code = 'GROUP_FULL';
-      throw err;
-    }
-    await client.query(
-      `INSERT INTO group_memberships(group_id, student_id, subject_id, stage_season_id)
-       VALUES($1,$2,$3,$4)
-       ON CONFLICT (student_id, subject_id, stage_season_id)
-       DO UPDATE SET group_id=$1, assigned_at=now()`,
-      [newGroupId, studentId, subjectId, stageSeasonId]
-    );
-    // بداية جديدة: الجلسات السابقة لا تُحسب عليه
-    await client.query(
-      `UPDATE participation_modes SET joined_mubahatha_at=now()
-       WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3`,
-      [studentId, subjectId, stageSeasonId]
-    );
-    await client.query('COMMIT');
-    return group;
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-
 // إخراج الطالب من مجموعة المادة (يبقى مسجَّلًا في المرحلة).
-const removeStudentFromGroup = (studentId, subjectId, stageSeasonId) =>
-  pool
-    .query(
-      'DELETE FROM group_memberships WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3 RETURNING id',
-      [studentId, subjectId, stageSeasonId]
-    )
-    .then((r) => r.rowCount > 0);
+async function removeStudentFromGroup(studentId, subjectId, stageSeasonId) {
+  const c=await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query('SELECT id FROM students WHERE id=$1 FOR UPDATE',[studentId]);
+    // Capture a consistent legacy cohort before its last membership is removed.
+    await c.query(`INSERT INTO student_group_numbers(student_id,stage_season_id,group_number)
+      SELECT $1,$2,MIN(g.group_number) FROM group_memberships m JOIN mubahatha_groups g ON g.id=m.group_id
+      WHERE m.student_id=$1 AND m.stage_season_id=$2 HAVING COUNT(DISTINCT g.group_number)=1
+      ON CONFLICT(student_id,stage_season_id) DO NOTHING`,[studentId,stageSeasonId]);
+    const result=await c.query('DELETE FROM group_memberships WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3 RETURNING id',[studentId,subjectId,stageSeasonId]);
+    await c.query('COMMIT');return result.rowCount>0;
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+}
 
 // تصفير سجل الطالب الدراسي في موسم مرحلة معيّنة: يُستخدم عند نقله لمرحلة أخرى
 // كي ينتقل بلا أي درجات (لا مجموعات ولا حضور مباحثات ولا محاولات امتحان ولا درجات نهائية).
@@ -1124,6 +1038,7 @@ async function resetStudentStudies(studentId, stageSeasonId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query('SELECT id FROM students WHERE id=$1 FOR UPDATE',[studentId]);
     await client.query(
       `DELETE FROM mubahatha_attendance a
        USING mubahatha_sessions s, mubahatha_groups g
@@ -1137,6 +1052,7 @@ async function resetStudentStudies(studentId, stageSeasonId) {
       [studentId, stageSeasonId]
     );
     await client.query('DELETE FROM group_memberships WHERE student_id=$1 AND stage_season_id=$2', [studentId, stageSeasonId]);
+    await client.query('DELETE FROM student_group_numbers WHERE student_id=$1 AND stage_season_id=$2', [studentId, stageSeasonId]);
     await client.query('DELETE FROM participation_modes WHERE student_id=$1 AND stage_season_id=$2', [studentId, stageSeasonId]);
     await client.query('DELETE FROM student_reports WHERE student_id=$1 AND stage_season_id=$2', [studentId, stageSeasonId]);
     await client.query('DELETE FROM final_grades WHERE student_id=$1 AND stage_season_id=$2', [studentId, stageSeasonId]);
@@ -1782,6 +1698,7 @@ module.exports = {
   listGroups,
   getGroupById,
   setGroupCapacity,
+  updateGroupSettings,
   setGroupInviteLink,
   setGroupActive,
   setGroupChatId,

@@ -1142,7 +1142,7 @@ bot.on(['document', 'photo'], async (ctx, next) => {
     : msg.photo[msg.photo.length - 1].file_id; // أعلى دقة متاحة
   const kind = msg.document ? 'document' : 'photo';
   const assignment=await studies.assignStudentToGroup(student.id,state.subjectId,state.ssId);
-  if(!assignment.group)return ctx.reply('لا توجد مجموعة متاحة لهذه المادة. راجع الإدارة ثم أعد إرسال التقرير.');
+  if(!assignment.group)return ctx.reply(assignment.message+' ثم أعد إرسال التقرير.');
   const report=await studies.submitReport(student.id, state.subjectId, state.ssId, {
     fileId,
     kind,
@@ -1520,7 +1520,7 @@ bot.on('text', async (ctx, next) => {
       return ctx.reply('التقرير النصي قصير جدًا. أرسل نصًا أوفى أو أرسل ملفًا.');
     }
     const assignment=await studies.assignStudentToGroup(student.id,state.subjectId,state.ssId);
-    if(!assignment.group)return ctx.reply('لا توجد مجموعة متاحة لهذه المادة. راجع الإدارة ثم أعد إرسال التقرير.');
+    if(!assignment.group)return ctx.reply(assignment.message+' ثم أعد إرسال التقرير.');
     const report=await studies.submitReport(student.id, state.subjectId, state.ssId, {
       fileId: null,
       kind: 'text',
@@ -3887,7 +3887,7 @@ bot.action(/stu_movegrp:(\d+)/, async (ctx) => {
   const memberships = await studies.listStudentGroups(studentId);
   if (memberships.length === 0) return ctx.reply('هذا الطالب ليس عضوًا في أي مجموعة مباحثة.');
   return ctx.reply(
-    `اختر المادة التي تريد نقله في مجموعتها:\nالطالب: ${student.full_name}`,
+    `اختر مادة لتحديد رقم المجموعة الجديد في جميع مواد الطالب لهذا الموسم:\nالطالب: ${student.full_name}`,
     Markup.inlineKeyboard(
       memberships.map((m) => [
         callbackButton(
@@ -3907,7 +3907,7 @@ bot.action(/stu_mgsubj:(\d+):(\d+):(\d+)/, async (ctx) => {
   const available = groups.filter((g) => Number(g.member_count) < Number(g.capacity));
   if (available.length === 0) return ctx.reply('لا توجد مجموعة فيها متسع. أنشئ مجموعة جديدة أولًا.');
   return ctx.reply(
-    'اختر المجموعة الجديدة (سيبدأ فيها من جديد بلا احتساب جلسات مجموعته السابقة):',
+    'اختر الرقم الجديد: سيُوحّد في جميع مواد الطالب بهذا الموسم بعد التحقق من السعة. تبدأ أهلية الحضور من وقت النقل في المجموعات المتغيرة وتبقى التقارير السابقة محفوظة.',
     Markup.inlineKeyboard(
       available.map((g) => [
         callbackButton(
@@ -3926,7 +3926,7 @@ bot.action(/stu_mgdo:(\d+):(\d+):(\d+):(\d+)/, async (ctx) => {
     const group = await studies.moveStudentToGroup(studentId, subjectId, ssId, groupId);
     await ctx.answerCbQuery('تم النقل ✅');
     return ctx.editMessageText(
-      `✅ نُقل الطالب إلى «${group.title}».\nيبدأ فيها من جديد، ولا تُحسب عليه جلسات مجموعته السابقة.`
+      `✅ وُحّد رقم مجموعة الطالب إلى ${group.group_number} في جميع مواده بهذا الموسم.\nتغيّرت ${group.moved_subject_ids.length} مادة، وبقيت التقارير السابقة محفوظة.`
     );
   } catch (err) {
     return ctx.answerCbQuery(`تعذر النقل: ${err.message}`, { show_alert: true });
@@ -4220,7 +4220,7 @@ bot.action(/pm_set:(\d+):(\d+):(mubahatha|report)/, async (ctx) => {
     const assigned=await studies.assignStudentToGroup(student.id,subjectId,ssId);
     return ctx.editMessageText(
       `📄 اخترت نظام التقارير في «${row.subject_name}».\n` +
-        (assigned.group?`المجموعة: ${assigned.group.title}\n`:'بانتظار توفير مجموعة لهذه المادة قبل تسليم التقارير.\n')+
+        (assigned.group?`المجموعة: ${assigned.group.title}\n`:assigned.message+'\n')+
         'أرسل تقاريرك من «📖 مشاركتي» ← المادة ← «إرسال تقرير».\n' +
         'وأنت مشمول بالامتحانات الشهرية كبقية الطلبة.'
     );
@@ -4238,13 +4238,8 @@ async function joinMubahathaGroup(ctx, student, subjectId, ssId) {
   }
   const result = await studies.assignStudentToGroup(student.id, subjectId, ssId);
   if (!result.group) {
-    await notifyAdmins(
-      `⚠️ امتلأت كل مجموعات المباحثة لإحدى المواد، والطالب «${student.full_name}» ينتظر التوزيع.\n` +
-        'أنشئ مجموعة جديدة من «👥 المجموعات».'
-    );
-    return ctx.reply(
-      'مجموعات هذه المادة ممتلئة حاليًا. أُبلغت الإدارة، وسيصلك رابط مجموعتك فور إنشاء مجموعة جديدة.'
-    );
+    await notifyAdmins(`⚠️ تعذر توزيع الطالب «${student.full_name}» في المادة رقم ${subjectId}، موسم المرحلة رقم ${ssId}.\n${result.message}`);
+    return ctx.reply(result.message+' أُبلغت الإدارة؛ أعد المحاولة من «مشاركتي» بعد توفير المجموعة.');
   }
   const group = result.group;
   if (!group.invite_link) {
