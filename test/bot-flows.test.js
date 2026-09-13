@@ -8,7 +8,7 @@ Telegram.prototype.callApi=async function(method,payload){messages.push({method,
 const {testDatabase}=require('./helpers.cjs');
 let db,studies,app,stage,student,ss,subject;
 test.before(async()=>{
-  ({db,studies}=await testDatabase());stage=await db.addStage('المرحلة التمهيدية');ss=(await db.listStageSeasons(stage.id))[0].id;subject=await db.addSubject(stage.id,'الفقه','فقه');
+  ({db,studies}=await testDatabase());await require('../backups').initBackupSchema(db.pool);stage=await db.addStage('المرحلة التمهيدية');ss=(await db.listStageSeasons(stage.id))[0].id;subject=await db.addSubject(stage.id,'الفقه','فقه');
   student=await db.createStudent(90000,'طالب حقيقي أول ثاني',stage.id);app=require('../index');
   app.bot.botInfo={id:12345,is_bot:true,username:'AttendanceTestBot',first_name:'test'};
 });
@@ -60,4 +60,21 @@ test('bot: both current and old export buttons return Markdown documents',async(
     await send(42,'',`${prefix}:${ss}:lessons`);
     const doc=messages.find(m=>m.method==='sendDocument');assert.ok(doc);assert.equal(doc.document.filename,`attendance-${ss}-lessons.md`);
   }
+});
+
+test('bot: backup menu is private/admin-only, works during an input step, and preview cannot access it',async()=>{
+  await send(42,'🔗 ربط قناة بمرحلة');
+  await send(42,'💾 النسخ الاحتياطية');
+  assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='backup:enable')));
+  assert.ok(!messages.some(m=>m.text?.includes('لم أتعرف على قناة')));
+  await send(90000,'','backup:download');
+  assert.ok(!messages.some(m=>m.method==='sendDocument'));
+  await send(90000,'','backup:enable_confirm');
+  assert.equal((await db.pool.query('SELECT enabled FROM backup_control')).rows[0].enabled,false);
+  app.previewMode.set(42,{role:'student',id:student.id,name:student.full_name});
+  await send(42,'','backup:enable_confirm');
+  assert.equal((await db.pool.query('SELECT enabled FROM backup_control')).rows[0].enabled,false);
+  app.previewMode.delete(42);
+  await send(42,'↩️ رجوع');
+  assert.ok(messages.some(m=>m.reply_markup?.keyboard?.flat().some(b=>(b.text||b)==='💾 النسخ الاحتياطية')));
 });

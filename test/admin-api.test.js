@@ -50,9 +50,9 @@ test('admin HTTP: independent groups, teacher assignment, conflict rejection and
   assert.equal((await request('/students/'+student.id+'/group',{groupId:group.id})).status,200);
   const other=await db.addTeacher('أستاذ آخر');await request('/assignments',{teacherId:other.id,subjectId:subject.id});
   const detail=await (await request('/stages/'+stage.id)).json();assert.equal(detail.subjects.length,1);assert.equal(detail.subjects[0].teachers.length,2);
-  response=await request('/schedule',{groupId:group.id,teacherId:teacher.id,dayOfWeek:6,hour:23,minute:40});assert.equal(response.status,200);const slot=(await response.json()).slot;
+  response=await request('/schedule',{groupId:group.id,teacherId:teacher.id,dayOfWeek:6,hour:20,minute:40});assert.equal(response.status,200);const slot=(await response.json()).slot;
   const second=await studies.createMubahathaGroup(subject.id,ss,{title:'الثانية'});
-  assert.equal((await request('/schedule',{groupId:second.id,teacherId:teacher.id,dayOfWeek:0,hour:0,minute:10})).status,409,'cross-week midnight overlap');
+  assert.equal((await request('/schedule',{groupId:second.id,teacherId:teacher.id,dayOfWeek:6,hour:21,minute:10})).status,409,'same-teacher overlap across groups');
   assert.equal((await request('/schedule/'+slot.id+'/remove',{})).status,200);
   assert.equal((await db.pool.query('SELECT is_active FROM schedule_slots WHERE id=$1',[slot.id])).rows[0].is_active,false);
 });

@@ -10,6 +10,7 @@ async function setup({authorized=true}={}){
   w.fetch=async(url,options={})=>{
     requests.push({url,options});const u=new URL(url,'https://institute.example');let data,status=200;
     if(u.pathname.endsWith('/auth'))data={token:'a'.repeat(64),user:{name:'إدارة الاختبار'}};
+    else if(u.pathname.endsWith('/seasons'))data=[{id:1,name:'الموسم الأول',is_current:true}];
     else if(u.pathname.endsWith('/stages'))data=[stage];else if(u.pathname.endsWith('/stages/1'))data=stage;
     else if(u.pathname.endsWith('/students/1')){
       if(options.method==='PATCH'){data={error:'أدخل اسمًا رباعيًا'};status=400;}
@@ -62,14 +63,14 @@ test('admin matrix: empty day can add a slot; exact minutes, conflict and remova
     await until(()=>w.document.querySelector('.stage-card'));
     click('[data-action="schedule-matrix"]');
     await until(()=>w.document.querySelector('[data-action="matrix-add"]'));
-    assert.equal(w.document.querySelectorAll('table.matrix thead th').length,25);
-    click('[data-action="matrix-add"][data-hour="10"]');
+    assert.equal(w.document.querySelectorAll('table.matrix thead th').length,9);
+    click('[data-action="matrix-add"][data-hour="17"]');
     w.document.querySelector('#matrix-slot [name="minute"]').value='30';
     w.document.querySelector('#matrix-slot').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
     await until(()=>w.document.querySelector('[data-action="matrix-remove"]'));
     await until(()=>w.document.querySelector('#notice').textContent.includes('حُفظ موعد المباحثة'));
-    assert.match(w.document.querySelector('[data-action="matrix-remove"]').textContent,/10:30/);
-    click('[data-action="matrix-add"][data-hour="11"]');
+    assert.match(w.document.querySelector('[data-action="matrix-remove"]').textContent,/17:30/);
+    click('[data-action="matrix-add"][data-hour="18"]');
     w.document.querySelector('#matrix-slot [name="minute"]').value='59';
     w.document.querySelector('#matrix-slot').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
     await until(()=>w.document.querySelector('#dialog-notice').textContent.includes('يتداخل'));
