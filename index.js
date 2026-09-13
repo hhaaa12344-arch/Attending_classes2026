@@ -54,6 +54,10 @@ if (ADMIN_IDS.length === 0) {
 }
 
 const bot = new Telegraf(BOT_TOKEN);
+// Dedicated sender keeps backups outside automatic UI message cleanup.
+const { BUTTON: BACKUP_BUTTON, initBackupSchema, createBackups } = require('./backups');
+const backupTelegram = require('./backups').boundedTelegram(new (require('telegraf').Telegram)(BOT_TOKEN));
+const backups = createBackups({pool:db.pool,telegram:backupTelegram,adminIds:ADMIN_IDS});
 bot.use(require('./updateGate').createUpdateGate());
 
 // طابور إرسال عام ينظّم معدّل الرسائل ويعالج 429؛ يُستعمل للبث الجماعي.
@@ -191,6 +195,7 @@ const TEACHER_MENU_BUTTONS = new Set([
 ]);
 
 const ADMIN_MENU_BUTTONS = new Set([
+  BACKUP_BUTTON,
   '⚙️ إدارة روابط المعهد',
   '➕ إضافة مرحلة دراسية',
   '➕ إضافة مادة',
@@ -370,7 +375,7 @@ function adminMainMenu() {
     ['✏️ تحرير الدرجات', '📄 تقارير الطلبة'],
     ['🔗 روابط المجموعات'],
     ['🖥️ لوحة الإدارة'],
-    ['⚙️ إدارة روابط المعهد'],
+    ['⚙️ إدارة روابط المعهد', BACKUP_BUTTON],
     [BACK_BUTTON, '❌ إلغاء العملية'],
   ];
   return Markup.keyboard(rows.map((row) => row.map((text) => replyButton(text)))).resize().persistent();
@@ -1022,6 +1027,8 @@ async function requireOfficialConfirmation(ctx, next) {
   await sendOfficialConfirmationPrompt(ctx);
   return undefined;
 }
+
+backups.install({bot,isAdmin,isInPreview,userState});
 
 bot.on('text', requireOfficialConfirmation);
 bot.on('callback_query', requireOfficialConfirmation);
@@ -5124,6 +5131,8 @@ async function main() {
   await studies.initStudiesSchema();
   await initIntegritySchema(db.pool);
   await instituteLinks.initSchema();
+  await initBackupSchema(db.pool);
+  backups.start();
   console.log('تم تجهيز قاعدة البيانات ✅');
   if(process.env.ADMIN_WEB_ENABLED==='true') {
     adminServer=await require('./adminServer').startAdminServer({db,studies,adminData,scheduler,botToken:BOT_TOKEN,adminIds:ADMIN_IDS});
@@ -5168,6 +5177,7 @@ async function gracefulShutdown(signal) {
   console.log(`استلام ${signal}: إغلاق منظم...`);
   for (const t of timers) clearInterval(t);
   outboxWorker.stop();
+  await backups.stop();
   tgQueue.stop();
   if(adminServer) await new Promise(resolve=>adminServer.close(resolve));
   try {
