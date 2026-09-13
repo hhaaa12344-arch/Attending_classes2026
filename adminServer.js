@@ -69,7 +69,8 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         }
         else if(route==='/exams')result=(await db.pool.query(`SELECT e.*,sub.name AS subject_name FROM exams e JOIN subjects sub ON sub.id=e.subject_id
           WHERE e.stage_season_id=$1 ORDER BY sub.name,e.exam_number`,[positiveInt(q.seasonId)])).rows;
-        else if(route==='/teachers')result=(await db.listTeachers()).map(t=>({id:t.id,full_name:t.full_name,is_active:t.is_active,linked:Boolean(t.telegram_id)}));
+        else if(route==='/teachers')result=(await db.listTeachers()).map(t=>({id:t.id,full_name:t.full_name,phone:t.phone,is_active:t.is_active,linked:Boolean(t.telegram_id),linked_at:t.linked_at,active_subject_count:Number(t.active_subject_count),link_code:t.telegram_id?null:t.link_code}));
+        else if(/^\/teachers\/\d+\/subjects$/.test(route))result=await db.listTeacherSubjects(positiveInt(route.split('/')[2]));
         else if(route==='/audit'){const p=pageOptions(q.page||0,25);result=(await db.pool.query('SELECT * FROM admin_audit_log ORDER BY id DESC LIMIT $1 OFFSET $2',[p.size,p.offset])).rows;}
         else if(route==='/notifications')result=(await db.pool.query('SELECT status,COUNT(*) AS count FROM notification_outbox GROUP BY status')).rows;
         else if(route==='/attendance.md'||route==='/attendance.csv'){
@@ -83,6 +84,47 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
       } else if(req.method==='POST'||req.method==='PATCH') {
         const body=await readJson(req);let m;
         if((m=/^\/students\/(\d+)$/.exec(route))&&req.method==='PATCH')result=await adminData.updateStudent(positiveInt(m[1]),body,actor.id);
+        else if(route==='/teachers'&&req.method==='POST'){
+          if(typeof body.fullName!=='string'||body.fullName.trim().length<3||body.fullName.length>200)throw appError('اسم الأستاذ غير صالح.');
+          if(body.phone&&(typeof body.phone!=='string'||body.phone.length>30))throw appError('رقم الهاتف غير صالح.');
+          result=await db.addTeacher(body.fullName.trim(),body.phone?.trim()||null);
+          await audit(actor.id,'create_teacher','teacher',result.id,null,{full_name:result.full_name});
+        }
+        else if((m=/^\/teachers\/(\d+)$/.exec(route))&&req.method==='PATCH'){
+          const id=positiveInt(m[1]);const before=await db.getTeacherById(id);
+          if(!before)throw appError('الأستاذ غير موجود.','NOT_FOUND',404);
+          if(typeof body.fullName!=='string'||body.fullName.trim().length<3||body.fullName.length>200)throw appError('اسم الأستاذ غير صالح.');
+          result=await db.updateTeacherName(id,body.fullName.trim());
+          await audit(actor.id,'update_teacher','teacher',id,{full_name:before.full_name},{full_name:result.full_name});
+        }
+        else if((m=/^\/teachers\/(\d+)\/toggle$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]);if(typeof body.active!=='boolean')throw appError('الحالة غير صالحة.');
+          const before=await db.getTeacherById(id);if(!before)throw appError('الأستاذ غير موجود.','NOT_FOUND',404);
+          result=await db.setTeacherActive(id,body.active);
+          await audit(actor.id,'toggle_teacher','teacher',id,{is_active:before.is_active},{is_active:result.is_active});
+        }
+        else if((m=/^\/teachers\/(\d+)\/regenerate-code$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]);const before=await db.getTeacherById(id);if(!before)throw appError('الأستاذ غير موجود.','NOT_FOUND',404);
+          const updated=await db.regenerateTeacherCode(id);result={id:updated.id,link_code:updated.link_code};
+          await audit(actor.id,'regenerate_code','teacher',id,null,{regenerated:true});
+        }
+        else if((m=/^\/assignments\/(\d+)\/remove$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]);result={removed:await db.unassignTeacherFromSubject(id)};
+          if(result.removed)await audit(actor.id,'unassign_teacher','assignment',id,null,result);
+        }
+        else if((m=/^\/groups\/(\d+)$/.exec(route))&&req.method==='PATCH'){
+          const id=positiveInt(m[1]);const before=await studies.getGroupById(id);
+          if(!before)throw appError('المجموعة غير موجودة.','NOT_FOUND',404);
+          let after=before;
+          if(body.capacity!==undefined){if(positiveInt(body.capacity)>10000)throw appError('السعة لا تتجاوز 10000 طالب.');after=await studies.setGroupCapacity(id,positiveInt(body.capacity));}
+          if(body.inviteLink!==undefined){
+            if(body.inviteLink&&!/^https:\/\/t\.me\/[A-Za-z0-9_+/?=-]+$/.test(body.inviteLink))throw appError('رابط المجموعة يجب أن يكون رابط تليجرام https://t.me/');
+            after=await studies.setGroupInviteLink(id,body.inviteLink||null);
+          }
+          if(body.active!==undefined){if(typeof body.active!=='boolean')throw appError('حالة المجموعة غير صالحة.');after=await studies.setGroupActive(id,body.active);}
+          result=after;
+          await audit(actor.id,'update_group','group',id,before,result);
+        }
         else if((m=/^\/students\/(\d+)\/stage$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]),stageId=positiveInt(body.stageId);const before=await db.getStudentById(id);
           await db.updateStudentStage(id,stageId);result={id,stageId};

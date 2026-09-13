@@ -393,6 +393,12 @@ const setGroupInviteLink = (groupId, inviteLink) =>
     .query('UPDATE mubahatha_groups SET invite_link=$2 WHERE id=$1 RETURNING *', [groupId, inviteLink])
     .then((r) => r.rows[0]);
 
+// تعطيل/إعادة تفعيل مجموعة مباحثة دون حذف سجلاتها (حضور، مواعيد، تقارير).
+const setGroupActive = (groupId, active) =>
+  pool
+    .query('UPDATE mubahatha_groups SET is_active=$2 WHERE id=$1 RETURNING *', [groupId, active])
+    .then((r) => r.rows[0]);
+
 const getStudentGroup = (studentId, subjectId, stageSeasonId) =>
   pool
     .query(
@@ -1777,6 +1783,7 @@ module.exports = {
   getGroupById,
   setGroupCapacity,
   setGroupInviteLink,
+  setGroupActive,
   setGroupChatId,
   listPreviousSeasonGroups,
   listUnassignedMubahathaStudents,
