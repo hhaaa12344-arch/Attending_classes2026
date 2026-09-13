@@ -95,7 +95,7 @@ bot.use(async (ctx, next) => {
   // from a different role. New write handlers cannot accidentally bypass a denylist.
   const previewReads = new Set(['pv_exit','menu_today','menu_report','pm_subj','sr_subj','sr_group','sr_page','sr_stu',
     'gr_subj','gr_page','gr_stu','teacher_att','tg_subj','tg_group','ts_subj','ts_group','ex_subj','ex_view',
-    'stex_list','rep_subj','noop','noop_activity','il_view']);
+    'stex_list','rep_subj','noop','noop_activity','il_view','student_grades','student_report_marks']);
   if (ctx.callbackQuery?.data && !previewReads.has(ctx.callbackQuery.data.split(':')[0])) {
     return ctx.answerCbQuery('👁️ المعاينة للقراءة فقط؛ اخرج منها لإجراء تعديلات.',{show_alert:true});
   }
@@ -168,6 +168,7 @@ const STUDENT_MENU_BUTTONS = new Set([
   '🗓️ جدولي',
   '📝 الامتحانات الشهرية',
   '🎯 درجات - المباحثات',
+  '🎯 درجات المباحثات والتقارير',
   '📖 مشاركتي',
   '📄 إرسال تقرير',
   STUDENT_ACTIVITY_BUTTON,
@@ -307,7 +308,7 @@ function studentMainMenu(student = null) {
   ];
   if (!lessonsOnly) {
     rows.push([replyButton('🗓️ جدولي'), replyButton('📝 الامتحانات الشهرية')]);
-    rows.push([replyButton('🎯 درجات - المباحثات'), replyButton('📖 مشاركتي')]);
+    rows.push([replyButton('🎯 درجات المباحثات والتقارير'), replyButton('📖 مشاركتي')]);
     rows.push([replyButton('📄 إرسال تقرير')]);
   }
   rows.push([replyButton('🔗 روابط المعهد')]);
@@ -1561,9 +1562,9 @@ bot.on('text', async (ctx, next) => {
     const summary = await studies.getReportGradingSummary(state.studentId, state.subjectId, state.ssId);
     userState.delete(ctx.from.id);
     return ctx.reply(
-      `✅ قُيّم التقرير بـ${score}.\n` +
-        `مُقيَّم: ${Number(summary.graded)} من ${Number(summary.total)} | المعدل: ${Number(summary.average)}\n` +
-        'يمكنك تقييم البقية لاحقًا ثم اعتماد المعدل درجةً نهائية.',
+      `✅ حُفظ تقييم هذا التقرير: ${score} من ${max}.\n` +
+        `التقارير المُقيَّمة: ${Number(summary.graded)} من ${Number(summary.total)} | متوسط التقييمات: ${Number(summary.average)} من ${max}\n` +
+        'لحفظ هذا المتوسط في سجل درجات الطالب، افتح قائمة تقييم تقاريره واضغط «حفظ متوسط التقييمات كدرجة التقارير». تقييم التقرير وحده لا يحدّث درجة التقارير المعتمدة.',
       isAdmin(ctx) ? adminMainMenu() : teacherMainMenu()
     );
   }
@@ -4001,35 +4002,81 @@ bot.on('my_chat_member', async (ctx) => {
 // ---------------------------------------------------------------------------
 // الطالب — درجاته المحفوظة عبر كل المواسم
 // ---------------------------------------------------------------------------
-bot.hears('🎯 درجات - المباحثات', async (ctx) => {
+async function showStudentGrades(ctx, page = 0) {
+  if (ctx.chat?.type !== 'private') return;
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
-  const grades = await studies.getStudentFinalGrades(student.id);
-  if (grades.length === 0) {
-    return ctx.reply('لم تُعتمد درجاتك بعد. تظهر هنا بعد أن يعتمد الأستاذ درجات الموسم.');
-  }
-  const bySeason = new Map();
+  const grades = await studies.listStudentGradeOverview(student.id,{page,size:5});
+  const max = studies.GRADE_WEIGHTS.participationTotal;
+  const parts = [], buttons = [];
   for (const g of grades) {
-    const key = `${g.season_name} — ${g.stage_name}`;
-    if (!bySeason.has(key)) bySeason.set(key, []);
-    bySeason.get(key).push(g);
+    let text = `📘 ${limitButtonText(g.subject_name,65)}\n${limitButtonText(g.stage_name,65)} — ${limitButtonText(g.season_name,65)}`;
+    if (Number(g.report_count) || g.mode === 'report' || Number(g.report_score) > 0) {
+      text += `\n📄 التقارير المُقيَّمة: ${Number(g.graded_count)} من ${Number(g.report_count)}`;
+      text += `\nمتوسط تقييمات التقارير: ${g.report_average === null ? 'لم تُقيَّم بعد' : `${Number(g.report_average)} من ${max}`}`;
+      text += `\nدرجة التقارير المحفوظة: ${g.report_score === null ? 'لم تُحفظ بعد' : `${Number(g.report_score)} من ${max}`}`;
+      if (Number(g.report_count)) buttons.push([callbackButton(
+        limitButtonText(`📄 تقييمات تقاريري — ${g.subject_name} — ${g.season_name}`,60),
+        `student_report_marks:${g.subject_id}:${g.stage_season_id}:0:${page}`)]);
+    }
+    if (g.finalized_at || g.edited_at) {
+      text += `\n🗣️ درجة المباحثات المحسوبة: ${Number(g.mubahatha_score)} من ${max}`;
+      text += `\nدرجة المشاركة المعتمدة (المباحثات والتقارير): ${Number(g.participation_score)} من ${max}`;
+      text += `\nالامتحانات الشهرية: ${Number(g.exams_score)} من ${studies.GRADE_WEIGHTS.examsTotal}`;
+      text += `\nالمجموع المعتمد: ${Number(g.total_score)} من ${max + studies.GRADE_WEIGHTS.examsTotal}`;
+    } else {
+      text += '\nلم تُعتمد درجات الموسم النهائية بعد.';
+    }
+    parts.push(text);
   }
-  const parts = [];
-  for (const [season, rows] of bySeason) {
-    const lines = rows.map(
-      (g) =>
-        `  • ${g.subject_name}: ${Number(g.total_score)} من ${
-          studies.GRADE_WEIGHTS.examsTotal + studies.GRADE_WEIGHTS.participationTotal
-        }\n` +
-        `     الامتحانات الشهرية: ${Number(g.exams_score)} من ${studies.GRADE_WEIGHTS.examsTotal}` +
-        ` | ${g.mode === 'report' ? 'التقارير' : 'المباحثات'}: ${Number(g.participation_score)} من ${
-          studies.GRADE_WEIGHTS.participationTotal
-        }`
-    );
-    parts.push(`📘 ${season}\n${lines.join('\n')}`);
+  const nav = [];
+  if (page > 0) nav.push(callbackButton('السابق',`student_grades:${page-1}`));
+  if ((page+1)*5 < Number(grades[0]?.total_count || 0)) nav.push(callbackButton('التالي',`student_grades:${page+1}`));
+  if (nav.length) buttons.push(nav);
+  const text = `🎯 درجات المباحثات والتقارير — الصفحة ${page+1}\n\n` +
+    (parts.length ? parts.join('\n\n') + '\n\nمتوسط التقييمات يتغيّر مع تقييم التقارير؛ درجة التقارير المحفوظة يحدّثها الأستاذ بصورة مستقلة.' : 'لا توجد سجلات في هذه الصفحة بعد.');
+  return renderStudentGrades(ctx,student,text,buttons);
+}
+
+async function renderStudentGrades(ctx,student,text,buttons) {
+  const extra = Markup.inlineKeyboard(buttons);
+  if (ctx.callbackQuery) {
+    await ctx.answerCbQuery();
+    try { return await ctx.editMessageText(text,extra); }
+    catch (err) { if (String(err.description || err.message).includes('message is not modified')) return; throw err; }
   }
-  return ctx.reply(`🎯 درجاتك:\n\n${parts.join('\n\n')}`);
+  return replyStudentScreen(ctx,student,text,extra);
+}
+
+// Keep old reply keyboards working after the label changes.
+bot.hears(['🎯 درجات - المباحثات','🎯 درجات المباحثات والتقارير'],ctx=>showStudentGrades(ctx));
+bot.action(/^student_grades:(\d{1,5})$/,ctx=>showStudentGrades(ctx,Number(ctx.match[1])));
+bot.action(/^student_report_marks:(\d+):(\d+):(\d{1,5}):(\d{1,5})$/,async ctx=>{
+  if (ctx.chat?.type !== 'private') return ctx.answerCbQuery('افتح درجاتك في المحادثة الخاصة.');
+  const student = await effectiveStudent(ctx);
+  if (!student || !stageSupportsStudies(student)) return ctx.answerCbQuery('غير متاح.');
+  const [,subjectId,stageSeasonId,page,returnPage] = ctx.match.map(Number);
+  // The student id always comes from the authenticated actor, never callback data.
+  const [overview] = await studies.listStudentGradeOverview(student.id,{subjectId,stageSeasonId});
+  if (!overview || !Number(overview.report_count)) return ctx.answerCbQuery('لا توجد تقارير لك في هذه المادة والموسم.');
+  const reports = await studies.listStudentReports(student.id,subjectId,stageSeasonId,{page,size:10});
+  const max = studies.GRADE_WEIGHTS.participationTotal;
+  const lines = reports.map((r,i)=>{
+    const stamp = new Date(r.submitted_at).toLocaleString('en-GB',{timeZone:ATTENDANCE_TIME_ZONE});
+    return `${page*10+i+1}. ${stamp}\n${r.score === null ? '⏳ بانتظار تقييم الأستاذ' : `✅ التقييم: ${Number(r.score)} من ${max}`}`;
+  });
+  const nav = [], buttons = [];
+  if (page) nav.push(callbackButton('السابق',`student_report_marks:${subjectId}:${stageSeasonId}:${page-1}:${returnPage}`));
+  if ((page+1)*10 < Number(overview.report_count)) nav.push(callbackButton('التالي',`student_report_marks:${subjectId}:${stageSeasonId}:${page+1}:${returnPage}`));
+  if (nav.length) buttons.push(nav);
+  buttons.push([callbackButton('↩️ درجات المباحثات والتقارير',`student_grades:${returnPage}`)]);
+  return renderStudentGrades(ctx,student,
+    `📄 تقييمات تقاريري — ${limitButtonText(overview.subject_name,65)}\n${limitButtonText(overview.stage_name,65)} — ${limitButtonText(overview.season_name,65)}\n` +
+    `الصفحة ${page+1} | أوقات التسليم: ${ATTENDANCE_TIME_ZONE}\n\n` +
+    (lines.join('\n\n') || 'لا توجد تقارير في هذه الصفحة.') +
+    `\n\nمتوسط التقييمات: ${overview.report_average === null ? 'لم تُقيَّم بعد' : `${Number(overview.report_average)} من ${max}`}\n` +
+    `درجة التقارير المحفوظة: ${overview.report_score === null ? 'لم تُحفظ بعد' : `${Number(overview.report_score)} من ${max}`}`,buttons);
 });
 
 // ---------------------------------------------------------------------------
@@ -4700,9 +4747,9 @@ bot.action(/^sr_stu:(\d+):(\d+):(\d+)(?::(\d+):(\d+))?$/, async (ctx) => {
   const rows = reports
     .map((r) => [
       callbackButton(
-        `${r.score === null ? '⏳' : `✅ ${Number(r.score)}`} تقرير ${new Date(r.submitted_at)
+        `${r.score === null ? '📝' : '✅'} تقييم هذا التقرير — ${new Date(r.submitted_at)
           .toISOString()
-          .slice(0, 10)}`,
+          .slice(0, 10)}${r.score === null ? '' : ` (${Number(r.score)}/${studies.GRADE_WEIGHTS.participationTotal})`}`,
         `sr_item:${r.id}:${studentId}:${subjectId}:${ssId}`
       ),
     ]);
@@ -4712,18 +4759,20 @@ bot.action(/^sr_stu:(\d+):(\d+):(\d+)(?::(\d+):(\d+))?$/, async (ctx) => {
   if(nav.length)rows.push(nav);
   rows.push([
     callbackButton(
-      `📊 اعتماد المعدل كدرجة نهائية (${summary.average === null ? '—' : Number(summary.average)})`,
+      `📊 حفظ متوسط التقييمات كدرجة التقارير (${summary.average === null ? '—' : Number(summary.average)}/${studies.GRADE_WEIGHTS.participationTotal})`,
       `sr_apply:${studentId}:${subjectId}:${ssId}`
     ),
   ]);
   rows.push([
-    callbackButton('✍️ إدخال الدرجة النهائية يدويًا', `sr_manual:${studentId}:${subjectId}:${ssId}`),
+    callbackButton('✍️ تحديد درجة التقارير يدويًا', `sr_manual:${studentId}:${subjectId}:${ssId}`),
   ]);
   return ctx.reply(
     `تقييم تقارير «${student ? student.full_name : ''}»:\n` +
-      `مُقيَّم: ${Number(summary.graded)} من ${Number(summary.total)}` +
-      `${summary.average === null ? '' : ` | المعدل: ${Number(summary.average)}`}\n\n` +
-      'قيّم كل تقرير حين يصلك، ثم اعتمد المعدل درجةً نهائية متى شئت.',
+      `التقارير المُقيَّمة: ${Number(summary.graded)} من ${Number(summary.total)}` +
+      `${summary.average === null ? '' : ` | متوسط التقييمات: ${Number(summary.average)} من ${studies.GRADE_WEIGHTS.participationTotal}`}\n\n` +
+      'اضغط «تقييم هذا التقرير» لإعطائه درجة أو تعديل تقييمه السابق.\n' +
+      `«حفظ متوسط التقييمات كدرجة التقارير» يسجّل متوسط التقارير المُقيَّمة فقط، من ${studies.GRADE_WEIGHTS.participationTotal}، في خانة درجة التقارير لهذه المادة وهذا الموسم. التقارير غير المُقيَّمة لا تدخل في الحساب.\n` +
+      'ويمكنك اختيار «تحديد درجة التقارير يدويًا» لإدخال الدرجة التي تريد حفظها مباشرةً.',
     Markup.inlineKeyboard(rows)
   );
 });
@@ -4745,7 +4794,7 @@ bot.action(/sr_apply:(\d+):(\d+):(\d+)/, async (ctx) => {
   if(!await access.studentSubject(studentId,subjectId,ssId))return ctx.answerCbQuery('الطالب ليس في الموسم الحالي لهذه المادة.');
   try {
     const res = await studies.applyReportAverage(studentId, subjectId, ssId);
-    await ctx.answerCbQuery('اعتُمد ✅');
+    await ctx.answerCbQuery('حُفظت درجة التقارير ✅');
     const student = await db.getStudentById(studentId);
     if (student && student.telegram_id) {
       try {
@@ -4758,7 +4807,9 @@ bot.action(/sr_apply:(\d+):(\d+):(\d+)/, async (ctx) => {
       }
     }
     return ctx.editMessageText(
-      `✅ اعتُمد المعدل ${res.average} درجةً نهائية (من ${res.graded} تقريرًا مُقيَّمًا من ${res.total}).`
+      `✅ حُفظت درجة التقارير لهذه المادة وهذا الموسم: ${res.average} من ${studies.GRADE_WEIGHTS.participationTotal}.\n` +
+        `احتُسبت من متوسط ${res.graded} تقريرًا مُقيَّمًا، من أصل ${res.total} تقريرًا.\n` +
+        'إذا قيّمت تقارير إضافية أو عدّلت تقييمًا، اضغط زر حفظ المتوسط مجددًا لتحديث درجة التقارير.'
     );
   } catch (err) {
     return ctx.answerCbQuery(err.message, { show_alert: true });
@@ -4777,7 +4828,7 @@ bot.action(/sr_manual:(\d+):(\d+):(\d+)/, async (ctx) => {
     studentName: student ? student.full_name : '',
   });
   await ctx.answerCbQuery();
-  return ctx.reply(`أرسل الدرجة النهائية لتقاريره (من 0 إلى ${studies.GRADE_WEIGHTS.participationTotal}):`);
+  return ctx.reply(`أرسل درجة التقارير التي تريد حفظها لهذا الطالب في هذه المادة وهذا الموسم (من 0 إلى ${studies.GRADE_WEIGHTS.participationTotal}).\nستُحفظ الدرجة التي تدخلها مباشرةً، دون حساب متوسط تقييمات التقارير:`);
 });
 
 // ---------------------------------------------------------------------------

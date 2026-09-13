@@ -1581,6 +1581,37 @@ const getStudentFinalGrades = (studentId) =>
     )
     .then((r) => r.rows);
 
+// Show individual report evaluations before season finalization, without treating
+// the default zero totals in a report-only final_grades row as finalized grades.
+const listStudentGradeOverview = (studentId, {page=0,size=5,subjectId=null,stageSeasonId=null}={}) => {
+  const paging = pageOptions(page,size);
+  return pool.query(`
+    WITH records AS (
+      SELECT subject_id,stage_season_id FROM participation_modes WHERE student_id=$1
+      UNION SELECT subject_id,stage_season_id FROM student_reports WHERE student_id=$1
+      UNION SELECT subject_id,stage_season_id FROM final_grades WHERE student_id=$1
+    ), reports AS (
+      SELECT subject_id,stage_season_id,COUNT(*) AS report_count,COUNT(score) AS graded_count,
+        ROUND(AVG(score)::numeric,2) AS report_average
+      FROM student_reports WHERE student_id=$1 GROUP BY subject_id,stage_season_id
+    )
+    SELECT r.subject_id,r.stage_season_id,sub.name AS subject_name,
+      COALESCE(ss.stage_name_snapshot,st.name) AS stage_name,se.name AS season_name,
+      pm.mode,fg.report_score,fg.mubahatha_score,fg.participation_score,fg.exams_score,
+      fg.total_score,fg.finalized_at,fg.edited_at,
+      COALESCE(rep.report_count,0) AS report_count,COALESCE(rep.graded_count,0) AS graded_count,
+      rep.report_average,COUNT(*) OVER() AS total_count
+    FROM records r JOIN subjects sub ON sub.id=r.subject_id
+    JOIN stage_seasons ss ON ss.id=r.stage_season_id JOIN seasons se ON se.id=ss.season_id
+    JOIN stages st ON st.id=ss.stage_id
+    LEFT JOIN participation_modes pm ON pm.student_id=$1 AND pm.subject_id=r.subject_id AND pm.stage_season_id=r.stage_season_id
+    LEFT JOIN final_grades fg ON fg.student_id=$1 AND fg.subject_id=r.subject_id AND fg.stage_season_id=r.stage_season_id
+    LEFT JOIN reports rep ON rep.subject_id=r.subject_id AND rep.stage_season_id=r.stage_season_id
+    WHERE ($2::int IS NULL OR r.subject_id=$2) AND ($3::int IS NULL OR r.stage_season_id=$3)
+    ORDER BY ss.started_at DESC,ss.id DESC,sub.id LIMIT $4 OFFSET $5`,
+    [studentId,subjectId,stageSeasonId,paging.size,paging.offset]).then(r=>r.rows);
+};
+
 // تحرير درجة طالب يدويًا من الأستاذ أو الأدمن (لمن يحتاج مساعدة).
 // يُحفظ من عدّلها ومتى، ويُعاد حساب المجموع من القيم الجديدة.
 
@@ -1710,6 +1741,7 @@ async function finalizeSeasonGrades(subjectId, stageSeasonId) {
 }
 
 module.exports = {
+  listStudentGradeOverview,
   GRADE_WEIGHTS,
   SCHEDULE_HOURS,
   SCHEDULE_TZ,
