@@ -270,6 +270,8 @@ async function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_teach_assign_subject ON teaching_assignments(subject_id);
     CREATE INDEX IF NOT EXISTS idx_teach_assign_season ON teaching_assignments(stage_season_id);
     ALTER TABLE students ADD COLUMN IF NOT EXISTS official_confirmed_at TIMESTAMP;
+    -- يُحفظ يوزر تيليجرام (إن وُجد) عند كل تفاعل مع البوت، لعرضه في قوائم التنبيهات الإدارية.
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS telegram_username TEXT;
 
     -- «السجل السابق» اسم مخصص لترحيل بيانات نسخة قديمة فقط.
     -- في التثبيت الجديد لا تُنشأ مواسم هنا إطلاقًا، ليأخذ أول موسم اسم «الموسم الأول» من addStage.
@@ -1946,6 +1948,142 @@ const markAdminAbsenceAlertsSent = (attendanceDayIds) => {
   );
 };
 
+// يوزر تيليجرام تحديثه أفضل جهد عند كل تفاعل؛ لا يفشل التفاعل إن تعذّر الحفظ.
+const syncStudentUsername = (telegramId, username) =>
+  pool
+    .query(
+      `UPDATE students SET telegram_username=$2
+       WHERE telegram_id=$1 AND telegram_username IS DISTINCT FROM $2`,
+      [telegramId, username || null]
+    )
+    .catch(() => {});
+
+// ---------- إحصائيات استمرار الطلبة لكل مرحلة ----------
+// الحدّان 3 و10 يومًا هما نفس حدّي تنبيه الطالب وتنبيه الأدمن في نظام الغياب أعلاه،
+// فيُعاد استخدامهما هنا للاتساق: أقل من 3 = مستمر، من 3 إلى 9 = متلكئ، 10 فأكثر أو غير نشط = تارك.
+// تُؤخذ آخر قيمة absence_streak مسجَّلة للطالب (عبر كل مواسمه) كمؤشر لحالته الحالية.
+const STUDENT_LAGGING_STREAK = 3;
+const STUDENT_DROPPED_STREAK = 10;
+const getStageStudentBreakdown = () =>
+  pool
+    .query(
+      `WITH latest_streak AS (
+         SELECT DISTINCT ON (student_id) student_id, absence_streak
+         FROM student_attendance_days
+         ORDER BY student_id, attendance_date DESC
+       )
+       SELECT sg.id AS stage_id, sg.name AS stage_name,
+              COUNT(st.id)::int AS total,
+              COUNT(*) FILTER (WHERE st.is_active AND COALESCE(ls.absence_streak,0) < $1)::int AS continuing,
+              COUNT(*) FILTER (WHERE st.is_active AND COALESCE(ls.absence_streak,0) BETWEEN $1 AND $2-1)::int AS lagging,
+              COUNT(*) FILTER (WHERE NOT st.is_active OR COALESCE(ls.absence_streak,0) >= $2)::int AS dropped
+       FROM stages sg
+       JOIN students st ON st.stage_id=sg.id
+       LEFT JOIN latest_streak ls ON ls.student_id=st.id
+       GROUP BY sg.id, sg.name
+       ORDER BY sg.name`,
+      [STUDENT_LAGGING_STREAK, STUDENT_DROPPED_STREAK]
+    )
+    .then((r) => r.rows);
+
+// قائمة الطلبة الذين يحتاجون متابعة الآن (متلكئون بحضورهم، ولا يزالون نشطين مسجَّلين).
+const getAbsenceWatchlist = () =>
+  pool
+    .query(
+      `WITH latest_streak AS (
+         SELECT DISTINCT ON (d.student_id) d.student_id, d.stage_season_id, d.absence_streak
+         FROM student_attendance_days d
+         ORDER BY d.student_id, d.attendance_date DESC
+       )
+       SELECT st.id AS student_id, st.full_name, st.telegram_username, st.telegram_id,
+              sg.name AS stage_name, ls.stage_season_id, ls.absence_streak
+       FROM latest_streak ls
+       JOIN students st ON st.id=ls.student_id AND st.is_active=true
+       JOIN stages sg ON sg.id=st.stage_id
+       WHERE ls.absence_streak>=$1
+       ORDER BY ls.absence_streak DESC, st.full_name`,
+      [STUDENT_LAGGING_STREAK]
+    )
+    .then((r) => r.rows);
+
+// عدد الدروس الفائتة لكل مادة، لمجموعة طلبة محدَّدين (تُستدعى بعد جلب watchlist).
+const getMissedLessonsBySubject = (studentIds) => {
+  const ids = studentIds.map(Number).filter(Number.isSafeInteger);
+  if (ids.length === 0) return Promise.resolve([]);
+  return pool
+    .query(
+      `SELECT st.id AS student_id, sub.name AS subject_name,
+              COUNT(l.id)::int AS total_lessons, COUNT(a.id)::int AS attended
+       FROM students st
+       JOIN enrollments e ON e.student_id=st.id AND e.status='active'
+       JOIN stage_seasons ss ON ss.id=e.stage_season_id
+       JOIN subjects sub ON sub.stage_id=ss.stage_id
+       JOIN lessons l ON l.subject_id=sub.id AND l.stage_season_id=ss.id
+         AND l.activated_at>=e.started_at AND (e.ended_at IS NULL OR l.activated_at<=e.ended_at)
+       LEFT JOIN attendance a ON a.student_id=st.id AND a.lesson_id=l.id
+       WHERE st.id = ANY($1::int[])
+       GROUP BY st.id, sub.name
+       HAVING COUNT(l.id)>COUNT(a.id)
+       ORDER BY st.id, sub.name`,
+      [ids]
+    )
+    .then((r) => r.rows);
+};
+
+// ---------- المواسم الدراسية ----------
+const listSeasons = () =>
+  pool
+    .query(
+      `SELECT s.id, s.name, s.created_at,
+              EXISTS(SELECT 1 FROM stage_seasons ss WHERE ss.season_id=s.id AND ss.is_active=true) AS is_current
+       FROM seasons s ORDER BY s.created_at DESC, s.id DESC`
+    )
+    .then((r) => r.rows);
+
+// ---------- أداء الأستاذ ----------
+// سجل مباحثاته: كل موعد أسبوعي مرَّ عليه تاريخ محدَّد، وهل عُقدت الجلسة أم أُجِّلت.
+const getTeacherSessionLog = (teacherId, limit = 60) =>
+  pool
+    .query(
+      `SELECT sub.name AS subject_name, g.title AS group_title, sd.scheduled_date,
+              CASE WHEN sd.decision='confirmed' THEN true
+                   WHEN sd.decision='postponed' THEN false
+                   ELSE NULL END AS held,
+              ms.is_closed
+       FROM schedule_slots s
+       JOIN slot_decisions sd ON sd.slot_id=s.id
+       JOIN mubahatha_groups g ON g.id=s.group_id
+       JOIN subjects sub ON sub.id=s.subject_id
+       LEFT JOIN mubahatha_sessions ms ON ms.id=sd.session_id
+       WHERE s.teacher_id=$1
+       ORDER BY sd.scheduled_date DESC
+       LIMIT $2`,
+      [teacherId, limit]
+    )
+    .then((r) => r.rows);
+
+// تقاريره: كم دقَّق بنفسه، وكم بقي بلا درجة من تقارير مواده الحالية.
+const getTeacherReportStats = (teacherId) =>
+  pool
+    .query(
+      `SELECT COUNT(*) FILTER (WHERE sr.graded_at IS NOT NULL AND sr.graded_by=t.telegram_id)::int AS graded_by_teacher,
+              COUNT(*) FILTER (WHERE sr.graded_at IS NULL)::int AS ungraded
+       FROM teaching_assignments ta
+       JOIN teachers t ON t.id=ta.teacher_id
+       JOIN student_reports sr ON sr.subject_id=ta.subject_id AND sr.stage_season_id=ta.stage_season_id
+       WHERE ta.teacher_id=$1`,
+      [teacherId]
+    )
+    .then((r) => r.rows[0] || { graded_by_teacher: 0, ungraded: 0 });
+
+// امتحاناته المنشورة فعليًا (وليست مجرَّد مسودة).
+const getTeacherExamStats = (teacherId) =>
+  pool
+    .query(`SELECT COUNT(*) FILTER (WHERE status='published')::int AS published,
+                    COUNT(*)::int AS total
+             FROM exams WHERE teacher_id=$1`, [teacherId])
+    .then((r) => r.rows[0] || { published: 0, total: 0 });
+
 // ---------- واجهة الطالب وسجل الموسم الحالي ----------
 const recordStudentUiMessage = (studentId, messageId, messageKind = 'screen') =>
   pool.query(
@@ -2195,6 +2333,14 @@ module.exports = {
   getStudentAbsenceAlertCandidates,
   getAdminAbsenceAlertCandidates,
   markStudentAbsenceAlertSent,
+  syncStudentUsername,
+  getStageStudentBreakdown,
+  getAbsenceWatchlist,
+  getMissedLessonsBySubject,
+  listSeasons,
+  getTeacherSessionLog,
+  getTeacherReportStats,
+  getTeacherExamStats,
   markAdminAbsenceAlertsSent,
   recordStudentUiMessage,
   takeStudentUiMessages,

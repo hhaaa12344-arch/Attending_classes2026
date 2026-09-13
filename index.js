@@ -66,6 +66,11 @@ bot.use((ctx,next)=>{
   for(const method of ['sendMessage','sendDocument','sendPhoto']) ctx.telegram[method]=(chatId,content,extra)=>tgQueue[method](chatId,content,extra,{priority:PRIORITY.high});
   return next();
 });
+// أفضل جهد: يُحدَّث يوزر تيليجرام المخزَّن للطالب كلما تفاعل، بلا انتظار ودون كسر الرد لو فشل.
+bot.use((ctx,next)=>{
+  if(ctx.from?.id)db.syncStudentUsername(ctx.from.id,ctx.from.username||null);
+  return next();
+});
 let adminServer;
 
 // حارس وضع المعاينة: يمنع أي عملية كتابة قبل أن تصل لمعالجها.

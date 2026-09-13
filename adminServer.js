@@ -54,8 +54,8 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
       let result;
       if(req.method==='POST'&&route==='/logout'){sessions.revoke(token);return json(res,200,{ok:true});}
       if(req.method==='GET'){
-        if(route==='/stages')result=await adminData.stages();
-        else if(/^\/stages\/\d+$/.test(route))result=await adminData.stage(positiveInt(route.split('/')[2]));
+        if(route==='/stages')result=await adminData.stages(q.seasonId?positiveInt(q.seasonId):null);
+        else if(/^\/stages\/\d+$/.test(route))result=await adminData.stage(positiveInt(route.split('/')[2]),q.seasonId?positiveInt(q.seasonId):null);
         else if(route==='/students')result=await adminData.students(q);
         else if(/^\/students\/\d+$/.test(route))result=await adminData.student(positiveInt(route.split('/')[2]));
         else if(route==='/leaves')result=await adminData.leaves(q);
@@ -71,6 +71,18 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           WHERE e.stage_season_id=$1 ORDER BY sub.name,e.exam_number`,[positiveInt(q.seasonId)])).rows;
         else if(route==='/teachers')result=(await db.listTeachers()).map(t=>({id:t.id,full_name:t.full_name,phone:t.phone,is_active:t.is_active,linked:Boolean(t.telegram_id),linked_at:t.linked_at,active_subject_count:Number(t.active_subject_count),link_code:t.telegram_id?null:t.link_code}));
         else if(/^\/teachers\/\d+\/subjects$/.test(route))result=await db.listTeacherSubjects(positiveInt(route.split('/')[2]));
+        else if(/^\/teachers\/\d+\/performance$/.test(route)){
+          const id=positiveInt(route.split('/')[2]);
+          const [sessions,reportStats,examStats]=await Promise.all([db.getTeacherSessionLog(id),db.getTeacherReportStats(id),db.getTeacherExamStats(id)]);
+          result={sessions,reportStats,examStats};
+        }
+        else if(route==='/seasons')result=await db.listSeasons();
+        else if(route==='/stats/stage-breakdown')result=await db.getStageStudentBreakdown();
+        else if(route==='/stats/watchlist'){
+          const watchlist=await db.getAbsenceWatchlist();
+          const missed=await db.getMissedLessonsBySubject(watchlist.map(w=>w.student_id));
+          result=watchlist.map(w=>({...w,missed_subjects:missed.filter(m=>m.student_id===w.student_id).map(({subject_name,total_lessons,attended})=>({subject_name,total_lessons,attended,missed:total_lessons-attended}))}));
+        }
         else if(route==='/audit'){const p=pageOptions(q.page||0,25);result=(await db.pool.query('SELECT * FROM admin_audit_log ORDER BY id DESC LIMIT $1 OFFSET $2',[p.size,p.offset])).rows;}
         else if(route==='/notifications')result=(await db.pool.query('SELECT status,COUNT(*) AS count FROM notification_outbox GROUP BY status')).rows;
         else if(route==='/attendance.md'||route==='/attendance.csv'){

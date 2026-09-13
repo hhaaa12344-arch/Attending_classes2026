@@ -3,8 +3,17 @@ const { pageOptions, positiveInt, appError } = require('./integrity');
 
 function createAdminData(db, studies) {
   const pool = db.pool;
-  async function stages() {
-    return (await pool.query(`SELECT st.id,st.name,st.stage_type,st.is_active,ss.id AS stage_season_id,se.name AS season_name,
+  async function stages(seasonId = null) {
+    if (seasonId != null) {
+      positiveInt(seasonId);
+      return (await pool.query(`SELECT st.id,st.name,st.stage_type,st.is_active,ss.id AS stage_season_id,se.name AS season_name,true AS is_historical,
+        (SELECT COUNT(*) FROM enrollments e WHERE e.stage_season_id=ss.id) AS student_count,
+        (SELECT COUNT(*) FROM subjects s WHERE s.stage_id=st.id) AS subject_count,
+        (SELECT COUNT(*) FROM mubahatha_groups g WHERE g.stage_season_id=ss.id) AS group_count
+        FROM stages st JOIN stage_seasons ss ON ss.stage_id=st.id AND ss.season_id=$1
+        LEFT JOIN seasons se ON se.id=ss.season_id ORDER BY st.sort_order NULLS LAST,st.id`,[seasonId])).rows;
+    }
+    return (await pool.query(`SELECT st.id,st.name,st.stage_type,st.is_active,ss.id AS stage_season_id,se.name AS season_name,false AS is_historical,
       (SELECT COUNT(*) FROM students s WHERE s.stage_id=st.id AND s.is_active=true) AS student_count,
       (SELECT COUNT(*) FROM subjects s WHERE s.stage_id=st.id) AS subject_count,
       (SELECT COUNT(*) FROM mubahatha_groups g WHERE g.stage_season_id=ss.id AND g.is_active=true) AS group_count
@@ -33,9 +42,9 @@ function createAdminData(db, studies) {
       ${where} ORDER BY st.full_name,st.id LIMIT $6 OFFSET $7`, [...args,p.size,p.offset])).rows;
     return { rows,total,page:p.page,size:p.size };
   }
-  async function stage(id) {
-    const info = (await stages()).find(x => Number(x.id) === Number(id));
-    if (!info) throw appError('المرحلة غير موجودة.','NOT_FOUND',404);
+  async function stage(id, seasonId = null) {
+    const info = (await stages(seasonId)).find(x => Number(x.id) === Number(id));
+    if (!info) throw appError(seasonId?'لا توجد بيانات لهذه المرحلة في الموسم المختار.':'المرحلة غير موجودة.','NOT_FOUND',404);
     const subjects = (await pool.query(`SELECT sub.*,
       (SELECT string_agg(t.full_name,'، ' ORDER BY t.id) FROM teaching_assignments ta JOIN teachers t ON t.id=ta.teacher_id AND t.is_active=true
         WHERE ta.subject_id=sub.id AND ta.stage_season_id=$2) AS teacher_name,

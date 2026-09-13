@@ -1227,7 +1227,7 @@ const findTeacherConflicts = (teacherId, dayOfWeek, hour, excludeGroupId = null)
 
 async function addScheduleSlot(groupId, { dayOfWeek, hour, minute = 0, durationHours = 1, teacherId }) {
   const day=Number(dayOfWeek),h=Number(hour),m=Number(minute);
-  if(!Number.isInteger(day)||day<0||day>6||!Number.isInteger(h)||h<0||h>23||!Number.isInteger(m)||m<0||m>59||Number(durationHours)!==1)throw appError('موعد غير صالح. مدة المباحثة ساعة واحدة.');
+  if(!Number.isInteger(day)||day<0||day>6||!Number.isInteger(h)||h<16||h>23||!Number.isInteger(m)||m<0||m>59||Number(durationHours)!==1)throw appError('موعد غير صالح. مواعيد المباحثات تكون بين الساعة 4 عصرًا و11 ليلًا، ومدتها ساعة واحدة.');
   const c=await pool.connect();
   try{
     await c.query('BEGIN');
