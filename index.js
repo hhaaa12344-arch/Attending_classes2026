@@ -1,6 +1,5 @@
 // index.js — بوت تسجيل حضور الطلبة عبر تليجرام
 require('dotenv').config();
-const path = require('path');
 const { Telegraf, Markup } = require('telegraf');
 const db = require('./db');
 const studies = require('./studies');
@@ -59,6 +58,9 @@ const bot = new Telegraf(BOT_TOKEN);
 const { BUTTON: BACKUP_BUTTON, initBackupSchema, createBackups } = require('./backups');
 const backupTelegram = require('./backups').boundedTelegram(new (require('telegraf').Telegram)(BOT_TOKEN));
 const backups = createBackups({pool:db.pool,telegram:backupTelegram,adminIds:ADMIN_IDS});
+const {STUDENT_BUTTON: GUIDE_BUTTON, ADMIN_BUTTON: GUIDE_ADMIN_BUTTON}=require('./studentGuideContent');
+const {initStudentGuideSchema,createStudentGuide}=require('./studentGuide');
+const studentGuide=createStudentGuide({pool:db.pool,telegram:bot.telegram});
 bot.use(require('./updateGate').createUpdateGate());
 
 // طابور إرسال عام ينظّم معدّل الرسائل ويعالج 429؛ يُستعمل للبث الجماعي.
@@ -170,6 +172,7 @@ const STUDENT_ACTIVITY_BUTTON = '📋 المتغيرات';
 const LEGACY_STUDENT_ACTIVITY_BUTTON = '📋 إجازاتي وإنذاراتي';
 const LEGACY_STUDENT_ACTIVITY_BUTTON_2 = '📋 إجازاتي وتنبيهاتي';
 const STUDENT_MENU_BUTTONS = new Set([
+  GUIDE_BUTTON,
   '🔗 روابط المعهد',
   '🚪 الخروج من المعاينة',
   '📚 دروس اليوم',
@@ -196,6 +199,7 @@ const TEACHER_MENU_BUTTONS = new Set([
 ]);
 
 const ADMIN_MENU_BUTTONS = new Set([
+  GUIDE_ADMIN_BUTTON,
   BACKUP_BUTTON,
   '⚙️ إدارة روابط المعهد',
   '➕ إضافة مرحلة دراسية',
@@ -322,7 +326,7 @@ function studentMainMenu(student = null) {
     rows.push([replyButton('🎯 درجات المباحثات والتقارير'), replyButton('📖 مشاركتي')]);
     rows.push([replyButton('📄 إرسال تقرير')]);
   }
-  rows.push([replyButton('🔗 روابط المعهد')]);
+  rows.push([replyButton('🔗 روابط المعهد'),replyButton(GUIDE_BUTTON)]);
   rows.push([replyButton(BACK_BUTTON)]);
   return Markup.keyboard(rows).resize().persistent();
 }
@@ -377,6 +381,7 @@ function adminMainMenu() {
     ['🔗 روابط المجموعات'],
     ['🖥️ لوحة الإدارة'],
     ['⚙️ إدارة روابط المعهد', BACKUP_BUTTON],
+    [GUIDE_ADMIN_BUTTON],
     [BACK_BUTTON, '❌ إلغاء العملية'],
   ];
   return Markup.keyboard(rows.map((row) => row.map((text) => replyButton(text)))).resize().persistent();
@@ -968,50 +973,54 @@ function seasonSelectionKeyboard(stages, selectedIds) {
 // ---------------------------------------------------------------------------
 // تسجيل الدخول للطالب
 // ---------------------------------------------------------------------------
-bot.start(async (ctx) => {
-  userState.delete(ctx.from.id);
-  // إرسال /start أثناء المعاينة يُنهيها ويعيد الأدمن لوضعه
-  if (isInPreview(ctx)) {
-    previewMode.delete(ctx.from.id);
-    return ctx.reply('🚪 خرجت من وضع المعاينة، وعدت أدمن.', adminMainMenu());
-  }
-  const student = await effectiveStudent(ctx);
-  if (student) {
-    if (!student.is_active) {
-      return ctx.reply('حسابك مؤرشف حاليًا. تواصل مع الأدمن إذا كنت تريد العودة للدراسة.');
-    }
-    if (!student.official_confirmed_at) return sendOfficialConfirmationPrompt(ctx);
-    await replyStudentScreen(ctx, student, `أهلًا بعودتك ${student.full_name} 👋`, studentMainMenu(await effectiveStudent(ctx)));
-    const transition = await db.getPendingTransition(student.id);
-    if (transition) return showTransitionPrompt(ctx);
-    return undefined;
-  }
-  // الأستاذ المرتبط يرى لوحته مباشرة، ولا يمر بتسجيل الطلبة
-  const teacher = await effectiveTeacher(ctx);
-  if (teacher) {
-    return ctx.reply(`أهلًا بك أستاذ ${teacher.full_name} 👋`, teacherMainMenu());
-  }
+studentGuide.install({bot,userState,isAdmin,isInPreview,effectiveStudent,effectiveTeacher,
+  onContinue:startStudentRegistration,menus:[STUDENT_MENU_BUTTONS,TEACHER_MENU_BUTTONS,ADMIN_MENU_BUTTONS]});
 
-  userState.set(ctx.from.id, { action: 'awaiting_onboarding_ack' });
-  await ctx.replyWithPhoto(
-    { source: path.join(__dirname, 'assets', 'onboarding.png') },
-    {
-      caption: 'أهلًا بك 👋\nهذه لمحة سريعة عن آلية عمل البوت قبل أن نبدأ.',
-      ...Markup.inlineKeyboard([[callbackButton('✅ النظام واضح، اشتراك', 'onboarding_ack')]]),
-    }
-  );
-  return undefined;
+async function startStudentRegistration(ctx,codeOnly=false){
+  if(ctx.chat?.type!=='private')return;
+  userState.delete(ctx.from.id);
+  if(isAdmin(ctx))return ctx.reply('لوحة تحكم الأدمن:',adminMainMenu());
+  const student=await effectiveStudent(ctx);
+  if(student){
+    if(!student.is_active)return ctx.reply('حسابك مؤرشف حاليًا. تواصل مع الأدمن.');
+    if(!student.official_confirmed_at)return sendOfficialConfirmationPrompt(ctx);
+    return replyStudentScreen(ctx,student,`أهلًا بك ${student.full_name} 👋`,studentMainMenu(student));
+  }
+  const teacher=await effectiveTeacher(ctx);
+  if(teacher)return ctx.reply(`أهلًا بك أستاذ ${teacher.full_name} 👋`,teacherMainMenu());
+  userState.set(ctx.from.id,{action:'awaiting_full_name'});
+  return ctx.reply(codeOnly?'أرسل كود تفعيل الأستاذ أو كود نقل حساب الطالب الذي زوّدتك به الإدارة.':
+    'الرجاء إدخال اسمك الرباعي الكامل.\n\n'+
+    'إن كنت أستاذًا فأرسل كود التفعيل الذي زوّدك به المعهد بدل الاسم.\n'+
+    'وإن كنت طالبًا مسجَّلًا سابقًا وغيّرت حساب تليجرام، فأرسل كود نقل الحساب من الإدارة.',backOnlyMenu());
+}
+
+bot.start(async (ctx) => {
+  if(ctx.chat?.type!=='private')return;
+  userState.delete(ctx.from.id);
+  if(isInPreview(ctx))previewMode.delete(ctx.from.id);
+  if(isAdmin(ctx)){
+    await studentGuide.clear(ctx);
+    return ctx.reply('لوحة تحكم الأدمن:',adminMainMenu());
+  }
+  const student=await effectiveStudent(ctx);
+  if(student){
+    await studentGuide.clear(ctx);
+    if(!student.is_active)return ctx.reply('حسابك مؤرشف حاليًا. تواصل مع الأدمن إذا كنت تريد العودة للدراسة.');
+    if(!student.official_confirmed_at)return sendOfficialConfirmationPrompt(ctx);
+    await replyStudentScreen(ctx,student,`أهلًا بعودتك ${student.full_name} 👋`,studentMainMenu(student));
+    if(await db.getPendingTransition(student.id))return showTransitionPrompt(ctx);
+    return;
+  }
+  const teacher=await effectiveTeacher(ctx);
+  if(teacher){await studentGuide.clear(ctx);return ctx.reply(`أهلًا بك أستاذ ${teacher.full_name} 👋`,teacherMainMenu());}
+  return studentGuide.open(ctx);
 });
 
-bot.action('onboarding_ack', async (ctx) => {
-  await ctx.answerCbQuery();
-  userState.set(ctx.from.id, { action: 'awaiting_full_name' });
-  return ctx.reply(
-    'الرجاء إدخال اسمك الرباعي الكامل.\n\n' +
-      'إن كنت أستاذًا فأرسل كود التفعيل الذي زوّدك به المعهد بدل الاسم.\n' +
-      'وإن كنت طالبًا مسجَّلًا سابقًا وغيّرت هاتفك أو حساب تليجرام، فاطلب من الإدارة كود نقل الحساب وأرسله هنا.',
-    backOnlyMenu()
-  );
+// Compatibility with an old onboarding button; it never resets an existing account.
+bot.action('onboarding_ack',async(ctx)=>{
+  if(ctx.chat?.type!=='private'||isInPreview(ctx))return;
+  await ctx.answerCbQuery();await studentGuide.clear(ctx);return startStudentRegistration(ctx);
 });
 
 bot.command('teacher', async (ctx) => {
@@ -1198,6 +1207,7 @@ bot.on('text', async (ctx, next) => {
   const inputText = ctx.message.text.trim();
 
   if (inputText === BACK_BUTTON) {
+    await studentGuide.clear(ctx);
     const hadStep = userState.delete(ctx.from.id);
     if (isAdmin(ctx)) {
       return ctx.reply(hadStep ? 'تم الرجوع عن الخطوة الحالية.' : 'أنت في القائمة الرئيسية.', adminMainMenu());
@@ -1215,6 +1225,7 @@ bot.on('text', async (ctx, next) => {
   }
 
   if (inputText === '❌ إلغاء العملية') {
+    await studentGuide.clear(ctx);
     userState.delete(ctx.from.id);
     if(isAdmin(ctx))return ctx.reply('تم إلغاء العملية الحالية.',adminMainMenu());
     const teacher=await effectiveTeacher(ctx);
@@ -1236,7 +1247,7 @@ bot.on('text', async (ctx, next) => {
   const state = userState.get(ctx.from.id);
   if (!state) return next();
   if (state.action === 'awaiting_onboarding_ack') {
-    return ctx.reply('اضغط زر «✅ النظام واضح، اشتراك» في الرسالة أعلاه للمتابعة.');
+    return ctx.reply('اضغط زر «ابدأ التسجيل» أسفل الدليل، أو «لديّ كود تفعيل / نقل حساب». لفتح الدليل مجددًا أرسل /guide.');
   }
   if(state.action.startsWith('teacher_')){
     const exam=state.examId?await studies.getExamById(state.examId):null;
@@ -4635,6 +4646,7 @@ function trackBotMessage(chatId, messageId) {
 }
 
 async function purgeBotMessages(ctx) {
+  await studentGuide.clear(ctx);
   const chatId = ctx.chat && ctx.chat.id;
   const list = botMessages.get(chatId);
   if (!chatId || !list || list.length === 0) return;
@@ -5149,6 +5161,7 @@ async function main() {
   await initIntegritySchema(db.pool);
   await instituteLinks.initSchema();
   await initBackupSchema(db.pool);
+  await initStudentGuideSchema(db.pool);
   backups.start();
   console.log('تم تجهيز قاعدة البيانات ✅');
   if(process.env.ADMIN_WEB_ENABLED==='true') {
