@@ -13,6 +13,8 @@ test.before(async()=>{
   ({db,studies}=await testDatabase());
   await require('../instituteLinks').createInstituteLinks(db.pool).initSchema();
   await initBackupSchema(db.pool);
+  await require('../studentGuide').initStudentGuideSchema(db.pool);
+  await db.pool.query("UPDATE student_guide_pages SET photo_file_id='saved-guide-photo' WHERE page_key='registration'");
   dir=await fs.mkdtemp(path.join(os.tmpdir(),'backup-tests-'));
 });
 test.after(async()=>{if(archive)await archive.cleanup();await fs.rm(dir,{recursive:true,force:true});await db.pool.end();});
@@ -34,6 +36,7 @@ test('archive: complete valid JSON, gzip, all tables, exact bigint/decimal/JSON/
   assert.ok(parsed.rows.some(r=>r.table==='attendance'));
   assert.equal(parsed.metadata.tables.length,(await schemaInfo(db.pool)).tables.length);
   assert.ok(parsed.metadata.tables.some(t=>t.name==='backup_control'));
+  assert.ok(parsed.metadata.tables.some(t=>t.name==='student_guide_pages'),'guide text and Telegram file references are backed up');
 });
 test('archive: truncated gzip, altered rows and oversized uploads are rejected',async()=>{
   const data=await fs.readFile(archive.file),bad=path.join(dir,'bad.gz');
@@ -54,6 +57,7 @@ test('restore: refuses populated database; exact round-trip, foreign keys and se
     const next=(await c.query("INSERT INTO backup_precision_test(text_value) VALUES('new') RETURNING id::text")).rows[0].id;
     assert.equal(next,'9007199254740994');
     assert.equal((await c.query('SELECT enabled FROM backup_control')).rows[0].enabled,false);
+    assert.equal((await c.query("SELECT photo_file_id FROM student_guide_pages WHERE page_key='registration'")).rows[0].photo_file_id,'saved-guide-photo');
     await assert.rejects(()=>c.query('INSERT INTO attendance(student_id,lesson_id) VALUES(-1,-1)'),/foreign key/);
   }finally{c.release();}
 });

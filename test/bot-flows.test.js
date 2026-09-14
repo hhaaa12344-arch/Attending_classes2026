@@ -8,7 +8,7 @@ Telegram.prototype.callApi=async function(method,payload){messages.push({method,
 const {testDatabase}=require('./helpers.cjs');
 let db,studies,app,stage,student,ss,subject;
 test.before(async()=>{
-  ({db,studies}=await testDatabase());await require('../backups').initBackupSchema(db.pool);stage=await db.addStage('المرحلة التمهيدية');ss=(await db.listStageSeasons(stage.id))[0].id;subject=await db.addSubject(stage.id,'الفقه','فقه');
+  ({db,studies}=await testDatabase());await require('../backups').initBackupSchema(db.pool);await require('../studentGuide').initStudentGuideSchema(db.pool);stage=await db.addStage('المرحلة التمهيدية');ss=(await db.listStageSeasons(stage.id))[0].id;subject=await db.addSubject(stage.id,'الفقه','فقه');
   student=await db.createStudent(90000,'طالب حقيقي أول ثاني',stage.id);app=require('../index');
   app.bot.botInfo={id:12345,is_bot:true,username:'AttendanceTestBot',first_name:'test'};
 });
@@ -16,12 +16,12 @@ test.after(async()=>{Telegram.prototype.callApi=original;if(db)await db.pool.end
 async function send(id,text,data){messages.length=0;const from={id,is_bot:false,first_name:'test'};const message={message_id:messageId++,date:Math.floor(Date.now()/1000),from,chat:{id,type:'private'},text,...(text&&text.startsWith('/')?{entities:[{offset:0,length:text.split(/\s/)[0].length,type:'bot_command'}]}:{})};
   await app.bot.handleUpdate(data?{update_id:messageId,callback_query:{id:'cb'+messageId,from,data,message}}:{update_id:messageId,message});return messages;
 }
-test('bot: /start onboarding shows the how-it-works image and gates registration behind its button',async()=>{
+test('bot: /start guide has a text fallback and gates registration behind its button',async()=>{
   await send(77777,'/start');
-  const photo=messages.find(m=>m.method==='sendPhoto');
-  assert.ok(photo,'sends the onboarding image');
-  assert.match(photo.caption,/أهلًا بك/);
-  assert.ok(photo.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='onboarding_ack'));
+  const screen=messages.find(m=>m.method==='sendMessage'&&m.text?.includes('دليل الطالب'));
+  assert.ok(screen,'shows a usable guide before photos are uploaded');
+  assert.ok(screen.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='guide:begin'));
+  assert.ok(!messages.some(m=>m.photo?.source),'never reads a missing local onboarding image');
   await send(77777,'محمد علي حسن جعفر');
   assert.ok(messages.some(m=>m.text?.includes('اضغط زر')),'typing before pressing the button only nudges, does not register');
   assert.equal(await db.getStudentByTelegramId(77777),undefined);
