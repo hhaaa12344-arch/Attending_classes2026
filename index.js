@@ -364,6 +364,7 @@ function teacherMainMenu() {
     [replyButton('✏️ تحرير الدرجات'), replyButton('📄 تقارير الطلبة')],
     [replyButton('🔗 روابط المجموعات')],
     [replyButton('🔗 روابط المعهد')],
+    [replyButton('🖥️ فتح لوحة الأستاذ')],
   ]).resize().persistent();
 }
 
@@ -2587,6 +2588,26 @@ bot.action(/^students_search:(\d+)$/,async ctx=>{
   userState.set(ctx.from.id,{action:'admin_awaiting_student_search',stageId:Number(ctx.match[1])});
   return ctx.reply('أرسل الاسم أو جزءًا منه. يمكنك الرجوع دون البحث.');
 });
+
+function getTeacherWebUrl(){
+  try{
+    const configured=new URL(process.env.ADMIN_WEB_URL||'');
+    if(configured.protocol!=='https:')return null;
+    return `${configured.origin}/teacher/`;
+  }catch{return null;}
+}
+
+async function openTeacherWeb(ctx){
+  if(isInPreview(ctx))return ctx.reply('اخرج من وضع المعاينة أولًا ثم افتح لوحة الأستاذ من حساب الأستاذ نفسه.');
+  const teacher=await db.getTeacherByTelegramId(ctx.from?.id);
+  if(!teacher)return ctx.reply('لوحة الأستاذ متاحة للأستاذ المرتبط بهذا الحساب فقط.');
+  if(ctx.chat?.type!=='private')return ctx.reply('افتح لوحة الأستاذ من المحادثة الخاصة مع البوت.');
+  const url=getTeacherWebUrl();
+  if(process.env.ADMIN_WEB_ENABLED!=='true'||!url)return ctx.reply('لوحة الأستاذ غير مفعّلة حاليًا. راجع إعدادات لوحة الويب.');
+  return ctx.reply('افتح لوحة الأستاذ:',Markup.inlineKeyboard([[Markup.button.webApp('🖥️ فتح لوحة الأستاذ',url)]]));
+}
+bot.hears('🖥️ فتح لوحة الأستاذ',openTeacherWeb);
+bot.command('teacher_web',openTeacherWeb);
 
 async function openAdminWeb(ctx){
   if(!isAdmin(ctx)||isInPreview(ctx))return ctx.reply('لوحة الإدارة متاحة للأدمن خارج وضع المعاينة فقط.');

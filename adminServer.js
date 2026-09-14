@@ -17,6 +17,7 @@ async function readJson(req) {
 }
 function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,origin}) {
   const sessions=createSessions();const authLimits=new Map();let active=0;
+  const teacherWeb=require('./teacherWeb').createTeacherWeb({db,studies,scheduler,botToken,origin,readJson});
   const json=(res,code,value)=>{res.writeHead(code,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
   async function audit(actor,action,type,id,before,after) {
     await db.pool.query(`INSERT INTO admin_audit_log(actor_id,action,entity_type,entity_id,before_data,after_data)
@@ -28,6 +29,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
     let acquired=false;
     try{
       const url=new URL(req.url,'http://local.invalid');
+      if(await teacherWeb(req,res,url))return;
       const files={'/admin':'index.html','/admin/':'index.html','/admin/app.js':'app.js','/admin/styles.css':'styles.css'};
       if(req.method==='GET'&&files[url.pathname]) {
         const filename=files[url.pathname];res.setHeader('Content-Type',filename.endsWith('.js')?'text/javascript; charset=utf-8':filename.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8');
