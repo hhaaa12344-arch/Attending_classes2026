@@ -29,6 +29,7 @@ async function main(){
     await require('../integrity').initIntegritySchema(db.pool);
     await require('../instituteLinks').createInstituteLinks(db.pool).initSchema();
     await require('../backups').initBackupSchema(db.pool);
+    await require('../studentGuide').initStudentGuideSchema(db.pool);
     const c=await db.pool.connect();
     try {await restoreArchive(c,archive,{allowSeedRows:true});} finally {c.release();}
     console.log('Recovery completed in the NEW database. The bot was not started. Automatic backups are disabled until you choose the recipient again.');
