@@ -20,26 +20,30 @@ function createAdminData(db, studies) {
       FROM stages st LEFT JOIN stage_seasons ss ON ss.stage_id=st.id AND ss.is_active=true
       LEFT JOIN seasons se ON se.id=ss.season_id ORDER BY st.sort_order NULLS LAST,st.id`)).rows;
   }
-  async function students({ stageId = null, seasonId = null, groupId = null, q = '', status = 'active', page = 0, size = 25 } = {}) {
+  async function students({ stageId = null, seasonId = null, groupId = null, q = '', status = 'active', mode = null, page = 0, size = 25 } = {}) {
     const p = pageOptions(page,size);
     if (!['active','archived','all'].includes(status)) throw appError('حالة الطالب غير صالحة.');
+    if (mode != null && !['mubahatha','report'].includes(mode)) throw appError('وضع المشاركة غير صالح.');
     if (String(q).length > 150) throw appError('عبارة البحث طويلة.');
     for (const id of [stageId,seasonId,groupId]) if (id != null) positiveInt(id);
-    const args = [stageId,seasonId,groupId,`%${String(q).replace(/[\\%_]/g,'\\$&')}%`,status];
+    const args = [stageId,seasonId,groupId,`%${String(q).replace(/[\\%_]/g,'\\$&')}%`,status,mode];
     const where = `FROM students st JOIN stages sg ON sg.id=st.stage_id
       WHERE ($1::int IS NULL OR st.stage_id=$1)
       AND ($2::int IS NULL OR EXISTS(SELECT 1 FROM enrollments e WHERE e.student_id=st.id AND e.stage_season_id=$2))
       AND ($3::int IS NULL OR EXISTS(SELECT 1 FROM group_memberships gm WHERE gm.student_id=st.id AND gm.group_id=$3))
       AND st.full_name ILIKE $4
-      AND ($5='all' OR st.is_active=($5='active'))`;
+      AND ($5='all' OR st.is_active=($5='active'))
+      AND ($6::text IS NULL OR EXISTS(SELECT 1 FROM participation_modes pm2 WHERE pm2.student_id=st.id AND pm2.mode=$6
+        AND (($2::int IS NOT NULL AND pm2.stage_season_id=$2) OR ($2::int IS NULL AND pm2.stage_season_id IN (SELECT id FROM stage_seasons WHERE is_active=true)))))`;
     const total = Number((await pool.query(`SELECT COUNT(*) AS n ${where}`,args)).rows[0].n);
     const rows = (await pool.query(`SELECT st.id,st.full_name,st.telegram_id,st.stage_id,sg.name AS stage_name,st.is_active,
       st.official_confirmed_at,
-      COALESCE((SELECT jsonb_agg(jsonb_build_object('subject',sub.name,'group',g.title,'group_id',g.id,'group_number',g.group_number) ORDER BY sub.name)
+      COALESCE((SELECT jsonb_agg(jsonb_build_object('subject',sub.name,'group',g.title,'group_id',g.id,'group_number',g.group_number,'mode',pm.mode) ORDER BY sub.name)
         FROM group_memberships gm JOIN mubahatha_groups g ON g.id=gm.group_id
         JOIN subjects sub ON sub.id=gm.subject_id JOIN stage_seasons ss ON ss.id=gm.stage_season_id
+        LEFT JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=gm.subject_id AND pm.stage_season_id=gm.stage_season_id
         WHERE gm.student_id=st.id AND (($2::int IS NOT NULL AND ss.id=$2) OR ($2 IS NULL AND ss.is_active=true))), '[]'::jsonb) AS groups
-      ${where} ORDER BY st.full_name,st.id LIMIT $6 OFFSET $7`, [...args,p.size,p.offset])).rows;
+      ${where} ORDER BY st.full_name,st.id LIMIT $7 OFFSET $8`, [...args,p.size,p.offset])).rows;
     return { rows,total,page:p.page,size:p.size };
   }
   async function stage(id, seasonId = null) {
@@ -50,7 +54,11 @@ function createAdminData(db, studies) {
         WHERE ta.subject_id=sub.id AND ta.stage_season_id=$2) AS teacher_name,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('id',t.id,'name',t.full_name) ORDER BY t.id)
         FROM teaching_assignments ta JOIN teachers t ON t.id=ta.teacher_id AND t.is_active=true
-        WHERE ta.subject_id=sub.id AND ta.stage_season_id=$2),'[]'::jsonb) AS teachers
+        WHERE ta.subject_id=sub.id AND ta.stage_season_id=$2),'[]'::jsonb) AS teachers,
+      (SELECT COUNT(*) FROM participation_modes pm WHERE pm.subject_id=sub.id AND pm.stage_season_id=$2 AND pm.mode='mubahatha')::int AS mubahatha_count,
+      (SELECT COUNT(*) FROM participation_modes pm WHERE pm.subject_id=sub.id AND pm.stage_season_id=$2 AND pm.mode='report')::int AS report_count,
+      (SELECT COUNT(*) FROM enrollments e WHERE e.stage_season_id=$2 AND e.status='active'
+        AND NOT EXISTS(SELECT 1 FROM participation_modes pm WHERE pm.student_id=e.student_id AND pm.subject_id=sub.id AND pm.stage_season_id=$2))::int AS undecided_count
       FROM subjects sub WHERE sub.stage_id=$1 ORDER BY sub.name,sub.id`,[id,info.stage_season_id])).rows;
     const groups = (await pool.query(`SELECT g.*,sub.name AS subject_name,
       (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) AS member_count

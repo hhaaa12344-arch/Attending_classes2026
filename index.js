@@ -1,5 +1,6 @@
 // index.js — بوت تسجيل حضور الطلبة عبر تليجرام
 require('dotenv').config();
+const path = require('path');
 const { Telegraf, Markup } = require('telegraf');
 const db = require('./db');
 const studies = require('./studies');
@@ -991,9 +992,22 @@ bot.start(async (ctx) => {
     return ctx.reply(`أهلًا بك أستاذ ${teacher.full_name} 👋`, teacherMainMenu());
   }
 
+  userState.set(ctx.from.id, { action: 'awaiting_onboarding_ack' });
+  await ctx.replyWithPhoto(
+    { source: path.join(__dirname, 'assets', 'onboarding.png') },
+    {
+      caption: 'أهلًا بك 👋\nهذه لمحة سريعة عن آلية عمل البوت قبل أن نبدأ.',
+      ...Markup.inlineKeyboard([[callbackButton('✅ النظام واضح، اشتراك', 'onboarding_ack')]]),
+    }
+  );
+  return undefined;
+});
+
+bot.action('onboarding_ack', async (ctx) => {
+  await ctx.answerCbQuery();
   userState.set(ctx.from.id, { action: 'awaiting_full_name' });
   return ctx.reply(
-    'أهلًا بك 👋\nالرجاء إدخال اسمك الرباعي الكامل.\n\n' +
+    'الرجاء إدخال اسمك الرباعي الكامل.\n\n' +
       'إن كنت أستاذًا فأرسل كود التفعيل الذي زوّدك به المعهد بدل الاسم.\n' +
       'وإن كنت طالبًا مسجَّلًا سابقًا وغيّرت هاتفك أو حساب تليجرام، فاطلب من الإدارة كود نقل الحساب وأرسله هنا.',
     backOnlyMenu()
@@ -1221,6 +1235,9 @@ bot.on('text', async (ctx, next) => {
 
   const state = userState.get(ctx.from.id);
   if (!state) return next();
+  if (state.action === 'awaiting_onboarding_ack') {
+    return ctx.reply('اضغط زر «✅ النظام واضح، اشتراك» في الرسالة أعلاه للمتابعة.');
+  }
   if(state.action.startsWith('teacher_')){
     const exam=state.examId?await studies.getExamById(state.examId):null;
     const subjectId=exam?.subject_id||state.subjectId,seasonId=exam?.stage_season_id||state.ssId;

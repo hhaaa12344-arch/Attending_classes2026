@@ -1004,12 +1004,13 @@ const listStudentGroups = (studentId) =>
   pool
     .query(
       `SELECT m.subject_id, m.stage_season_id, g.id AS group_id, g.title AS group_title, g.group_number,
-              sub.name AS subject_name
+              sub.name AS subject_name, pm.mode
        FROM group_memberships m
        JOIN mubahatha_groups g ON g.id=m.group_id
        JOIN subjects sub ON sub.id=m.subject_id
        JOIN stage_seasons ss ON ss.id=m.stage_season_id AND ss.is_active=true
        JOIN enrollments en ON en.student_id=m.student_id AND en.stage_season_id=m.stage_season_id AND en.status='active'
+       LEFT JOIN participation_modes pm ON pm.student_id=m.student_id AND pm.subject_id=m.subject_id AND pm.stage_season_id=m.stage_season_id
        WHERE m.student_id=$1
        ORDER BY sub.name`,
       [studentId]
