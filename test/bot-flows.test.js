@@ -13,9 +13,23 @@ test.before(async()=>{
   app.bot.botInfo={id:12345,is_bot:true,username:'AttendanceTestBot',first_name:'test'};
 });
 test.after(async()=>{Telegram.prototype.callApi=original;if(db)await db.pool.end();});
-async function send(id,text,data){messages.length=0;const from={id,is_bot:false,first_name:'test'};const message={message_id:messageId++,date:Math.floor(Date.now()/1000),from,chat:{id,type:'private'},text};
+async function send(id,text,data){messages.length=0;const from={id,is_bot:false,first_name:'test'};const message={message_id:messageId++,date:Math.floor(Date.now()/1000),from,chat:{id,type:'private'},text,...(text&&text.startsWith('/')?{entities:[{offset:0,length:text.split(/\s/)[0].length,type:'bot_command'}]}:{})};
   await app.bot.handleUpdate(data?{update_id:messageId,callback_query:{id:'cb'+messageId,from,data,message}}:{update_id:messageId,message});return messages;
 }
+test('bot: /start onboarding shows the how-it-works image and gates registration behind its button',async()=>{
+  await send(77777,'/start');
+  const photo=messages.find(m=>m.method==='sendPhoto');
+  assert.ok(photo,'sends the onboarding image');
+  assert.match(photo.caption,/أهلًا بك/);
+  assert.ok(photo.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='onboarding_ack'));
+  await send(77777,'محمد علي حسن جعفر');
+  assert.ok(messages.some(m=>m.text?.includes('اضغط زر')),'typing before pressing the button only nudges, does not register');
+  assert.equal(await db.getStudentByTelegramId(77777),undefined);
+  await send(77777,'','onboarding_ack');
+  assert.ok(messages.some(m=>m.text?.includes('الرجاء إدخال اسمك الرباعي الكامل')));
+  await send(77777,'محمد علي حسن جعفر');
+  assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data?.startsWith('reg_stage:'))),'name is accepted only after the button, then registration proceeds as before');
+});
 test('bot: student management starts with stages, stage contents and students without requiring search',async()=>{
   await send(42,'🎓 إدارة الطلبة');assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='students_stage:'+stage.id)));
   await send(42,'',`students_stage:${stage.id}`);assert.ok(messages.some(m=>m.text?.includes('المرحلة التمهيدية')));
