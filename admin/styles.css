@@ -177,3 +177,8 @@ dialog>header h2{margin:0;font-size:1.05rem}
   h1{font-size:18pt}
   @page{size:A4;margin:14mm}
 }
+
+.attendance-ratio{display:inline-block;white-space:nowrap;font-variant-numeric:tabular-nums;font-weight:650;min-width:5rem;text-align:center}
+.study-choice{display:inline-flex;flex-direction:row;align-items:center;gap:.5rem;margin:.5rem 1rem}
+.study-choice input{width:auto;min-height:0}
+#participation-settings fieldset{border:1px solid var(--line,#ddd);border-radius:.5rem;margin:1rem 0;padding:.6rem}
