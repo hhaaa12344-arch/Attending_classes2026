@@ -19,15 +19,16 @@ function createGroupAllocation(pool) {
     const c=await pool.connect();
     try {
       await c.query('BEGIN');
+      const season=(await c.query('SELECT discussion_grouping FROM stage_seasons WHERE id=$1 AND is_active=true FOR SHARE',[seasonId])).rows[0];
       // Shared by assignment and moves across ALL subjects, not subject locks.
       const student=(await c.query('SELECT id FROM students WHERE id=$1 FOR UPDATE',[studentId])).rows[0];
       if(!student)throw appError('الطالب غير موجود.');
       const eligible=await c.query(`SELECT 1 FROM students st JOIN enrollments e ON e.student_id=st.id
         JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
         JOIN subjects sub ON sub.stage_id=ss.stage_id
-        WHERE st.id=$1 AND st.is_active=true AND e.status='active' AND sub.id=$2 AND ss.id=$3`,[studentId,subjectId,seasonId]);
+        WHERE st.id=$1 AND st.is_active=true AND e.status='active' AND sub.id=$2 AND ss.id=$3 AND participation_enabled(sub.id,ss.id)`,[studentId,subjectId,seasonId]);
       if(!eligible.rows[0])throw appError('الطالب غير مسجل في هذه المادة والموسم.');
-      const result=await run(c);
+      const result=await run(c,season);
       await c.query('COMMIT');
       return result;
     } catch(e) {await c.query('ROLLBACK');throw e;} finally {c.release();}
@@ -41,7 +42,14 @@ function createGroupAllocation(pool) {
       number?`المجموعة رقم ${number} في هذه المادة ${reason==='GROUP_FULL'?'ممتلئة':'غير متاحة'}. راجع الإدارة لتوفيرها مع الحفاظ على رقم مجموعتك.`:'لا توجد مجموعة متاحة لهذه المادة. راجع الإدارة.'});
 
   async function assignStudentToGroup(studentId,subjectId,seasonId) {
-    return transaction(studentId,subjectId,seasonId,async c=>{
+    return transaction(studentId,subjectId,seasonId,async (c,season)=>{
+      if(season.discussion_grouping===false){
+        const group=await require('./participationSettings').ensureWholeStageGroup(c,subjectId,seasonId);
+        if(!group.is_active)return unavailable('GROUP_UNAVAILABLE');
+        const inserted=await c.query(`INSERT INTO group_memberships(group_id,student_id,subject_id,stage_season_id)
+          VALUES($1,$2,$3,$4) ON CONFLICT(student_id,subject_id,stage_season_id) DO NOTHING RETURNING id`,[group.id,studentId,subjectId,seasonId]);
+        return {group:{...group,title:'المرحلة كاملة',group_number:null,discussion_grouping:false},created:inserted.rowCount>0};
+      }
       const current=await memberships(c,studentId,seasonId);
       const saved=(await c.query('SELECT group_number FROM student_group_numbers WHERE student_id=$1 AND stage_season_id=$2',[studentId,seasonId])).rows[0];
       const numbers=new Set(current.map(g=>Number(g.group_number)));
@@ -53,7 +61,7 @@ function createGroupAllocation(pool) {
       const existing=current.find(g=>g.subject_id===subjectId);
       if(existing)return existing.is_active?{group:existing,created:false}:unavailable('GROUP_UNAVAILABLE',number);
       const candidates=(await c.query(`SELECT id FROM mubahatha_groups WHERE subject_id=$1 AND stage_season_id=$2
-        AND is_active=true AND ($3::int IS NULL OR group_number=$3) ORDER BY group_number`,[subjectId,seasonId,number??null])).rows;
+        AND is_active=true AND merged_into_id IS NULL AND ($3::int IS NULL OR group_number=$3) ORDER BY group_number`,[subjectId,seasonId,number??null])).rows;
       for(const candidate of candidates) {
         const g=(await c.query('SELECT * FROM mubahatha_groups WHERE id=$1 AND is_active=true FOR UPDATE',[candidate.id])).rows[0];
         if(!g)continue;
@@ -69,7 +77,8 @@ function createGroupAllocation(pool) {
 
   async function moveStudentToGroup(studentId,subjectId,seasonId,targetId) {
     positiveInt(targetId);
-    return transaction(studentId,subjectId,seasonId,async c=>{
+    return transaction(studentId,subjectId,seasonId,async (c,season)=>{
+      if(!season.discussion_grouping)throw appError('هذه المرحلة غير مقسمة؛ جميع الطلبة في مباحثة المادة نفسها.');
       const target=(await c.query(`SELECT * FROM mubahatha_groups WHERE id=$1 AND subject_id=$2 AND stage_season_id=$3 AND is_active=true`,[targetId,subjectId,seasonId])).rows[0];
       if(!target)throw appError('المجموعة غير موجودة أو غير نشطة.');
       const current=await memberships(c,studentId,seasonId);

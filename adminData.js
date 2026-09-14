@@ -6,14 +6,14 @@ function createAdminData(db, studies) {
   async function stages(seasonId = null) {
     if (seasonId != null) {
       positiveInt(seasonId);
-      return (await pool.query(`SELECT st.id,st.name,st.stage_type,st.is_active,ss.id AS stage_season_id,se.name AS season_name,true AS is_historical,
+      return (await pool.query(`SELECT st.id,st.name,st.stage_type,st.is_active,ss.discussion_grouping,ss.id AS stage_season_id,se.name AS season_name,true AS is_historical,
         (SELECT COUNT(*) FROM enrollments e WHERE e.stage_season_id=ss.id) AS student_count,
         (SELECT COUNT(*) FROM subjects s WHERE s.stage_id=st.id) AS subject_count,
-        (SELECT COUNT(*) FROM mubahatha_groups g WHERE g.stage_season_id=ss.id) AS group_count
+        (SELECT COUNT(*) FROM mubahatha_groups g WHERE g.stage_season_id=ss.id AND g.merged_into_id IS NULL) AS group_count
         FROM stages st JOIN stage_seasons ss ON ss.stage_id=st.id AND ss.season_id=$1
         LEFT JOIN seasons se ON se.id=ss.season_id ORDER BY st.sort_order NULLS LAST,st.id`,[seasonId])).rows;
     }
-    return (await pool.query(`SELECT st.id,st.name,st.stage_type,st.is_active,ss.id AS stage_season_id,se.name AS season_name,false AS is_historical,
+    return (await pool.query(`SELECT st.id,st.name,st.stage_type,st.is_active,ss.discussion_grouping,ss.id AS stage_season_id,se.name AS season_name,false AS is_historical,
       (SELECT COUNT(*) FROM students s WHERE s.stage_id=st.id AND s.is_active=true) AS student_count,
       (SELECT COUNT(*) FROM subjects s WHERE s.stage_id=st.id) AS subject_count,
       (SELECT COUNT(*) FROM mubahatha_groups g WHERE g.stage_season_id=ss.id AND g.is_active=true) AS group_count
@@ -28,7 +28,7 @@ function createAdminData(db, studies) {
     for (const id of [stageId,seasonId,groupId]) if (id != null) positiveInt(id);
     const args = [stageId,seasonId,groupId,`%${String(q).replace(/[\\%_]/g,'\\$&')}%`,status,mode];
     const where = `FROM students st JOIN stages sg ON sg.id=st.stage_id
-      WHERE ($1::int IS NULL OR st.stage_id=$1)
+      WHERE ($1::int IS NULL OR ($2::int IS NULL AND st.stage_id=$1) OR EXISTS(SELECT 1 FROM enrollments eh JOIN stage_seasons sh ON sh.id=eh.stage_season_id WHERE eh.student_id=st.id AND sh.id=$2 AND sh.stage_id=$1))
       AND ($2::int IS NULL OR EXISTS(SELECT 1 FROM enrollments e WHERE e.student_id=st.id AND e.stage_season_id=$2))
       AND ($3::int IS NULL OR EXISTS(SELECT 1 FROM group_memberships gm WHERE gm.student_id=st.id AND gm.group_id=$3))
       AND st.full_name ILIKE $4
@@ -38,7 +38,7 @@ function createAdminData(db, studies) {
     const total = Number((await pool.query(`SELECT COUNT(*) AS n ${where}`,args)).rows[0].n);
     const rows = (await pool.query(`SELECT st.id,st.full_name,st.telegram_id,st.stage_id,sg.name AS stage_name,st.is_active,
       st.official_confirmed_at,
-      COALESCE((SELECT jsonb_agg(jsonb_build_object('subject',sub.name,'group',g.title,'group_id',g.id,'group_number',g.group_number,'mode',pm.mode) ORDER BY sub.name)
+      COALESCE((SELECT jsonb_agg(jsonb_build_object('subject',sub.name,'group',CASE WHEN ss.discussion_grouping THEN g.title ELSE 'المرحلة كاملة' END,'group_id',g.id,'group_number',CASE WHEN ss.discussion_grouping THEN g.group_number END,'mode',pm.mode) ORDER BY sub.name)
         FROM group_memberships gm JOIN mubahatha_groups g ON g.id=gm.group_id
         JOIN subjects sub ON sub.id=gm.subject_id JOIN stage_seasons ss ON ss.id=gm.stage_season_id
         LEFT JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=gm.subject_id AND pm.stage_season_id=gm.stage_season_id
@@ -49,7 +49,7 @@ function createAdminData(db, studies) {
   async function stage(id, seasonId = null) {
     const info = (await stages(seasonId)).find(x => Number(x.id) === Number(id));
     if (!info) throw appError(seasonId?'لا توجد بيانات لهذه المرحلة في الموسم المختار.':'المرحلة غير موجودة.','NOT_FOUND',404);
-    const subjects = (await pool.query(`SELECT sub.*,
+    const subjects = (await pool.query(`SELECT sub.*,participation_enabled(sub.id,$2) AS participation_enabled,
       (SELECT string_agg(t.full_name,'، ' ORDER BY t.id) FROM teaching_assignments ta JOIN teachers t ON t.id=ta.teacher_id AND t.is_active=true
         WHERE ta.subject_id=sub.id AND ta.stage_season_id=$2) AS teacher_name,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('id',t.id,'name',t.full_name) ORDER BY t.id)
@@ -57,13 +57,14 @@ function createAdminData(db, studies) {
         WHERE ta.subject_id=sub.id AND ta.stage_season_id=$2),'[]'::jsonb) AS teachers,
       (SELECT COUNT(*) FROM participation_modes pm WHERE pm.subject_id=sub.id AND pm.stage_season_id=$2 AND pm.mode='mubahatha')::int AS mubahatha_count,
       (SELECT COUNT(*) FROM participation_modes pm WHERE pm.subject_id=sub.id AND pm.stage_season_id=$2 AND pm.mode='report')::int AS report_count,
-      (SELECT COUNT(*) FROM enrollments e WHERE e.stage_season_id=$2 AND e.status='active'
+      (SELECT COUNT(*) FROM enrollments e WHERE e.stage_season_id=$2 AND e.status='active' AND participation_enabled(sub.id,$2)
         AND NOT EXISTS(SELECT 1 FROM participation_modes pm WHERE pm.student_id=e.student_id AND pm.subject_id=sub.id AND pm.stage_season_id=$2))::int AS undecided_count
       FROM subjects sub WHERE sub.stage_id=$1 ORDER BY sub.name,sub.id`,[id,info.stage_season_id])).rows;
     const groups = (await pool.query(`SELECT g.*,sub.name AS subject_name,
       (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) AS member_count
-      FROM mubahatha_groups g JOIN subjects sub ON sub.id=g.subject_id WHERE g.stage_season_id=$1
+      FROM mubahatha_groups g JOIN subjects sub ON sub.id=g.subject_id WHERE g.stage_season_id=$1 AND g.merged_into_id IS NULL
       ORDER BY sub.name,g.group_number`,[info.stage_season_id])).rows;
+    if(info.discussion_grouping===false)for(const g of groups){g.title='المرحلة كاملة';g.group_number=null;}
     return { ...info,subjects,groups,seasons:await db.listStageSeasons(id) };
   }
   async function student(id) {
@@ -120,12 +121,12 @@ function createAdminData(db, studies) {
     positiveInt(seasonId); const p=pageOptions(page,25);
     const rows=(await pool.query(`SELECT r.*,st.full_name,sub.name AS subject_name,COUNT(*) OVER() AS total_count
       FROM student_reports r JOIN students st ON st.id=r.student_id JOIN subjects sub ON sub.id=r.subject_id
-      WHERE r.stage_season_id=$1 AND ($2::int IS NULL OR r.group_id=$2)
+      WHERE r.stage_season_id=$1 AND ($2::int IS NULL OR discussion_group_root(r.group_id)=$2)
       ORDER BY r.submitted_at DESC,r.id DESC LIMIT $3 OFFSET $4`,[seasonId,groupId,p.size,p.offset])).rows;
     return {rows,total:Number(rows[0]?.total_count||0),...p};
   }
   async function sessions(seasonId) {
-    return (await pool.query(`SELECT s.*,g.title AS group_title,sub.name AS subject_name,
+    return (await pool.query(`SELECT s.*,discussion_group_label(g.id) AS group_title,sub.name AS subject_name,
       (SELECT COUNT(*) FROM (SELECT student_id FROM mubahatha_attendance a WHERE a.session_id=s.id
         GROUP BY student_id HAVING bool_or(phase='start') AND bool_or(phase='end')) x) AS complete_count
       FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id JOIN subjects sub ON sub.id=g.subject_id
@@ -151,7 +152,7 @@ function createAdminData(db, studies) {
         JOIN stages sg ON sg.id=ss.stage_id JOIN seasons se ON se.id=ss.season_id
         WHERE ss.id=$1 AND a.id>$2 AND a.id<=$4 ORDER BY a.id LIMIT 500`:
         `SELECT a.id,st.id AS student_id,st.full_name,sg.name AS stage_name,se.name AS season_name,
-        sub.name AS subject_name,g.title AS group_title,s.id AS item_id,a.phase,
+        sub.name AS subject_name,discussion_group_label(g.id) AS group_title,s.id AS item_id,a.phase,
         to_char((${time} AT TIME ZONE 'UTC') AT TIME ZONE $3,'YYYY-MM-DD') AS date,
         to_char((${time} AT TIME ZONE 'UTC') AT TIME ZONE $3,'HH24:MI:SS') AS time,
         to_char(${time},'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS utc
@@ -191,6 +192,8 @@ function createAdminData(db, studies) {
     }
     yield count?`\n**عدد تسجيلات الحضور:** ${count}\n`:'\nلا توجد تسجيلات حضور لهذا الموسم.\n';
   }
-  return {stages,stage,students,student,updateStudent,leaves,reports,sessions,attendanceCsv,attendanceMarkdown};
+  return {stages,stage,students,student,updateStudent,leaves,reports,sessions,attendanceCsv,attendanceMarkdown,
+    lessonAttendance:require('./lessonAttendance').createLessonAttendance(pool).matrix,
+    saveParticipationSettings:require('./participationSettings').createParticipationSettings(pool).save};
 }
 module.exports={createAdminData};

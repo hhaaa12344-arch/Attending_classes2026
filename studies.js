@@ -256,6 +256,7 @@ async function initStudiesSchema() {
     CREATE INDEX IF NOT EXISTS idx_reports_subject ON student_reports(subject_id, stage_season_id);
   `);
   await require('./groupAllocation').initGroupAllocation(pool);
+  await require('./participationSettings').initParticipationSettings(pool);
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +266,10 @@ const setParticipationMode = (studentId, subjectId, stageSeasonId, mode) =>
   pool
     .query(
       `INSERT INTO participation_modes(student_id, subject_id, stage_season_id, mode, joined_mubahatha_at)
-       VALUES($1,$2,$3,$4, CASE WHEN $4='mubahatha' THEN now() ELSE NULL END)
+       SELECT $1,$2,$3,$4, CASE WHEN $4='mubahatha' THEN now() ELSE NULL END
+       WHERE participation_enabled($2,$3) AND EXISTS(SELECT 1 FROM enrollments e JOIN students st ON st.id=e.student_id
+         JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+         WHERE e.student_id=$1 AND e.stage_season_id=$3 AND e.status='active' AND st.is_active=true)
        ON CONFLICT (student_id, subject_id, stage_season_id) DO NOTHING RETURNING *`,
       [studentId, subjectId, stageSeasonId, mode]
     )
@@ -286,7 +290,7 @@ const switchToMubahatha = (studentId, subjectId, stageSeasonId) =>
     .query(
       `UPDATE participation_modes
        SET mode='mubahatha', switched_at=now(), joined_mubahatha_at=now()
-       WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3 AND mode='report'
+       WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3 AND mode='report' AND participation_enabled($2,$3)
        RETURNING *`,
       [studentId, subjectId, stageSeasonId]
     )
@@ -309,11 +313,13 @@ async function createMubahathaGroup(subjectId, stageSeasonId, { title, inviteLin
   const client = await pool.connect();
   try {
   await client.query('BEGIN');
+  const setting=(await client.query('SELECT discussion_grouping FROM stage_seasons WHERE id=$1 FOR SHARE',[stageSeasonId])).rows[0];
+  if(setting?.discussion_grouping===false)throw appError('هذه المرحلة تعمل دون تقسيم. عدّل رابط مباحثة المادة من إعدادات المرحلة.');
   // Serialize numbering for this subject/season; MAX+1 alone races.
   await client.query('SELECT pg_advisory_xact_lock($1::int,$2::int)', [subjectId, stageSeasonId]);
   const valid = await client.query(`SELECT 1 FROM subjects sub JOIN stage_seasons ss ON ss.stage_id=sub.stage_id
     JOIN stages st ON st.id=ss.stage_id
-    WHERE sub.id=$1 AND ss.id=$2 AND ss.is_active=true AND st.stage_type <> 'lessons_only'`, [subjectId, stageSeasonId]);
+    WHERE sub.id=$1 AND ss.id=$2 AND ss.is_active=true AND participation_enabled(sub.id,ss.id)`, [subjectId, stageSeasonId]);
   if (!valid.rows[0]) throw appError('المادة أو الموسم غير متاح للمباحثات.');
   const next = await client.query(
     'SELECT COALESCE(MAX(group_number),0)+1 AS n FROM mubahatha_groups WHERE subject_id=$1 AND stage_season_id=$2',
@@ -334,14 +340,14 @@ async function createMubahathaGroup(subjectId, stageSeasonId, { title, inviteLin
 }
 
 const getGroupById = (groupId) =>
-  pool.query('SELECT * FROM mubahatha_groups WHERE id=$1', [groupId]).then((r) => r.rows[0]);
+  pool.query('SELECT g.*,discussion_group_label(g.id) AS title FROM mubahatha_groups g WHERE g.id=$1', [groupId]).then((r) => r.rows[0]);
 
 const listGroups = (subjectId, stageSeasonId) =>
   pool
     .query(
-      `SELECT g.*, (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) AS member_count
+      `SELECT g.*, discussion_group_label(g.id) AS title, (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) AS member_count
        FROM mubahatha_groups g
-       WHERE g.subject_id=$1 AND g.stage_season_id=$2
+       WHERE g.subject_id=$1 AND g.stage_season_id=$2 AND g.merged_into_id IS NULL
        ORDER BY g.group_number`,
       [subjectId, stageSeasonId]
     )
@@ -361,6 +367,7 @@ async function updateGroupSettings(groupId,body) {
     await c.query('BEGIN');
     const before=(await c.query('SELECT * FROM mubahatha_groups WHERE id=$1 FOR UPDATE',[groupId])).rows[0];
     if(!before)throw appError('المجموعة غير موجودة.','NOT_FOUND',404);
+    if(before.merged_into_id)throw appError('هذه مجموعة سابقة مدمجة؛ سجلها محفوظ ولا يمكن إعادة تفعيلها.');
     if(body.capacity!==undefined){
       const n=Number((await c.query('SELECT COUNT(*) AS n FROM group_memberships WHERE group_id=$1',[groupId])).rows[0].n);
       if(Number(body.capacity)<n)throw appError(`لا يمكن خفض السعة دون عدد الطلبة الحالي (${n}).`,'GROUP_CAPACITY');
@@ -416,13 +423,13 @@ const setGroupInviteLink = (groupId, inviteLink) =>
 // تعطيل/إعادة تفعيل مجموعة مباحثة دون حذف سجلاتها (حضور، مواعيد، تقارير).
 const setGroupActive = (groupId, active) =>
   pool
-    .query('UPDATE mubahatha_groups SET is_active=$2 WHERE id=$1 RETURNING *', [groupId, active])
+    .query('UPDATE mubahatha_groups SET is_active=$2 WHERE id=$1 AND merged_into_id IS NULL RETURNING *', [groupId, active])
     .then((r) => r.rows[0]);
 
 const getStudentGroup = (studentId, subjectId, stageSeasonId) =>
   pool
     .query(
-      `SELECT g.*, m.assigned_at FROM group_memberships m
+      `SELECT g.*, discussion_group_label(g.id) AS title, m.assigned_at FROM group_memberships m
        JOIN mubahatha_groups g ON g.id=m.group_id
        WHERE m.student_id=$1 AND m.subject_id=$2 AND m.stage_season_id=$3`,
       [studentId, subjectId, stageSeasonId]
@@ -435,14 +442,18 @@ const {assignStudentToGroup,moveStudentToGroup}=require('./groupAllocation').cre
 // ---------------------------------------------------------------------------
 // جلسات المباحثة
 // ---------------------------------------------------------------------------
-const openSession = (groupId, teacherId, title, hours = 24) =>
-  pool
-    .query(
-      `INSERT INTO mubahatha_sessions(group_id, teacher_id, title, closes_at)
-       VALUES($1,$2,$3, now() + make_interval(hours => $4::int)) RETURNING *`,
-      [groupId, teacherId, title, hours]
-    )
-    .then((r) => r.rows[0]);
+async function openSession(groupId,teacherId,title,hours=24){
+  const c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    const group=(await c.query(`SELECT g.id FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id
+      WHERE g.id=$1 AND g.is_active=true AND ss.is_active=true AND participation_enabled(g.subject_id,ss.id) FOR SHARE OF ss`,[groupId])).rows[0];
+    if(!group)throw appError('هذه المادة غير متاحة للمباحثات أو المجموعة غير نشطة.');
+    const result=(await c.query(`INSERT INTO mubahatha_sessions(group_id,teacher_id,title,closes_at)
+      VALUES($1,$2,$3,now()+make_interval(hours=>$4::int)) RETURNING *`,[groupId,teacherId,title,hours])).rows[0];
+    await c.query('COMMIT');return result;
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+}
 
 const closeSession = (sessionId) =>
   pool
@@ -483,7 +494,7 @@ const markSessionAttendance = (sessionId, studentId, phase = 'start', markedBy =
        JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=ss.id AND e.status='active'
        JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=g.subject_id
          AND pm.stage_season_id=ss.id AND pm.mode='mubahatha'
-       WHERE s.id=$1 AND s.opened_at <= now() AND m.assigned_at <= s.opened_at
+       WHERE s.id=$1 AND participation_enabled(g.subject_id,g.stage_season_id) AND s.opened_at <= now() AND m.assigned_at <= s.opened_at
          AND pm.joined_mubahatha_at <= s.opened_at
          AND (($3='start' AND s.is_closed=false AND s.closes_at > now())
            OR ($3='end' AND s.end_opened_at <= now() AND s.end_closes_at > now()
@@ -532,7 +543,7 @@ const isEndAttendanceOpen = (sessionId) =>
 const getSessionsNeedingEndPrompt = (leadMinutes = 10) =>
   pool
     .query(
-      `SELECT s.*, g.subject_id, g.title AS group_title, g.group_number,
+      `SELECT s.*, g.subject_id, discussion_group_label(g.id) AS group_title, g.group_number,
               t.telegram_id AS teacher_telegram_id, sub.name AS subject_name
        FROM mubahatha_sessions s
        JOIN mubahatha_groups g ON g.id=s.group_id
@@ -553,7 +564,7 @@ const markEndPromptSent = (sessionId) =>
 const getSessionsNeedingAutoEnd = () =>
   pool
     .query(
-      `SELECT s.*, g.id AS gid, g.title AS group_title, g.group_number,
+      `SELECT s.*, g.id AS gid, discussion_group_label(g.id) AS group_title, g.group_number,
               sub.name AS subject_name
        FROM mubahatha_sessions s
        JOIN mubahatha_groups g ON g.id=s.group_id
@@ -829,12 +840,13 @@ const getStudentExamResults = (studentId) =>
 const listStudentSlots = (studentId) =>
   pool
     .query(
-      `SELECT sl.*, sub.name AS subject_name, g.title AS group_title
+      `SELECT sl.*, sub.name AS subject_name, discussion_group_label(g.id) AS group_title
        FROM group_memberships m
        JOIN mubahatha_groups g ON g.id=m.group_id
        JOIN schedule_slots sl ON sl.group_id=g.id AND sl.is_active=true
        JOIN subjects sub ON sub.id=sl.subject_id
-       WHERE m.student_id=$1
+       WHERE m.student_id=$1 AND participation_enabled(m.subject_id,m.stage_season_id)
+         AND EXISTS(SELECT 1 FROM enrollments e JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true WHERE e.student_id=m.student_id AND e.stage_season_id=m.stage_season_id AND e.status='active')
        ORDER BY sl.day_of_week, sl.hour, sl.minute`,
       [studentId]
     )
@@ -848,7 +860,8 @@ const listStudentSubjects = (studentId) =>
               ss.id AS stage_season_id,
               COALESCE(ss.stage_name_snapshot, sg.name) AS stage_name,
               pm.mode, pm.switched_at,
-              g.id AS group_id, g.title AS group_title, g.group_number, g.invite_link,
+              g.id AS group_id, CASE WHEN ss.discussion_grouping THEN g.title ELSE 'المرحلة كاملة' END AS group_title,
+              CASE WHEN ss.discussion_grouping THEN g.group_number END AS group_number, ss.discussion_grouping, g.invite_link,
               (SELECT COUNT(*) FROM student_reports r
                WHERE r.student_id=$1 AND r.subject_id=sub.id AND r.stage_season_id=ss.id) AS report_count
        FROM enrollments e
@@ -860,7 +873,7 @@ const listStudentSubjects = (studentId) =>
        LEFT JOIN group_memberships m
               ON m.student_id=$1 AND m.subject_id=sub.id AND m.stage_season_id=ss.id
        LEFT JOIN mubahatha_groups g ON g.id=m.group_id
-       WHERE e.student_id=$1 AND e.status='active'
+       WHERE e.student_id=$1 AND e.status='active' AND participation_enabled(sub.id,ss.id)
        ORDER BY sub.name`,
       [studentId]
     )
@@ -1003,7 +1016,7 @@ const getInstituteExceptions = () =>
 const listStudentGroups = (studentId) =>
   pool
     .query(
-      `SELECT m.subject_id, m.stage_season_id, g.id AS group_id, g.title AS group_title, g.group_number,
+      `SELECT m.subject_id, m.stage_season_id, g.id AS group_id, discussion_group_label(g.id) AS group_title, CASE WHEN ss.discussion_grouping THEN g.group_number END AS group_number,
               sub.name AS subject_name, pm.mode
        FROM group_memberships m
        JOIN mubahatha_groups g ON g.id=m.group_id
@@ -1011,7 +1024,7 @@ const listStudentGroups = (studentId) =>
        JOIN stage_seasons ss ON ss.id=m.stage_season_id AND ss.is_active=true
        JOIN enrollments en ON en.student_id=m.student_id AND en.stage_season_id=m.stage_season_id AND en.status='active'
        LEFT JOIN participation_modes pm ON pm.student_id=m.student_id AND pm.subject_id=m.subject_id AND pm.stage_season_id=m.stage_season_id
-       WHERE m.student_id=$1
+       WHERE m.student_id=$1 AND participation_enabled(m.subject_id,m.stage_season_id)
        ORDER BY sub.name`,
       [studentId]
     )
@@ -1052,6 +1065,7 @@ async function resetStudentStudies(studentId, stageSeasonId) {
        WHERE a.exam_id=e.id AND a.student_id=$1 AND e.stage_season_id=$2`,
       [studentId, stageSeasonId]
     );
+    await client.query('DELETE FROM group_membership_history WHERE student_id=$1 AND stage_season_id=$2', [studentId, stageSeasonId]);
     await client.query('DELETE FROM group_memberships WHERE student_id=$1 AND stage_season_id=$2', [studentId, stageSeasonId]);
     await client.query('DELETE FROM student_group_numbers WHERE student_id=$1 AND stage_season_id=$2', [studentId, stageSeasonId]);
     await client.query('DELETE FROM participation_modes WHERE student_id=$1 AND stage_season_id=$2', [studentId, stageSeasonId]);
@@ -1074,7 +1088,7 @@ const submitReport = (studentId, subjectId, stageSeasonId, { fileId, kind, note,
     .query(
       `INSERT INTO student_reports(student_id, subject_id, stage_season_id, telegram_file_id, file_kind, note,
                                    group_id, group_title_snapshot, source_message_id)
-       SELECT pm.student_id,pm.subject_id,pm.stage_season_id,$4,$5,$6,g.id,g.title,$7
+       SELECT pm.student_id,pm.subject_id,pm.stage_season_id,$4,$5,$6,g.id,CASE WHEN ss.discussion_grouping THEN g.title ELSE 'المرحلة كاملة' END,$7
        FROM participation_modes pm
        JOIN students st ON st.id=pm.student_id AND st.is_active=true
        JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=pm.stage_season_id AND e.status='active'
@@ -1082,7 +1096,7 @@ const submitReport = (studentId, subjectId, stageSeasonId, { fileId, kind, note,
        JOIN subjects sub ON sub.id=pm.subject_id AND sub.stage_id=ss.stage_id
        JOIN group_memberships m ON m.student_id=pm.student_id AND m.subject_id=pm.subject_id AND m.stage_season_id=pm.stage_season_id
        JOIN mubahatha_groups g ON g.id=m.group_id AND g.is_active=true
-       WHERE pm.student_id=$1 AND pm.subject_id=$2 AND pm.stage_season_id=$3 AND pm.mode='report'
+       WHERE pm.student_id=$1 AND pm.subject_id=$2 AND pm.stage_season_id=$3 AND pm.mode='report' AND participation_enabled(pm.subject_id,pm.stage_season_id)
        ON CONFLICT(student_id,source_message_id) WHERE source_message_id IS NOT NULL DO NOTHING RETURNING *`,
       [studentId, subjectId, stageSeasonId, fileId, kind, note, sourceMessageId]
     )
@@ -1096,19 +1110,19 @@ const listReportStudentsForGrading = (subjectId, stageSeasonId, { groupId = null
               COUNT(r.id) AS report_count,
               MAX(r.submitted_at) AS last_submission,
               fg.report_score, COUNT(*) OVER() AS total_count,
-              g.id AS group_id, g.title AS group_title
+              g.id AS group_id, discussion_group_label(g.id) AS group_title
        FROM participation_modes pm
        JOIN students st ON st.id=pm.student_id
        LEFT JOIN group_memberships gm ON gm.student_id=st.id AND gm.subject_id=pm.subject_id AND gm.stage_season_id=pm.stage_season_id
        LEFT JOIN mubahatha_groups g ON g.id=gm.group_id
        LEFT JOIN student_reports r
               ON r.student_id=st.id AND r.subject_id=pm.subject_id AND r.stage_season_id=pm.stage_season_id
-             AND ($3::int IS NULL OR r.group_id=$3)
+             AND ($3::int IS NULL OR discussion_group_root(r.group_id)=$3)
        LEFT JOIN final_grades fg
               ON fg.student_id=st.id AND fg.subject_id=pm.subject_id AND fg.stage_season_id=pm.stage_season_id
        WHERE pm.subject_id=$1 AND pm.stage_season_id=$2
          AND (pm.mode='report' OR pm.switched_at IS NOT NULL)
-         AND ($3::int IS NULL OR gm.group_id=$3 OR r.group_id=$3)
+         AND ($3::int IS NULL OR gm.group_id=$3 OR discussion_group_root(r.group_id)=$3)
          AND (NOT $6::boolean OR fg.report_score IS NULL)
        GROUP BY st.id, st.full_name, pm.mode, pm.switched_at, fg.report_score, g.id
        ORDER BY st.full_name,st.id LIMIT $4 OFFSET $5`,
@@ -1121,7 +1135,7 @@ const listStudentReports = (studentId, subjectId, stageSeasonId, { page = 0, siz
     .query(
       `SELECT *,COUNT(*) OVER() AS total_count FROM student_reports
        WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3
-         AND ($4::int IS NULL OR group_id=$4) ORDER BY submitted_at,id LIMIT $5 OFFSET $6`,
+         AND ($4::int IS NULL OR discussion_group_root(group_id)=$4) ORDER BY submitted_at,id LIMIT $5 OFFSET $6`,
       [studentId, subjectId, stageSeasonId, groupId, pageOptions(page,size).size, pageOptions(page,size).offset]
     )
     .then((r) => r.rows);
@@ -1199,7 +1213,7 @@ const formatSlot = (slot) =>
 const findScheduleConflicts = (stageSeasonId, dayOfWeek, hour, subjectId) =>
   pool
     .query(
-      `SELECT s.*, sub.name AS subject_name, g.title AS group_title, g.group_number
+      `SELECT s.*, sub.name AS subject_name, discussion_group_label(g.id) AS group_title, g.group_number
        FROM schedule_slots s
        JOIN subjects sub ON sub.id = s.subject_id
        JOIN mubahatha_groups g ON g.id = s.group_id
@@ -1232,10 +1246,11 @@ async function addScheduleSlot(groupId, { dayOfWeek, hour, minute = 0, durationH
   const c=await pool.connect();
   try{
     await c.query('BEGIN');
+    await c.query('SELECT ss.id FROM stage_seasons ss JOIN mubahatha_groups g ON g.stage_season_id=ss.id WHERE g.id=$1 FOR SHARE OF ss',[groupId]);
     // One lock for schedule edits: infrequent administration, not student traffic.
     await c.query('SELECT pg_advisory_xact_lock(734222,1)');
     const group=(await c.query(`SELECT g.* FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
-      WHERE g.id=$1 AND g.is_active=true`,[groupId])).rows[0];
+      WHERE g.id=$1 AND g.is_active=true AND participation_enabled(g.subject_id,g.stage_season_id)`,[groupId])).rows[0];
     if(!group)throw appError('المجموعة غير نشطة أو غير موجودة.');
     const owners=(await c.query(`SELECT ta.teacher_id FROM teaching_assignments ta JOIN teachers t ON t.id=ta.teacher_id AND t.is_active=true
       WHERE ta.subject_id=$1 AND ta.stage_season_id=$2 ORDER BY ta.teacher_id`,[group.subject_id,group.stage_season_id])).rows;
@@ -1270,14 +1285,14 @@ const listGroupSlots = (groupId) =>
 const listTeacherSlots = (teacherId) =>
   pool
     .query(
-      `SELECT s.*, sub.name AS subject_name, g.title AS group_title, g.group_number,
+      `SELECT s.*, sub.name AS subject_name, discussion_group_label(g.id) AS group_title, g.group_number,
               COALESCE(ss.stage_name_snapshot, sg.name) AS stage_name
        FROM schedule_slots s
        JOIN subjects sub ON sub.id=s.subject_id
        JOIN mubahatha_groups g ON g.id=s.group_id
        JOIN stage_seasons ss ON ss.id=s.stage_season_id AND ss.is_active=true
        JOIN stages sg ON sg.id=ss.stage_id
-       WHERE s.teacher_id=$1 AND s.is_active=true
+       WHERE s.teacher_id=$1 AND s.is_active=true AND participation_enabled(s.subject_id,s.stage_season_id)
        ORDER BY s.day_of_week, s.hour, s.minute`,
       [teacherId]
     )
@@ -1287,7 +1302,7 @@ const listTeacherSlots = (teacherId) =>
 const listAllSlots = () =>
   pool
     .query(
-      `SELECT s.*, sub.name AS subject_name, g.title AS group_title, g.group_number,
+      `SELECT s.*, sub.name AS subject_name, discussion_group_label(g.id) AS group_title, g.group_number,
               COALESCE(ss.stage_name_snapshot, sg.name) AS stage_name,
               t.full_name AS teacher_name
        FROM schedule_slots s
@@ -1305,12 +1320,12 @@ const listAllSlots = () =>
 const listStageSeasonSlots = (stageSeasonId) =>
   pool
     .query(
-      `SELECT s.*, sub.name AS subject_name, g.title AS group_title, g.group_number, t.full_name AS teacher_name
+      `SELECT s.*, sub.name AS subject_name, discussion_group_label(g.id) AS group_title, g.group_number, t.full_name AS teacher_name
        FROM schedule_slots s
        JOIN subjects sub ON sub.id=s.subject_id
        JOIN mubahatha_groups g ON g.id=s.group_id
        LEFT JOIN teachers t ON t.id=s.teacher_id
-       WHERE s.stage_season_id=$1 AND s.is_active=true
+       WHERE s.stage_season_id=$1 AND s.is_active=true AND participation_enabled(s.subject_id,s.stage_season_id)
        ORDER BY s.day_of_week, s.hour, s.minute`,
       [stageSeasonId]
     )
@@ -1324,7 +1339,7 @@ const getSlotsNeedingPrompt = (leadMinutes = 5) =>
   pool
     .query(
       `WITH loc AS (SELECT (now() AT TIME ZONE $1) AS ln)
-       SELECT s.*, sub.name AS subject_name, g.title AS group_title, g.group_number,
+       SELECT s.*, sub.name AS subject_name, discussion_group_label(g.id) AS group_title, g.group_number,
               t.telegram_id AS teacher_telegram_id, t.full_name AS teacher_name,
               loc.ln::date AS scheduled_date
        FROM schedule_slots s
@@ -1333,7 +1348,7 @@ const getSlotsNeedingPrompt = (leadMinutes = 5) =>
        JOIN stage_seasons ss ON ss.id=s.stage_season_id AND ss.is_active=true
        LEFT JOIN teachers t ON t.id=s.teacher_id AND t.is_active=true
        CROSS JOIN loc
-       WHERE s.is_active=true
+       WHERE s.is_active=true AND participation_enabled(s.subject_id,s.stage_season_id)
          AND EXTRACT(DOW FROM loc.ln)::int = s.day_of_week
          AND (loc.ln::date + make_time(s.hour, s.minute, 0)) - loc.ln
              BETWEEN interval '0 minutes' AND make_interval(mins => $2::int)
@@ -1361,7 +1376,7 @@ const recordSlotDecision = (slotId, scheduledDate, decision, decidedBy) =>
       `INSERT INTO slot_decisions(slot_id, scheduled_date, decision, decided_at, decided_by)
        SELECT sl.id,$2::date,$3,now(),$4 FROM schedule_slots sl
        JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
-       WHERE sl.id=$1 AND sl.is_active=true AND $2::date=(now() AT TIME ZONE $5)::date
+       WHERE sl.id=$1 AND sl.is_active=true AND participation_enabled(sl.subject_id,sl.stage_season_id) AND $2::date=(now() AT TIME ZONE $5)::date
          AND EXTRACT(DOW FROM $2::date)::int=sl.day_of_week
          AND (now() AT TIME ZONE $5) < $2::date+make_time(sl.hour,sl.minute,0)+make_interval(hours=>sl.duration_hours)
        ON CONFLICT (slot_id, scheduled_date)
@@ -1386,7 +1401,7 @@ const getSlotsReadyToStart = () =>
        SELECT s.*, d.id AS decision_id, dates.day AS scheduled_date,
               ((dates.day+make_time(s.hour,s.minute,0)) AT TIME ZONE $1) AT TIME ZONE 'UTC' AS scheduled_start,
               ((dates.day+make_time(s.hour,s.minute,0)+make_interval(hours=>s.duration_hours)) AT TIME ZONE $1) AT TIME ZONE 'UTC' AS scheduled_end,
-              sub.name AS subject_name, g.title AS group_title, g.group_number
+              sub.name AS subject_name, discussion_group_label(g.id) AS group_title, g.group_number
        FROM schedule_slots s
        JOIN subjects sub ON sub.id=s.subject_id
        JOIN mubahatha_groups g ON g.id=s.group_id AND g.is_active=true
@@ -1394,7 +1409,7 @@ const getSlotsReadyToStart = () =>
        CROSS JOIN loc
        CROSS JOIN dates
        LEFT JOIN slot_decisions d ON d.slot_id=s.id AND d.scheduled_date=dates.day
-       WHERE s.is_active=true AND d.session_id IS NULL
+       WHERE s.is_active=true AND participation_enabled(s.subject_id,s.stage_season_id) AND d.session_id IS NULL
          AND COALESCE(d.decision,'confirmed') <> 'postponed'
          AND (NOT $2::boolean OR d.decision='confirmed')
          AND EXTRACT(DOW FROM dates.day)::int=s.day_of_week
@@ -1409,12 +1424,13 @@ async function startSessionFromSlot(slot) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query('SELECT id FROM stage_seasons WHERE id=$1 FOR SHARE',[slot.stage_season_id]);
     await client.query(`INSERT INTO slot_decisions(slot_id,scheduled_date) VALUES($1,$2)
       ON CONFLICT(slot_id,scheduled_date) DO NOTHING`, [slot.id, slot.scheduled_date]);
     const claim = await client.query(
       `SELECT d.id FROM slot_decisions d JOIN schedule_slots sl ON sl.id=d.slot_id
        JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
-       WHERE d.slot_id=$1 AND d.scheduled_date=$2 AND d.session_id IS NULL AND sl.is_active=true
+       WHERE participation_enabled(sl.subject_id,sl.stage_season_id) AND d.slot_id=$1 AND d.scheduled_date=$2 AND d.session_id IS NULL AND sl.is_active=true
          AND COALESCE(d.decision,'confirmed') <> 'postponed'
          AND (NOT $3::boolean OR d.decision='confirmed')
          AND $4::timestamp > now() FOR UPDATE OF d`,
@@ -1571,11 +1587,12 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
                 WHERE start_att.id IS NOT NULL AND end_att.id IS NOT NULL
               ) AS attended_sessions
        FROM participation_modes pm
-       LEFT JOIN group_memberships gm
-              ON gm.student_id=pm.student_id AND gm.subject_id=pm.subject_id
-             AND gm.stage_season_id=pm.stage_season_id
-       LEFT JOIN mubahatha_sessions s
-              ON s.group_id=gm.group_id
+       LEFT JOIN (
+         SELECT student_id,subject_id,stage_season_id,group_id,assigned_at,NULL::timestamp AS ended_at FROM group_memberships
+         UNION ALL SELECT student_id,subject_id,stage_season_id,group_id,assigned_at,ended_at FROM group_membership_history
+       ) gm ON gm.student_id=pm.student_id AND gm.subject_id=pm.subject_id AND gm.stage_season_id=pm.stage_season_id
+       LEFT JOIN mubahatha_sessions s ON s.group_id=gm.group_id
+             AND s.opened_at>=gm.assigned_at AND (gm.ended_at IS NULL OR s.opened_at<gm.ended_at)
              AND (pm.joined_mubahatha_at IS NULL OR s.opened_at >= pm.joined_mubahatha_at)
        LEFT JOIN mubahatha_attendance start_att
               ON start_att.session_id=s.id AND start_att.student_id=pm.student_id

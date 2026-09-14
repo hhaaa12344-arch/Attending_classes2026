@@ -51,11 +51,11 @@ function createInstituteLinks(pool) {
         WHERE ta.teacher_id=$2 AND ta.stage_season_id=ss.id
       )) ORDER BY st.sort_order NULLS LAST, st.id, c.id LIMIT $4 OFFSET $5` : `
       SELECT g.id::text AS id, g.telegram_chat_id, g.invite_link AS url,
-        concat_ws(' — ', st.name, sub.name, g.title) AS title
+        concat_ws(' — ', st.name, sub.name, discussion_group_label(g.id)) AS title
       FROM mubahatha_groups g JOIN subjects sub ON sub.id=g.subject_id
       JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
       JOIN stages st ON st.id=ss.stage_id AND st.is_active=true
-      WHERE g.is_active=true AND sub.stage_id=ss.stage_id AND ($3 OR EXISTS (
+      WHERE g.is_active=true AND participation_enabled(g.subject_id,ss.id) AND sub.stage_id=ss.stage_id AND ($3 OR EXISTS (
         SELECT 1 FROM group_memberships m JOIN students s ON s.id=m.student_id AND s.is_active=true
         JOIN enrollments e ON e.student_id=m.student_id AND e.stage_season_id=m.stage_season_id AND e.status='active'
         WHERE m.student_id=$1 AND m.group_id=g.id AND m.subject_id=g.subject_id AND m.stage_season_id=g.stage_season_id
@@ -72,9 +72,9 @@ function createInstituteLinks(pool) {
     if (!/^[1-9]\d{0,9}$/.test(String(id))) return null;
     const sql = kind === 'channels'
       ? `SELECT c.id,c.title,c.public_link AS url FROM channels c JOIN stage_seasons ss ON ss.id=c.stage_season_id AND ss.is_active=true WHERE c.id=$1`
-      : `SELECT g.id,concat_ws(' — ',sub.name,g.title) AS title,g.invite_link AS url FROM mubahatha_groups g
+      : `SELECT g.id,concat_ws(' — ',sub.name,discussion_group_label(g.id)) AS title,g.invite_link AS url FROM mubahatha_groups g
          JOIN subjects sub ON sub.id=g.subject_id JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
-         WHERE g.id=$1 AND g.is_active=true`;
+         WHERE g.id=$1 AND g.is_active=true AND participation_enabled(g.subject_id,ss.id)`;
     return (await pool.query(sql, [id])).rows[0];
   }
 

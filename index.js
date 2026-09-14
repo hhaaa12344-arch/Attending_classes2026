@@ -176,12 +176,14 @@ const STUDENT_MENU_BUTTONS = new Set([
   '🔗 روابط المعهد',
   '🚪 الخروج من المعاينة',
   '📚 دروس اليوم',
+  '📊 تقرير الحضور',
   '📊 تقريري',
   '🌴 طلب إجازة',
   '🗓️ جدولي',
   '📝 الامتحانات الشهرية',
   '🎯 درجات - المباحثات',
   '🎯 درجات المباحثات والتقارير',
+  '📖 المباحثات والتقارير',
   '📖 مشاركتي',
   '📄 إرسال تقرير',
   STUDENT_ACTIVITY_BUTTON,
@@ -318,12 +320,12 @@ function subjectsKeyboard(subjects, prefix) {
 function studentMainMenu(student = null) {
   const lessonsOnly = student && student.stage_type === 'lessons_only';
   const rows = [
-    [replyButton('📚 دروس اليوم'), replyButton('📊 تقريري')],
+    [replyButton('📚 دروس اليوم'), replyButton('📊 تقرير الحضور')],
     [replyButton('🌴 طلب إجازة'), replyButton(STUDENT_ACTIVITY_BUTTON)],
   ];
   if (!lessonsOnly) {
     rows.push([replyButton('🗓️ جدولي'), replyButton('📝 الامتحانات الشهرية')]);
-    rows.push([replyButton('🎯 درجات المباحثات والتقارير'), replyButton('📖 مشاركتي')]);
+    rows.push([replyButton('🎯 درجات المباحثات والتقارير'), replyButton('📖 المباحثات والتقارير')]);
     rows.push([replyButton('📄 إرسال تقرير')]);
   }
   rows.push([replyButton('🔗 روابط المعهد'),replyButton(GUIDE_BUTTON)]);
@@ -990,9 +992,11 @@ async function startStudentRegistration(ctx,codeOnly=false){
   if(teacher)return ctx.reply(`أهلًا بك أستاذ ${teacher.full_name} 👋`,teacherMainMenu());
   userState.set(ctx.from.id,{action:'awaiting_full_name'});
   return ctx.reply(codeOnly?'أرسل كود تفعيل الأستاذ أو كود نقل حساب الطالب الذي زوّدتك به الإدارة.':
-    'الرجاء إدخال اسمك الرباعي الكامل.\n\n'+
-    'إن كنت أستاذًا فأرسل كود التفعيل الذي زوّدك به المعهد بدل الاسم.\n'+
-    'وإن كنت طالبًا مسجَّلًا سابقًا وغيّرت حساب تليجرام، فأرسل كود نقل الحساب من الإدارة.',backOnlyMenu());
+    'أهلًا بك في بوت معهد تراث الأنبياء عليهم السلام.\n\n'+
+    '🎓 تسجيل طالب جديد\nأرسل اسمك الرباعي في رسالة واحدة، ثم اختر مرحلتك الدراسية من الأزرار.\n\n'+
+    '📝 ملاحظات مهمة\n'+
+    '• للأستاذ: أرسل كود تفعيل الأستاذ الذي زوّدتك به الإدارة بدلًا من كتابة الاسم.\n'+
+    '• للطالب المسجّل سابقًا الذي يستخدم حساب تليجرام جديدًا: أرسل كود نقل الحساب من الإدارة لاستعادة سجلك، ولا تسجّل كطالب جديد.',backOnlyMenu());
 }
 
 bot.start(async (ctx) => {
@@ -1823,7 +1827,7 @@ async function openMyReport(ctx) {
   return replyStudentScreen(ctx, student, 'اختر الموسم الذي تريد عرض تقريره:', Markup.inlineKeyboard(rows));
 }
 
-bot.hears('📊 تقريري', openMyReport);
+bot.hears(['📊 تقرير الحضور','📊 تقريري'], openMyReport);
 
 bot.action(/my_report_season:(\d+)/, async (ctx) => {
   const student = await effectiveStudent(ctx);
@@ -2444,7 +2448,7 @@ async function openReports(ctx) {
 }
 
 bot.action('admin_reports', openReports);
-bot.hears('📊 تقرير الحضور', openReports);
+bot.hears(['📊 تقرير الحضور','📊 تقريري'], openReports);
 
 bot.action(/admin_report_stage:(\d+)/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
@@ -4192,12 +4196,12 @@ async function showMyParticipation(ctx) {
   if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
   const subjects = await studies.listStudentSubjects(student.id);
   if (subjects.length === 0) {
-    return ctx.reply('لا توجد مواد في مرحلتك بعد. راجع إدارة المعهد.');
+    return ctx.reply('لا توجد مواد مشمولة بالمباحثات والتقارير في موسمك الحالي. تبقى دروسك متاحة من «دروس اليوم».');
   }
   const lines = subjects.map((s) => `• ${s.subject_name}: ${modeLabel(s)}`);
   return ctx.reply(
-    `📖 مشاركتك في مواد ${subjects[0].stage_name}:\n${lines.join('\n')}\n\n` +
-      'اختر المادة لتحديد نمط مشاركتك أو تغييره:',
+    `📖 المباحثات والتقارير في ${subjects[0].stage_name}:\n${lines.join('\n')}\n\n` +
+      'اختر المادة لفتح المباحثات أو إرسال التقارير:',
     Markup.inlineKeyboard(
       subjects.map((s) => [
         callbackButton(
@@ -4209,7 +4213,7 @@ async function showMyParticipation(ctx) {
   );
 }
 
-bot.hears('📖 مشاركتي', showMyParticipation);
+bot.hears(['📖 المباحثات والتقارير','📖 مشاركتي'], showMyParticipation);
 
 bot.action(/pm_subj:(\d+):(\d+)/, async (ctx) => {
   const student = await effectiveStudent(ctx);
@@ -4230,9 +4234,9 @@ bot.action(/pm_subj:(\d+):(\d+)/, async (ctx) => {
     rows.push([callbackButton('🔁 التحويل إلى المباحثات', `pm_switch:${subjectId}:${ssId}`)]);
     rows.push([callbackButton('📄 إرسال تقرير', `rep_send:${subjectId}:${ssId}`)]);
   } else if (!row.group_id) {
-    rows.push([callbackButton('👥 انضمّ إلى مجموعتك', `pm_join:${subjectId}:${ssId}`)]);
+    rows.push([callbackButton('👥 الدخول إلى المباحثة', `pm_join:${subjectId}:${ssId}`)]);
   } else {
-    rows.push([callbackButton('🔗 رابط مجموعتي', `pm_join:${subjectId}:${ssId}`)]);
+    rows.push([callbackButton('🔗 رابط المباحثة', `pm_join:${subjectId}:${ssId}`)]);
   }
 
   const note =
@@ -4254,18 +4258,19 @@ bot.action(/pm_set:(\d+):(\d+):(mubahatha|report)/, async (ctx) => {
   if (!row) return ctx.answerCbQuery('هذه المادة ليست ضمن موادك.');
   if (row.mode) return ctx.answerCbQuery('اخترت نمطك مسبقًا لهذه المادة.');
 
-  await studies.setParticipationMode(student.id, subjectId, ssId, mode);
+  const savedMode=await studies.setParticipationMode(student.id, subjectId, ssId, mode);
+  if(!savedMode)return ctx.answerCbQuery('تغيّرت إعدادات المادة أو سبق حفظ اختيارك. أعد فتح القائمة.');
   await ctx.answerCbQuery('تم الحفظ ✅');
   if (mode === 'report') {
     const assigned=await studies.assignStudentToGroup(student.id,subjectId,ssId);
     return ctx.editMessageText(
       `📄 اخترت نظام التقارير في «${row.subject_name}».\n` +
-        (assigned.group?`المجموعة: ${assigned.group.title}\n`:assigned.message+'\n')+
-        'أرسل تقاريرك من «📖 مشاركتي» ← المادة ← «إرسال تقرير».\n' +
+        (assigned.group?`تنظيم المباحثات: ${assigned.group.title}\n`:assigned.message+'\n')+
+        'أرسل تقاريرك من «📖 المباحثات والتقارير» ← المادة ← «إرسال تقرير».\n' +
         'وأنت مشمول بالامتحانات الشهرية كبقية الطلبة.'
     );
   }
-  await ctx.editMessageText(`👥 اخترت نظام المباحثات في «${row.subject_name}». جارٍ توزيعك على مجموعة...`);
+  await ctx.editMessageText(`👥 اخترت نظام المباحثات في «${row.subject_name}». جارٍ فتح مباحثة المادة...`);
   return joinMubahathaGroup(ctx, student, subjectId, ssId);
 });
 
@@ -4274,12 +4279,12 @@ async function joinMubahathaGroup(ctx, student, subjectId, ssId) {
   // لا ينضم لمجموعة مادة إلا من اختار المباحثات فيها فعلًا
   const mode = await studies.getParticipationMode(student.id, subjectId, ssId);
   if (!mode || mode.mode !== 'mubahatha') {
-    return ctx.reply('لست في نظام المباحثات في هذه المادة. اخترها أولًا من «📖 مشاركتي».');
+    return ctx.reply('لست في نظام المباحثات في هذه المادة. اخترها أولًا من «📖 المباحثات والتقارير».');
   }
   const result = await studies.assignStudentToGroup(student.id, subjectId, ssId);
   if (!result.group) {
     await notifyAdmins(`⚠️ تعذر توزيع الطالب «${student.full_name}» في المادة رقم ${subjectId}، موسم المرحلة رقم ${ssId}.\n${result.message}`);
-    return ctx.reply(result.message+' أُبلغت الإدارة؛ أعد المحاولة من «مشاركتي» بعد توفير المجموعة.');
+    return ctx.reply(result.message+' أُبلغت الإدارة؛ أعد المحاولة من «المباحثات والتقارير» بعد توفير المجموعة.');
   }
   const group = result.group;
   if (!group.invite_link) {
@@ -4289,8 +4294,8 @@ async function joinMubahathaGroup(ctx, student, subjectId, ssId) {
     );
   }
   return ctx.reply(
-    `👥 مجموعتك: ${group.title}\n\nانضم إليها من الرابط أدناه، وستصلك تنبيهات بدء المباحثات في وقتها.`,
-    Markup.inlineKeyboard([[Markup.button.url('🔗 الانضمام إلى المجموعة', group.invite_link)]])
+    `👥 مباحثة المادة: ${group.title}\n\nانضم إليها من الرابط أدناه، وستصلك تنبيهات بدء المباحثات في وقتها.`,
+    Markup.inlineKeyboard([[Markup.button.url('🔗 الدخول إلى المباحثة', group.invite_link)]])
   );
 }
 
@@ -4326,7 +4331,7 @@ bot.action(/pm_switchok:(\d+):(\d+)/, async (ctx) => {
   const switched = await studies.switchToMubahatha(student.id, subjectId, ssId);
   if (!switched) return ctx.answerCbQuery('لست في نظام التقارير لهذه المادة.');
   await ctx.answerCbQuery('تم التحويل ✅');
-  await ctx.editMessageText('✅ تم تحويلك إلى نظام المباحثات. جارٍ توزيعك على مجموعة...');
+  await ctx.editMessageText('✅ تم تحويلك إلى نظام المباحثات. جارٍ فتح مباحثة المادة...');
   return joinMubahathaGroup(ctx, student, subjectId, ssId);
 });
 
@@ -4341,7 +4346,7 @@ bot.hears('📄 إرسال تقرير', async (ctx) => {
   const reportSubjects = subjects.filter((s) => s.mode === 'report');
   if (reportSubjects.length === 0) {
     return ctx.reply(
-      'لست في نظام التقارير في أي مادة.\nاختر نظام التقارير من «📖 مشاركتي» أولًا.'
+      'لست في نظام التقارير في أي مادة.\nاختر نظام التقارير من «📖 المباحثات والتقارير» أولًا.'
     );
   }
   return ctx.reply(

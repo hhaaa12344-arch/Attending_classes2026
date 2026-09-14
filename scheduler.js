@@ -9,10 +9,10 @@ function createScheduler({ pool, studies }) {
     const field = phase === 'start' ? 'start_notifications_queued' : 'end_notifications_queued';
     try {
       await client.query('BEGIN');
-      const r = await client.query(`SELECT s.*,g.subject_id,g.stage_season_id,g.title AS group_title,sub.name AS subject_name
+      const r = await client.query(`SELECT s.*,g.subject_id,g.stage_season_id,discussion_group_label(g.id) AS group_title,sub.name AS subject_name
         FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id
         JOIN subjects sub ON sub.id=g.subject_id JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
-        WHERE s.id=$1 AND s.${field}=false FOR UPDATE OF s`, [sessionId]);
+        WHERE s.id=$1 AND participation_enabled(g.subject_id,g.stage_season_id) AND s.${field}=false FOR UPDATE OF s`, [sessionId]);
       const s = r.rows[0];
       if (!s) { await client.query('COMMIT'); return 0; }
       const expires = phase === 'start' ? s.closes_at : s.end_closes_at;

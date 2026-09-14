@@ -10,8 +10,14 @@ async function initStudentGuideSchema(pool){
     message_kind TEXT NOT NULL CHECK(message_kind IN ('photo','text')),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),CHECK(chat_id=telegram_id)
   );`);
-  for(const p of PAGES)await pool.query(`INSERT INTO student_guide_pages(page_key,title,body)
-    VALUES($1,$2,$3) ON CONFLICT(page_key) DO NOTHING`,[p.key,p.title,defaultText(p)]);
+  for(const p of PAGES){
+    const body=defaultText(p);
+    await pool.query(`INSERT INTO student_guide_pages(page_key,title,body)
+      VALUES($1,$2,$3) ON CONFLICT(page_key) DO NOTHING`,[p.key,p.title,body]);
+    const oldBody=body.replaceAll('تقرير الحضور','تقريري').replaceAll('«المباحثات والتقارير»','«مشاركتي»')
+      .replace('قد تكون المباحثة للمرحلة كاملة أو لمجموعتك؛ يحدد المعهد تنظيمها. حضور الدروس مستقل عن تقسيم المباحثات.','مجموعتك مستقلة عن المجموعات الأخرى، ورقمها موحّد بين مواد مرحلتك في الموسم.');
+    await pool.query('UPDATE student_guide_pages SET body=$2 WHERE page_key=$1 AND body=$3',[p.key,body,oldBody]);
+  }
 }
 function createStudentGuide({pool,telegram}){
   let deps;

@@ -56,6 +56,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
       if(req.method==='GET'){
         if(route==='/stages')result=await adminData.stages(q.seasonId?positiveInt(q.seasonId):null);
         else if(/^\/stages\/\d+$/.test(route))result=await adminData.stage(positiveInt(route.split('/')[2]),q.seasonId?positiveInt(q.seasonId):null);
+        else if(route==='/lesson-attendance')result=await adminData.lessonAttendance(q);
         else if(route==='/students')result=await adminData.students(q);
         else if(/^\/students\/\d+$/.test(route))result=await adminData.student(positiveInt(route.split('/')[2]));
         else if(route==='/leaves')result=await adminData.leaves(q);
@@ -96,6 +97,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
       } else if(req.method==='POST'||req.method==='PATCH') {
         const body=await readJson(req);let m;
         if((m=/^\/students\/(\d+)$/.exec(route))&&req.method==='PATCH')result=await adminData.updateStudent(positiveInt(m[1]),body,actor.id);
+        else if((m=/^\/stage-seasons\/(\d+)\/participation-settings$/.exec(route))&&req.method==='PATCH')result=await adminData.saveParticipationSettings(positiveInt(m[1]),body,actor.id);
         else if(route==='/teachers'&&req.method==='POST'){
           if(typeof body.fullName!=='string'||body.fullName.trim().length<3||body.fullName.length>200)throw appError('اسم الأستاذ غير صالح.');
           if(body.phone&&(typeof body.phone!=='string'||body.phone.length>30))throw appError('رقم الهاتف غير صالح.');
