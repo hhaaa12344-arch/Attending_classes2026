@@ -11,6 +11,8 @@ async function setup({authorized=true}={}){
     requests.push({url,options});const u=new URL(url,'https://institute.example');let data,status=200;
     if(u.pathname.endsWith('/auth'))data={token:'a'.repeat(64),user:{name:'إدارة الاختبار'}};
     else if(u.pathname.endsWith('/seasons'))data=[{id:1,name:'الموسم الأول',is_current:true}];
+    else if(u.pathname.endsWith('/lesson-attendance'))data={season:{season_name:'الموسم الأول',as_of:'2026-09-14T12:00:00Z'},subjects:[{id:1,name:'الفقه'},{id:2,name:'العقائد'}],rows:[{id:1,sequence:1,full_name:'طالب <img src=x> اسم رباعي',attendance:[{attended:40,total:42},{attended:0,total:0}]}],total:1,page:0,size:50};
+    else if(u.pathname.endsWith('/participation-settings'))data={grouped:false,pausedSlots:0};
     else if(u.pathname.endsWith('/stages'))data=[stage];else if(u.pathname.endsWith('/stages/1'))data=stage;
     else if(u.pathname.endsWith('/students/1')){
       if(options.method==='PATCH'){data={error:'أدخل اسمًا رباعيًا'};status=400;}
@@ -79,4 +81,31 @@ test('admin matrix: empty day can add a slot; exact minutes, conflict and remova
     await until(()=>!w.document.querySelector('[data-action="matrix-remove"]'));
     assert.ok(requests.some(r=>r.url.endsWith('/schedule/8/remove')));
   }finally{dom.window.close();}
+});
+
+test('admin attendance matrix: independent stage selection, subject columns and safe LTR ratios',async()=>{
+ const {dom,w,requests,until,click}=await setup();try{
+  await until(()=>w.document.querySelector('.stage-card'));click('[data-action="lesson-attendance"]');
+  await until(()=>w.document.querySelector('#attendance-stage'));
+  assert.equal(w.document.querySelectorAll('#content table').length,0);
+  const select=w.document.querySelector('#attendance-stage select');select.value='1';select.dispatchEvent(new w.Event('change',{bubbles:true}));
+  await until(()=>w.document.querySelector('.attendance-ratio'));
+  assert.equal(w.document.querySelectorAll('#content th').length,4);
+  assert.equal(w.document.querySelector('.attendance-ratio').getAttribute('dir'),'ltr');
+  assert.equal(w.document.querySelector('.attendance-ratio').textContent,'40 / 42');
+  assert.equal(w.document.querySelector('#content img'),null);
+  assert.ok(requests.some(r=>r.url.includes('/lesson-attendance?stageId=1')));
+ }finally{dom.window.close();}
+});
+test('admin participation settings: explicit subject exclusion and whole-stage option submitted together',async()=>{
+ const {dom,w,requests,until,click}=await setup();try{
+  await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
+  click('[data-tab="subjects"]');await until(()=>w.document.querySelector('#participation-settings'));
+  const form=w.document.querySelector('#participation-settings');
+  form.querySelector('[name="grouped"]').value='false';form.querySelector('[data-study-id="1"]').value='false';
+  form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+  await until(()=>requests.some(r=>r.url.includes('/participation-settings')));
+  const req=requests.find(r=>r.url.includes('/participation-settings'));assert.equal(req.options.method,'PATCH');assert.deepEqual(JSON.parse(req.options.body),{grouped:false,enabledSubjectIds:[]});
+  await until(()=>w.document.querySelector('#notice').textContent.includes('حُفظت إعدادات')); 
+ }finally{dom.window.close();}
 });

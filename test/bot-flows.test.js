@@ -26,7 +26,7 @@ test('bot: /start guide has a text fallback and gates registration behind its bu
   assert.ok(messages.some(m=>m.text?.includes('اضغط زر')),'typing before pressing the button only nudges, does not register');
   assert.equal(await db.getStudentByTelegramId(77777),undefined);
   await send(77777,'','onboarding_ack');
-  assert.ok(messages.some(m=>m.text?.includes('الرجاء إدخال اسمك الرباعي الكامل')));
+  assert.ok(messages.some(m=>m.text?.includes('أرسل اسمك الرباعي في رسالة واحدة')&&m.text.includes('للأستاذ:')&&m.text.includes('حساب تليجرام جديدًا')));
   await send(77777,'محمد علي حسن جعفر');
   assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data?.startsWith('reg_stage:'))),'name is accepted only after the button, then registration proceeds as before');
 });
@@ -39,6 +39,7 @@ test('bot: first-use confirmation required, marking disappears and today retains
   await send(90000,'📚 دروس اليوم');assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='confirm_official_student')));
   await send(90000,'','confirm_official_student');assert.ok((await db.getStudentById(student.id)).official_confirmed_at);
   const menu=messages.find(m=>m.reply_markup?.keyboard);assert.ok(menu,'confirmation supplies persistent main keyboard');
+  const keys=menu.reply_markup.keyboard.flat().map(b=>b.text);assert.ok(keys.includes('📊 تقرير الحضور'));assert.ok(keys.includes('📖 المباحثات والتقارير'));assert.ok(!keys.includes('📊 تقريري'));
   const saved=await db.pool.query("SELECT message_id FROM student_ui_messages WHERE student_id=$1 AND message_kind='menu'",[student.id]);assert.equal(saved.rows.length,1);
   const lesson=await db.activateLesson(subject.id,24);await send(90000,'📚 دروس اليوم');
   assert.ok(!messages.some(m=>m.method==='deleteMessage'&&Number(m.message_id)===Number(saved.rows[0].message_id)),'today never deletes the menu message');

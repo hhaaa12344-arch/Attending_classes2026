@@ -77,11 +77,11 @@ test('guide: lessons-only stage hides studies pages and prevents forged navigati
 });
 test('guide: registration continuation, code shortcut, legacy button, and an existing account cannot be reset',async()=>{
   await send(80003,{text:'/start'});await send(80003,{data:'guide:begin'});
-  assert.ok(messages.some(m=>m.text?.includes('الرجاء إدخال اسمك الرباعي')));assert.equal(await current(80003),undefined);
+  assert.ok(messages.some(m=>m.text?.includes('أرسل اسمك الرباعي في رسالة واحدة')));assert.equal(await current(80003),undefined);
   await send(80004,{text:'/start'});await send(80004,{data:'guide:code'});assert.ok(messages.some(m=>m.text?.includes('كود تفعيل')));
   await send(80011,{data:'onboarding_ack'});
   assert.equal((await db.getStudentById(existing.id)).full_name,existing.full_name);
-  assert.ok(messages.some(m=>m.reply_markup?.keyboard));assert.ok(!messages.some(m=>m.text?.includes('الرجاء إدخال اسمك الرباعي')));
+  assert.ok(messages.some(m=>m.reply_markup?.keyboard));assert.ok(!messages.some(m=>m.text?.includes('أرسل اسمك الرباعي في رسالة واحدة')));
 });
 test('guide: non-admins, groups and preview cannot change guide content; cancel exits upload cleanly',async()=>{
   const before=(await db.pool.query("SELECT * FROM student_guide_pages WHERE page_key='registration'")).rows[0];

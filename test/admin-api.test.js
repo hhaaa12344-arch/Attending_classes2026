@@ -28,7 +28,7 @@ test.after(async()=>{if(server){server.closeAllConnections();await new Promise(r
 test('admin HTTP: public shell contains no records; every data endpoint requires verified admin',async()=>{
   const shell=await fetch(base+'/admin/');assert.equal(shell.status,200);assert.match(shell.headers.get('content-security-policy'),/default-src 'none'/);
   const html=await shell.text();assert.match(html,/dir="rtl"/);assert.ok(!html.includes(student.full_name));
-  for(const route of ['/stages','/students','/leaves','/reports?seasonId=1','/attendance.csv?seasonId=1','/attendance.md?seasonId=1'])assert.equal((await request(route,null,'GET',null)).status,401);
+  for(const route of ['/lesson-attendance?stageId=1','/stages','/students','/leaves','/reports?seasonId=1','/attendance.csv?seasonId=1','/attendance.md?seasonId=1'])assert.equal((await request(route,null,'GET',null)).status,401);
   assert.equal((await request('/auth',{initData:signed(43)},'POST',null)).status,403);
   assert.equal((await request('/auth',{initData:signed().replace('42','45')},'POST',null)).status,401);
   const auth=await request('/auth',{initData:signed()},'POST',null);assert.equal(auth.status,200);token=(await auth.json()).token;
@@ -78,6 +78,17 @@ test('admin HTTP: group edits validate together and cannot reduce capacity below
   assert.equal((await request('/groups/'+group.id,{capacity:70,inviteLink:'javascript:bad'},'PATCH')).status,400);
   assert.equal((await studies.getGroupById(group.id)).capacity,before.capacity);
   assert.equal((await request('/groups/'+group.id,{capacity:70,inviteLink:'https://t.me/test_group'},'PATCH')).status,200);
+});
+test('admin HTTP: attendance endpoint and season participation configuration require valid scoped values',async()=>{
+  let response=await request('/lesson-attendance?stageId='+stage.id);assert.equal(response.status,200);
+  const matrix=await response.json();assert.equal(matrix.subjects.length,1);assert.ok(matrix.rows.some(r=>r.id===student.id));
+  assert.equal((await request('/lesson-attendance?stageId=bad')).status,400);
+  const route='/stage-seasons/'+ss+'/participation-settings';
+  assert.equal((await request(route,{grouped:true,enabledSubjectIds:[subject.id]},'PATCH',null)).status,401);
+  assert.equal((await request(route,{grouped:'false',enabledSubjectIds:[subject.id]},'PATCH')).status,400);
+  assert.equal((await request(route,{grouped:true,enabledSubjectIds:[]},'PATCH')).status,200);
+  assert.equal((await (await request('/stages/'+stage.id)).json()).subjects[0].participation_enabled,false);
+  assert.equal((await request(route,{grouped:true,enabledSubjectIds:[subject.id]},'PATCH')).status,200);
 });
 test('admin HTTP: exam editor, protected publication, question immutability, postponement and logout',async()=>{
   const dateIso=new Date(Date.now()+86400000).toISOString().slice(0,10);
