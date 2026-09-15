@@ -612,8 +612,13 @@ async function createExam(subjectId, stageSeasonId, teacherId, { examNumber, tit
     err.code = 'BAD_HOURS';
     throw err;
   }
+  const examTitle = typeof title === 'string' && title.trim()
+    ? title.trim()
+    : `الامتحان الشهري ${n}`;
+  const client = await pool.connect();
   try {
-    const r = await pool.query(
+    await client.query('BEGIN');
+    const r = await client.query(
       `INSERT INTO exams(subject_id, stage_season_id, teacher_id, exam_number, title,
                          opens_at, available_hours, closes_at, max_score)
        VALUES($1,$2,$3,$4,$5,
@@ -623,16 +628,39 @@ async function createExam(subjectId, stageSeasonId, teacherId, { examNumber, tit
                 + make_interval(hours => $7::int),
               $8)
        RETURNING *`,
-      [subjectId, stageSeasonId, teacherId, n, title, dateIso, h, GRADE_WEIGHTS.examEach, EXAM_START_HOUR, SCHEDULE_TZ]
+      [subjectId, stageSeasonId, teacherId, n, examTitle, dateIso, h, GRADE_WEIGHTS.examEach, EXAM_START_HOUR, SCHEDULE_TZ]
     );
-    return r.rows[0];
+    const exam = r.rows[0];
+    const subject = (await client.query('SELECT name FROM subjects WHERE id=$1', [subjectId])).rows[0];
+    const subjectName = subject?.name || 'المادة';
+    const opensText = new Date(exam.opens_at).toLocaleString('ar-IQ', {
+      timeZone: SCHEDULE_TZ,
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+    });
+    const text =
+      `📢 لديك امتحان مجدول في مادة «${subjectName}».\n` +
+      `📚 الموضوع: «${examTitle}».\n` +
+      `🗓 الموعد: ${opensText}.\n` +
+      `⏳ مدة الإتاحة: ${h} ساعة.\n\n` +
+      'سيظهر الامتحان تلقائيًا في «📝 الامتحانات الشهرية» عند حلول الموعد.';
+    // إشعار واحد فور إنشاء الامتحان. نستخدم نفس مفتاح النشر لمنع أي إشعار مكرر لاحقًا.
+    await client.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
+      SELECT 'exam:'||$1::text||':'||st.id::text,st.telegram_id,$2::jsonb,$3 FROM enrollments en
+      JOIN students st ON st.id=en.student_id AND st.is_active=true
+      WHERE en.stage_season_id=$4 AND en.status='active' ON CONFLICT DO NOTHING`,
+      [exam.id, JSON.stringify([text, {}]), exam.closes_at, stageSeasonId]);
+    await client.query('COMMIT');
+    return exam;
   } catch (err) {
+    await client.query('ROLLBACK');
     if (err.code === '23505') {
       const e = new Error(`الامتحان الشهري رقم ${n} موجود مسبقًا لهذه المادة في هذا الموسم.`);
       e.code = 'EXAM_EXISTS';
       throw e;
     }
     throw err;
+  } finally {
+    client.release();
   }
 }
 
@@ -679,6 +707,21 @@ async function deleteExamQuestion(questionId) {
     const r=await c.query('DELETE FROM exam_questions WHERE id=$1 RETURNING id',[questionId]);
     await c.query('COMMIT');return r.rowCount>0;
   }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+}
+
+async function getExamsReadyToAutoPublish(limit = 50) {
+  const safeLimit = Math.max(1, Math.min(200, Number(limit) || 50));
+  return pool.query(
+    `SELECT e.id FROM exams e
+     JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+     WHERE e.status='draft'
+       AND e.opens_at<=now()
+       AND e.closes_at>now()
+       AND EXISTS (SELECT 1 FROM exam_questions q WHERE q.exam_id=e.id)
+     ORDER BY e.opens_at,e.id
+     LIMIT $1`,
+    [safeLimit]
+  ).then(r=>r.rows);
 }
 
 async function publishExam(examId) {
@@ -1739,6 +1782,7 @@ module.exports = {
   addExamQuestion,
   listExamQuestions,
   deleteExamQuestion,
+  getExamsReadyToAutoPublish,
   publishExam,
   getExamById,
   listExamsForSubject,

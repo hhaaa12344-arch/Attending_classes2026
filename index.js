@@ -192,12 +192,15 @@ const STUDENT_MENU_BUTTONS = new Set([
 ]);
 
 // أزرار لوحة الأستاذ — تُعامل كأزرار قوائم فلا تُفسَّر كإدخال نصي
+// زر تعبئة مرئي كمساحة فارغة لرفع زر لوحة الأستاذ عن حافة شاشة الهاتف.
+const TEACHER_MENU_SPACER = '\u3164';
 const TEACHER_MENU_BUTTONS = new Set([
   '🔗 روابط المعهد',
   '🚪 الخروج من المعاينة',
   '📚 موادي', '📊 حضور موادي', '👥 المجموعات',
   '🗓️ جدول المباحثات', '📝 الامتحانات', '🏁 إنهاء الموسم', '✏️ تحرير الدرجات',
   '📄 تقارير الطلبة', '🔗 روابط المجموعات',
+  '🖥️ فتح لوحة الأستاذ', TEACHER_MENU_SPACER,
 ]);
 
 const ADMIN_MENU_BUTTONS = new Set([
@@ -365,6 +368,7 @@ function teacherMainMenu() {
     [replyButton('🔗 روابط المجموعات')],
     [replyButton('🔗 روابط المعهد')],
     [replyButton('🖥️ فتح لوحة الأستاذ')],
+    [replyButton(TEACHER_MENU_SPACER)],
   ]).resize().persistent();
 }
 
@@ -1441,6 +1445,18 @@ bot.on('text', async (ctx, next) => {
     return ctx.reply(`✅ صارت السعة ${cap} طالبًا.`, teacherMainMenu());
   }
 
+  // -------- الأستاذ: موضوع الامتحان قبل تحديد ساعات الإتاحة --------
+  if (state.action === 'teacher_exam_topic') {
+    const title = ctx.message.text.trim();
+    if (title.length < 3 || title.length > 150) {
+      return ctx.reply('أرسل موضوعًا واضحًا للامتحان بين 3 و150 حرفًا.');
+    }
+    userState.set(ctx.from.id, { ...state, action: 'teacher_exam_hours', title });
+    return ctx.reply(
+      `الموضوع: «${title}»\n\nكم ساعة يبقى الامتحان متاحًا؟ (أرسل رقمًا، مثال: 24)`
+    );
+  }
+
   // -------- الأستاذ: ساعات إتاحة الامتحان ثم إنشاؤه --------
   if (state.action === 'teacher_exam_hours') {
     const hours = Number(ctx.message.text.trim());
@@ -1453,14 +1469,15 @@ bot.on('text', async (ctx, next) => {
     try {
       const exam = await studies.createExam(state.subjectId, state.ssId, teacher.id, {
         examNumber: state.number,
-        title: `الامتحان الشهري ${state.number}`,
+        title: state.title || `الامتحان الشهري ${state.number}`,
         dateIso: state.dateIso,
         hours,
       });
       await ctx.reply(
-        `✅ أُنشئ الامتحان الشهري ${state.number} كمسودة.\n` +
+        `✅ أُنشئ الامتحان الشهري ${state.number} وتم إشعار الطلبة به.\n` +
+          `الموضوع: «${state.title || `الامتحان الشهري ${state.number}`}»\n` +
           `يفتح ${state.dateIso} ويبقى متاحًا ${hours} ساعة.\n` +
-          'أضف الأسئلة ثم انشره ليصل الطلبة.',
+          'أضف الأسئلة فقط؛ وسيصبح الامتحان متاحًا تلقائيًا عند الموعد المحدد.',
         teacherMainMenu()
       );
       return renderExam(ctx, exam.id);
@@ -2607,6 +2624,8 @@ async function openTeacherWeb(ctx){
   return ctx.reply('افتح لوحة الأستاذ:',Markup.inlineKeyboard([[Markup.button.webApp('🖥️ فتح لوحة الأستاذ',url)]]));
 }
 bot.hears('🖥️ فتح لوحة الأستاذ',openTeacherWeb);
+// زر المسافة أسفل لوحة الأستاذ وظيفته بصرية فقط؛ نحذف رسالته إن ضُغط بالخطأ.
+bot.hears(TEACHER_MENU_SPACER,async ctx=>{try{await ctx.deleteMessage();}catch(_){}});
 bot.command('teacher_web',openTeacherWeb);
 
 async function openAdminWeb(ctx){
@@ -3451,8 +3470,8 @@ bot.action(/ex_subj:(\d+):(\d+)/, async (ctx) => {
     rows.push([
       e
         ? Markup.button.callback(
-            `${e.status === 'published' ? '📤' : '📝'} الشهري ${n} — ${Number(e.question_count)} سؤال` +
-              `${e.status === 'published' ? ` (${Number(e.submitted_count)} سلّموا)` : ' (مسودة)'}`,
+            `${e.status === 'published' ? '📤' : '⏰'} الشهري ${n} — ${Number(e.question_count)} سؤال` +
+              `${e.status === 'published' ? ` (${Number(e.submitted_count)} سلّموا)` : ' (مجدول)'}`,
             `ex_view:${e.id}`
           )
         : Markup.button.callback(`➕ إنشاء الامتحان الشهري ${n}`, `ex_new:${subjectId}:${ssId}:${n}`),
@@ -3488,7 +3507,7 @@ bot.action(/ex_day:(\d+):(\d+):(\d):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
     return ctx.answerCbQuery('غير مصرح.');
   }
   userState.set(ctx.from.id, {
-    action: 'teacher_exam_hours',
+    action: 'teacher_exam_topic',
     subjectId: Number(subjectId),
     ssId: Number(ssId),
     number: Number(number),
@@ -3496,7 +3515,7 @@ bot.action(/ex_day:(\d+):(\d+):(\d):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
   });
   await ctx.answerCbQuery();
   return ctx.reply(
-    `تاريخ الامتحان: ${iso}\n\nكم ساعة يبقى الامتحان متاحًا؟ (أرسل رقمًا، مثال: 24)`
+    `تاريخ الامتحان: ${iso}\n\nأرسل موضوع الامتحان الذي سيظهر في إشعار الطلبة، مثال: «أحكام البيع».`
   );
 });
 
@@ -3512,16 +3531,14 @@ async function renderExam(ctx, examId, edit = false) {
   if (exam.status === 'draft') {
     rows.push([Markup.button.callback('➕ سؤال صح/خطأ', `ex_qtf:${examId}`)]);
     rows.push([Markup.button.callback('➕ سؤال اختيار من متعدد', `ex_qmcq:${examId}`)]);
-    if (questions.length > 0) {
-      rows.push([Markup.button.callback('📤 نشر الامتحان للطلبة', `ex_pub:${examId}`)]);
-    }
+
   } else {
     rows.push([Markup.button.callback('📊 النتائج', `ex_res:${examId}`)]);
     rows.push([Markup.button.callback('🕓 تأجيل الامتحان', `ex_pp:${examId}`)]);
   }
   const text =
     `📝 ${exam.title || 'الامتحان الشهري ' + exam.exam_number} — ${exam.subject_name}\n` +
-    `الحالة: ${exam.status === 'published' ? 'منشور 📤' : 'مسودة 📝'}\n` +
+    `الحالة: ${exam.status === 'published' ? 'منشور 📤' : 'مجدول تلقائيًا ⏰'}\n` +
     `يفتح: ${new Date(exam.opens_at).toISOString().slice(0, 16).replace('T', ' ')}\n` +
     `يُغلق: ${new Date(exam.closes_at).toISOString().slice(0, 16).replace('T', ' ')}\n` +
     `الدرجة: ${Number(exam.max_score)}\n\nالأسئلة (${questions.length}):\n${lines.slice(0,2700)}${lines.length>2700?'\n… بقية الأسئلة متاحة كاملة في لوحة الإدارة.':''}`;

@@ -69,6 +69,14 @@ function createScheduler({ pool, studies }) {
         } catch(e) {await c.query('ROLLBACK');throw e;} finally {c.release();}
       }
       for (const slot of await studies.getSlotsReadyToStart()) await studies.startSessionFromSlot(slot);
+      // الامتحانات لا تحتاج زر نشر: تتحول تلقائيًا إلى منشورة عند حلول موعدها.
+      for (const exam of await studies.getExamsReadyToAutoPublish(50)) {
+        try { await studies.publishExam(exam.id); }
+        catch (err) {
+          // قد تتسابق دورة أخرى مع هذه الدورة؛ هذا ليس خطأ تشغيليًا.
+          if (err?.code !== 'CONFLICT') console.error(`Auto exam publish ${exam.id} failed:`, err.message);
+        }
+      }
       const pending = await pool.query(`SELECT id FROM mubahatha_sessions
         WHERE (start_notifications_queued=false AND is_closed=false AND closes_at > now())
            OR (end_notifications_queued=false AND end_closes_at > now()) ORDER BY id LIMIT 100`);

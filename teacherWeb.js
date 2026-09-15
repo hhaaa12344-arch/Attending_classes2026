@@ -28,6 +28,14 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
     return {subjectId,seasonId};
   }
 
+  async function requireOwnedExam(actor,examId){
+    examId=positiveInt(examId);
+    const exam=await studies.getExamById(examId);
+    if(!exam)throw appError('الامتحان غير موجود.','NOT_FOUND',404);
+    if(!await ownsSubject(actor.teacherId,exam.subject_id,exam.stage_season_id))throw appError('هذا الامتحان ليس ضمن موادك.','FORBIDDEN',403);
+    return exam;
+  }
+
   async function dashboard(actor){
     const subjects=await teacherSubjects(actor.teacherId);
     const totals={subjects:subjects.length,students:subjects.reduce((n,s)=>n+Number(s.student_count||0),0),pendingReports:0,todayDiscussions:0};
@@ -135,6 +143,10 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
         const {subjectId,seasonId}=await requireOwnedSubject(actor,q.subjectId,q.seasonId);
         result=await studies.listExamsForSubject(subjectId,seasonId);
       }
+      else if(/^\/exams\/\d+$/.test(route)){
+        const exam=await requireOwnedExam(actor,route.split('/')[2]);
+        result={exam,questions:await studies.listExamQuestions(exam.id)};
+      }
       else throw appError('الصفحة غير موجودة.','NOT_FOUND',404);
       json(res,200,result??null);return true;
     }
@@ -162,6 +174,24 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
           WHERE r.id=$1 AND ta.teacher_id=$2`,[reportId,actor.teacherId])).rows[0];
         if(!report)throw appError('التقرير غير موجود أو ليس ضمن موادك.','FORBIDDEN',403);
         result=await studies.setReportItemScore(reportId,validScore(body.score,15),actor.id);
+      }
+      else if(route==='/exams'){
+        const {subjectId,seasonId}=await requireOwnedSubject(actor,body.subjectId,body.seasonId);
+        const examNumber=positiveInt(body.examNumber,'رقم الامتحان');
+        const hours=positiveInt(body.hours,'عدد ساعات الإتاحة');
+        if(!/^\d{4}-\d{2}-\d{2}$/.test(body.dateIso||''))throw appError('تاريخ الامتحان غير صالح.');
+        const title=typeof body.title==='string'?body.title.trim():'';
+        if(title.length<3)throw appError('أدخل موضوع الامتحان بوضوح.');
+        if(title.length>150)throw appError('موضوع الامتحان طويل جدًا.');
+        result=await studies.createExam(subjectId,seasonId,actor.teacherId,{examNumber,title,dateIso:body.dateIso,hours});
+      }
+      else if((m=/^\/exams\/(\d+)\/questions$/.exec(route))){
+        const exam=await requireOwnedExam(actor,m[1]);
+        result=await studies.addExamQuestion(exam.id,body);
+      }
+      else if((m=/^\/exams\/(\d+)\/publish$/.exec(route))){
+        const exam=await requireOwnedExam(actor,m[1]);
+        result=await studies.publishExam(exam.id);
       }
       else throw appError('العملية غير متاحة في لوحة الأستاذ.','NOT_FOUND',404);
       json(res,200,result??null);return true;
