@@ -1142,7 +1142,8 @@ async function deliverReportToTeachers(student, subjectId, subjectName, payload)
     `الطالب: ${student.full_name}\n` +
     `المادة: ${subjectName}\n` +
     `المجموعة: ${payload.groupTitle || 'غير محددة في السجل القديم'}\n` +
-    `التاريخ: ${new Date().toISOString().slice(0, 10)}`;
+    `التاريخ: ${new Date().toISOString().slice(0, 10)}\n\n` +
+    '⏳ سيبقى هذا التقرير ضمن «تقارير الطلبة» بانتظار التقييم حتى تسجّل درجته.';
 
   let delivered = 0;
   for (const t of recipients) {
@@ -5035,9 +5036,26 @@ bot.hears('📡 القنوات المرتبطة', showLinkedChannels);
 
 bot.action(/admin_unlink_channel:(\d+)/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
-  await db.unlinkChannel(Number(ctx.match[1]));
+  const channelId = Number(ctx.match[1]);
+  const channel = (await db.listChannelsWithStage()).find((c) => Number(c.id) === channelId);
+  if (!channel) return ctx.answerCbQuery('القناة غير موجودة أو فُكّ ربطها مسبقًا.', { show_alert: true });
+  await ctx.answerCbQuery();
+  return ctx.editMessageText(
+    `⚠️ تحذير\n\nهل أنت متأكد من فك ارتباط قناة «${channel.title || channel.telegram_chat_id}» عن مرحلة «${channel.stage_name}»؟\n\n` +
+      'سيُلغى الربط فقط، ولن تُحذف القناة نفسها ولا الدروس أو سجلات الحضور السابقة.',
+    Markup.inlineKeyboard([
+      [callbackButton('✅ نعم، فك الارتباط', `admin_unlink_channel_confirm:${channelId}`)],
+      [callbackButton('❌ إلغاء', 'admin_cancel_noop')],
+    ])
+  );
+});
+
+bot.action(/admin_unlink_channel_confirm:(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const channelId = Number(ctx.match[1]);
+  await db.unlinkChannel(channelId);
   await ctx.answerCbQuery('تم فكّ الربط ✅');
-  return ctx.editMessageText('تم فكّ ربط القناة. لن تُفعّل أي دروس بعد الآن.');
+  return ctx.editMessageText('✅ تم فكّ ارتباط القناة بنجاح.\nلن تُفعّل القناة دروسًا جديدة، وبقيت البيانات السابقة محفوظة.');
 });
 
 // ---------------------------------------------------------------------------

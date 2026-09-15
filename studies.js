@@ -1151,6 +1151,8 @@ const listReportStudentsForGrading = (subjectId, stageSeasonId, { groupId = null
     .query(
       `SELECT st.id AS student_id, st.full_name, pm.mode, pm.switched_at,
               COUNT(r.id) AS report_count,
+              COUNT(r.id) FILTER (WHERE r.score IS NULL) AS pending_report_count,
+              COUNT(r.id) FILTER (WHERE r.score IS NOT NULL) AS graded_report_count,
               MAX(r.submitted_at) AS last_submission,
               fg.report_score, COUNT(*) OVER() AS total_count,
               g.id AS group_id, discussion_group_label(g.id) AS group_title
@@ -1166,9 +1168,15 @@ const listReportStudentsForGrading = (subjectId, stageSeasonId, { groupId = null
        WHERE pm.subject_id=$1 AND pm.stage_season_id=$2
          AND (pm.mode='report' OR pm.switched_at IS NOT NULL)
          AND ($3::int IS NULL OR gm.group_id=$3 OR discussion_group_root(r.group_id)=$3)
-         AND (NOT $6::boolean OR fg.report_score IS NULL)
+         AND (NOT $6::boolean OR EXISTS (
+           SELECT 1 FROM student_reports pending
+           WHERE pending.student_id=st.id AND pending.subject_id=pm.subject_id
+             AND pending.stage_season_id=pm.stage_season_id AND pending.score IS NULL
+             AND ($3::int IS NULL OR discussion_group_root(pending.group_id)=$3)
+         ))
        GROUP BY st.id, st.full_name, pm.mode, pm.switched_at, fg.report_score, g.id
-       ORDER BY st.full_name,st.id LIMIT $4 OFFSET $5`,
+       ORDER BY (COUNT(r.id) FILTER (WHERE r.score IS NULL)>0) DESC,
+                MAX(r.submitted_at) DESC NULLS LAST,st.full_name,st.id LIMIT $4 OFFSET $5`,
       [subjectId, stageSeasonId, groupId, pageOptions(page,size).size, pageOptions(page,size).offset, onlyUngraded]
     )
     .then((r) => r.rows);
