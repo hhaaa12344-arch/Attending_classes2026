@@ -71,7 +71,16 @@
     const season=[...new Set(state.subjects.map(s=>s.season_name).filter(Boolean))].join('، ');
     $('#welcomeMeta').textContent=season?`الموسم: ${season}`:'الموسم الدراسي الحالي';
     $('#statSubjects').textContent=d.totals?.subjects??0;$('#statStudents').textContent=d.totals?.students??0;
-    $('#statReports').textContent=d.totals?.pendingReports??0;$('#statToday').textContent=d.totals?.todayDiscussions??0;
+    const pendingReports=n(d.totals?.pendingReports);
+    $('#statReports').textContent=pendingReports;$('#statToday').textContent=d.totals?.todayDiscussions??0;
+    const navBadge=$('#navReportBadge');
+    navBadge.textContent=pendingReports>99?'99+':String(pendingReports);
+    navBadge.classList.toggle('hidden',pendingReports===0);
+    const pendingNotice=$('#pendingReportsNotice');
+    pendingNotice.textContent=pendingReports
+      ? `لديك ${pendingReports} تقريرًا بانتظار التقييم. يبقى التنبيه ظاهرًا حتى تسجّل درجة لكل تقرير.`
+      : 'لا توجد تقارير بانتظار التقييم حاليًا.';
+    pendingNotice.classList.toggle('hidden',pendingReports===0);
 
     const today=$('#todayList');
     today.innerHTML=(d.today||[]).length?(d.today||[]).map(s=>`
@@ -98,7 +107,7 @@
         <div class="subject-head"><div><h3>${esc(s.subject_name)}</h3><p>${esc(s.stage_name)}</p></div><span class="badge">${n(s.student_count)} طالب</span></div>
         <div class="subject-meta"><span class="meta-pill">${esc(s.season_name)}</span></div>
         <div class="card-actions">
-          <button class="mini-button" type="button" data-subject-action="attendance" data-subject="${n(s.subject_id)}" data-season="${n(s.stage_season_id)}">الحضور</button>
+          <button class="mini-button" type="button" data-subject-action="attendance" data-subject="${n(s.subject_id)}" data-season="${n(s.stage_season_id)}">حضور المباحثات</button>
           <button class="mini-button" type="button" data-subject-action="groups" data-subject="${n(s.subject_id)}" data-season="${n(s.stage_season_id)}">المجموعات</button>
           <button class="mini-button" type="button" data-subject-action="schedule" data-subject="${n(s.subject_id)}" data-season="${n(s.stage_season_id)}">الجدول</button>
           <button class="mini-button" type="button" data-subject-action="exams" data-subject="${n(s.subject_id)}" data-season="${n(s.stage_season_id)}">الامتحانات</button>
@@ -151,14 +160,16 @@
   function closeSheet(){sheet.classList.add('hidden');backdrop.classList.add('hidden');document.body.style.overflow='';}
 
   async function openAttendance(sub){
-    openSheet(`حضور ${sub.subject_name}`,sub.stage_name);
+    openSheet(`حضور مباحثات ${sub.subject_name}`,sub.stage_name);
     try{
       const rows=await api(`/api/teacher/attendance?subjectId=${n(sub.subject_id)}&seasonId=${n(sub.stage_season_id)}`);
-      if(!rows.length){sheetBody.innerHTML=empty('لا يوجد طلبة مسجلون في هذا الموسم.');return;}
-      const total=n(rows[0].total_lessons);const completed=rows.filter(r=>n(r.attended_lessons)>=total&&total>0).length;
+      if(!rows.length){sheetBody.innerHTML=empty('لا يوجد طلبة في نمط المباحثات لهذه المادة.');return;}
+      const total=Math.max(0,...rows.map(r=>n(r.eligible_sessions)));
+      const completed=rows.filter(r=>n(r.attended_sessions)>=n(r.eligible_sessions)&&n(r.eligible_sessions)>0).length;
       sheetBody.innerHTML=`
-        <div class="detail-grid"><div class="detail-box"><span>إجمالي الدروس</span><strong>${total}</strong></div><div class="detail-box"><span>أكملوا جميع الدروس</span><strong>${completed}/${rows.length}</strong></div></div>
-        <div>${rows.map(r=>{const a=n(r.attended_lessons),ratio=total?Math.round(a/total*100):0,cls=ratio>=90?'good':ratio>=70?'warn':'bad';return `<div class="attendance-row"><div><h4>${esc(r.full_name)}</h4><small>${ratio}% من الدروس</small></div><span class="attendance-ratio ${cls}">${a}/${total}</span></div>`;}).join('')}</div>`;
+        <div class="detail-grid"><div class="detail-box"><span>أعلى عدد جلسات مؤهلة</span><strong>${total}</strong></div><div class="detail-box"><span>حضور كامل</span><strong>${completed}/${rows.length}</strong></div></div>
+        <p class="form-hint">يُحتسب حضور المباحثة كاملًا فقط عند تسجيل حضور البداية وحضور النهاية للجلسة نفسها.</p>
+        <div>${rows.map(r=>{const eligible=n(r.eligible_sessions),a=n(r.attended_sessions),incomplete=n(r.incomplete_sessions),ratio=eligible?Math.round(a/eligible*100):0,cls=ratio>=90?'good':ratio>=70?'warn':'bad';return `<div class="attendance-row"><div><h4>${esc(r.full_name)}</h4><small>${ratio}% من جلساته المؤهلة${incomplete?` · ${incomplete} حضور بداية بلا نهاية`:''}</small></div><span class="attendance-ratio ${cls}">${a}/${eligible}</span></div>`;}).join('')}</div>`;
     }catch(err){sheetBody.innerHTML=empty(err.message);}
   }
 
@@ -275,9 +286,9 @@
     try{
       const rows=await api(`/api/teacher/reports/students?subjectId=${subjectId}&seasonId=${seasonId}&onlyUngraded=0`);
       root.innerHTML=rows.length?rows.map(r=>`
-        <article class="report-student-card" data-report-student="${n(r.student_id)}" data-subject="${subjectId}" data-season="${seasonId}" data-group="${r.group_id? n(r.group_id):''}">
+        <article class="report-student-card ${n(r.pending_report_count)>0?'pending':''}" data-report-student="${n(r.student_id)}" data-subject="${subjectId}" data-season="${seasonId}" data-group="${r.group_id? n(r.group_id):''}">
           <div><h4>${esc(r.full_name)}</h4><p>${esc(r.group_title||'المرحلة كاملة')} · ${r.report_score==null?'الدرجة النهائية غير معتمدة':`الدرجة ${esc(r.report_score)}`}</p></div>
-          <div class="report-count"><strong>${n(r.report_count)}</strong><small> تقرير</small></div>
+          <div class="report-count"><strong>${n(r.report_count)} تقرير</strong>${n(r.pending_report_count)>0?`<span class="report-pending">${n(r.pending_report_count)} ينتظر التقييم</span>`:'<span class="report-done">مقيّمة</span>'}</div>
         </article>`).join(''):empty('لا يوجد طلبة تقارير لهذه المادة.');
       $$('[data-report-student]',root).forEach(card=>card.addEventListener('click',()=>openStudentReports(n(card.dataset.reportStudent),subjectId,seasonId,card.dataset.group?Number(card.dataset.group):null,card.querySelector('h4').textContent)));
     }catch(err){root.innerHTML=empty(err.message);}
@@ -290,16 +301,22 @@
       const rows=await api(`/api/teacher/reports?${query}`);
       if(!rows.length){sheetBody.innerHTML=empty('لا توجد تقارير لهذا الطالب.');return;}
       sheetBody.innerHTML=rows.map(r=>`
-        <article class="report-item" data-report-id="${n(r.id)}">
-          <h4>تقرير ${esc(r.group_title_snapshot||'الطالب')}</h4>
+        <article class="report-item ${r.score==null?'pending':'graded'}" data-report-id="${n(r.id)}">
+          <h4>تقرير ${esc(r.group_title_snapshot||'الطالب')} ${r.score==null?'<span class="report-pending">بانتظار التقييم</span>':'<span class="report-done">تم التقييم</span>'}</h4>
           <p>${r.note?esc(r.note):r.file_kind?`تقرير محفوظ كـ ${esc(r.file_kind)} في البوت.`:'تقرير محفوظ في النظام.'}<br>تاريخ الإرسال: ${esc(dateTime(r.submitted_at))}</p>
-          <div class="score-row"><label><span class="field-label">الدرجة من 15</span><input class="score-input" type="number" min="0" max="15" step="0.25" value="${r.score==null?'':esc(r.score)}" inputmode="decimal"></label><button class="primary-button score-save" type="button">حفظ</button></div>
+          <div class="score-row"><label><span class="field-label">الدرجة من 15</span><input class="score-input" type="number" min="0" max="15" step="0.25" value="${r.score==null?'':esc(r.score)}" inputmode="decimal"></label><button class="primary-button score-save" type="button">حفظ التقييم</button></div>
         </article>`).join('');
       $$('.report-item',sheetBody).forEach(item=>$('.score-save',item).addEventListener('click',async()=>{
         const input=$('.score-input',item);const score=Number(input.value);if(!Number.isFinite(score)||score<0||score>15){notify('الدرجة يجب أن تكون بين 0 و15.');return;}
         const btn=$('.score-save',item);btn.disabled=true;btn.textContent='جاري الحفظ…';
-        try{await api(`/api/teacher/reports/${n(item.dataset.reportId)}/score`,{method:'POST',body:JSON.stringify({score})});btn.textContent='تم الحفظ';notify('حُفظ تقييم التقرير.');}
-        catch(err){btn.textContent='حفظ';notify(err.message);}finally{btn.disabled=false;}
+        try{
+          await api(`/api/teacher/reports/${n(item.dataset.reportId)}/score`,{method:'POST',body:JSON.stringify({score})});
+          item.classList.remove('pending');item.classList.add('graded');
+          const status=item.querySelector('.report-pending');if(status){status.className='report-done';status.textContent='تم التقييم';}
+          btn.textContent='تم الحفظ';notify('حُفظ تقييم التقرير.');
+          await refresh();await loadReportStudents();
+        }
+        catch(err){btn.textContent='حفظ التقييم';notify(err.message);}finally{btn.disabled=false;}
       }));
     }catch(err){sheetBody.innerHTML=empty(err.message);}
   }
