@@ -103,6 +103,29 @@ const PREVIEW_BLOCKED_HEARS = new Set(['🌴 طلب إجازة', '📄 إرسا�
 bot.use(async (ctx, next) => {
   if (!isInPreview(ctx)) return next();
 
+  // أي لوحة ReplyKeyboard تُعرض أثناء المعاينة يجب أن تحتفظ دائمًا بزر الخروج.
+  // بعض شاشات الطالب/الأستاذ تعيد القائمة الأصلية بعد العرض، وكان ذلك يجعل زر الخروج يختفي.
+  const originalReply = ctx.reply.bind(ctx);
+  ctx.reply = (text, extra = undefined) => {
+    if (extra?.reply_markup?.keyboard && Array.isArray(extra.reply_markup.keyboard)) {
+      const hasExit = extra.reply_markup.keyboard.some(row =>
+        Array.isArray(row) && row.some(btn => (typeof btn === 'string' ? btn : btn?.text) === '🚪 الخروج من المعاينة')
+      );
+      if (!hasExit) {
+        extra = {
+          ...extra,
+          reply_markup: {
+            ...extra.reply_markup,
+            keyboard: [...extra.reply_markup.keyboard, [{ text: '🚪 الخروج من المعاينة' }]],
+            resize_keyboard: true,
+            is_persistent: true,
+          },
+        };
+      }
+    }
+    return originalReply(text, extra);
+  };
+
   // Unknown actions are read-only denied in preview, including forged callbacks
   // from a different role. New write handlers cannot accidentally bypass a denylist.
   const previewReads = new Set(['pv_exit','menu_today','menu_report','pm_subj','sr_subj','sr_group','sr_page','sr_stu',
@@ -399,6 +422,7 @@ function studentActionsKeyboard(studentId, isActive = true) {
     [callbackButton('✏️ تعديل الاسم', `stu_edit_name:${studentId}`)],
     [callbackButton('🔁 تغيير المرحلة', `stu_edit_stage:${studentId}`)],
     [callbackButton('📊 تقرير كل المواسم', `stu_report:${studentId}`)],
+    [callbackButton('📣 إرسال تذكير بالمطلوب', `stu_remind:${studentId}`)],
   ];
   if (isActive) {
     rows.push([callbackButton('📱 كود نقل الحساب (تغيير الهاتف)', `stu_xfer:${studentId}`)]);
@@ -995,7 +1019,16 @@ async function startStudentRegistration(ctx,codeOnly=false){
   }
   const teacher=await effectiveTeacher(ctx);
   if(teacher)return ctx.reply(`أهلًا بك أستاذ ${teacher.full_name} 👋`,teacherMainMenu());
+  const registrationOpen=await db.isStudentRegistrationOpen();
   userState.set(ctx.from.id,{action:'awaiting_full_name'});
+  if(!registrationOpen){
+    return ctx.reply(
+      '⛔ التسجيل الجديد متوقف مؤقتًا من إدارة المعهد.\n\n'+
+      'إذا كنت أستاذًا ولديك كود تفعيل، أو طالبًا مسجّلًا سابقًا ولديك كود نقل حساب، أرسل الكود هنا.\n'+
+      'أما إضافة طالب جديد فتتم حاليًا من الإدارة فقط.',
+      backOnlyMenu()
+    );
+  }
   return ctx.reply(codeOnly?'أرسل كود تفعيل الأستاذ أو كود نقل حساب الطالب الذي زوّدتك به الإدارة.':
     'أهلًا بك في بوت معهد تراث الأنبياء عليهم السلام.\n\n'+
     '🎓 تسجيل طالب جديد\nأرسل اسمك الرباعي في رسالة واحدة، ثم اختر مرحلتك الدراسية من الأزرار.\n\n'+
@@ -1219,6 +1252,13 @@ bot.on('text', async (ctx, next) => {
   if (inputText === BACK_BUTTON) {
     await studentGuide.clear(ctx);
     const hadStep = userState.delete(ctx.from.id);
+    if (isInPreview(ctx)) {
+      const pv=getPreview(ctx);
+      return ctx.reply(
+        hadStep ? 'تم الرجوع عن الخطوة الحالية في المعاينة.' : 'أنت في القائمة الرئيسية للمعاينة.',
+        pv?.role==='teacher' ? teacherPreviewMenu() : studentPreviewMenu(await effectiveStudent(ctx))
+      );
+    }
     if (isAdmin(ctx)) {
       return ctx.reply(hadStep ? 'تم الرجوع عن الخطوة الحالية.' : 'أنت في القائمة الرئيسية.', adminMainMenu());
     }
@@ -1237,6 +1277,10 @@ bot.on('text', async (ctx, next) => {
   if (inputText === '❌ إلغاء العملية') {
     await studentGuide.clear(ctx);
     userState.delete(ctx.from.id);
+    if(isInPreview(ctx)){
+      const pv=getPreview(ctx);
+      return ctx.reply('تم إلغاء الخطوة الحالية في المعاينة.',pv?.role==='teacher'?teacherPreviewMenu():studentPreviewMenu(await effectiveStudent(ctx)));
+    }
     if(isAdmin(ctx))return ctx.reply('تم إلغاء العملية الحالية.',adminMainMenu());
     const teacher=await effectiveTeacher(ctx);
     const student=teacher?null:await effectiveStudent(ctx);
@@ -1316,7 +1360,13 @@ bot.on('text', async (ctx, next) => {
         }
         throw err;
       }
-      // ليس كود تفعيل صالحًا — يُكمل كاسم عادي
+      // ليس كود تفعيل صالحًا — يُكمل كاسم عادي إن كان التسجيل مفتوحًا
+    }
+
+    if (!(await db.isStudentRegistrationOpen())) {
+      return ctx.reply(
+        '⛔ التسجيل الجديد متوقف حاليًا. إذا كان لديك كود تفعيل أستاذ أو كود نقل حساب صحيح فأرسله، وإلا تواصل مع إدارة المعهد.'
+      );
     }
 
     if (fullName.split(/\s+/).length < 4) {
@@ -1670,6 +1720,33 @@ bot.on('text', async (ctx, next) => {
   }
 
   if (!isAdmin(ctx)) return next(); // كل الحالات التالية خاصة بالأدمن فقط
+
+  // -------- إضافة طالب يدويًا: Telegram ID --------
+  if (state.action === 'admin_manual_student_id') {
+    const raw=ctx.message.text.trim();
+    if(!/^\d{4,20}$/.test(raw))return ctx.reply('أرسل Telegram ID صحيحًا بالأرقام فقط.');
+    try{if(BigInt(raw)<=0n)throw new Error();}catch{return ctx.reply('Telegram ID غير صالح.');}
+    const existing=await db.getStudentByTelegramId(raw);
+    if(existing){
+      userState.delete(ctx.from.id);
+      return ctx.reply(`هذا الـ ID مرتبط مسبقًا بالطالب «${existing.full_name}».`,adminMainMenu());
+    }
+    userState.set(ctx.from.id,{action:'admin_manual_student_name',telegramId:raw});
+    return ctx.reply('أرسل الاسم الرباعي للطالب:');
+  }
+
+  // -------- إضافة طالب يدويًا: الاسم ثم اختيار المرحلة --------
+  if (state.action === 'admin_manual_student_name') {
+    const fullName=ctx.message.text.trim().replace(/\s+/g,' ');
+    if(fullName.split(' ').length<4||fullName.length>200)return ctx.reply('أرسل الاسم الرباعي الكامل (أربعة أسماء على الأقل).');
+    const stages=await db.listStages();
+    if(!stages.length){userState.delete(ctx.from.id);return ctx.reply('لا توجد مرحلة نشطة لإضافة الطالب إليها.');}
+    userState.set(ctx.from.id,{action:'admin_manual_student_stage',telegramId:state.telegramId,fullName});
+    return ctx.reply(
+      `الطالب: ${fullName}\nTelegram ID: ${state.telegramId}\n\nاختر المرحلة:`,
+      Markup.inlineKeyboard(stages.map(st=>[callbackButton(limitButtonText(st.name),`admin_manual_student_stage:${st.id}`)]))
+    );
+  }
 
   // -------- إضافة مرحلة --------
   if (state.action === 'admin_awaiting_stage_name') {
@@ -2557,12 +2634,21 @@ async function openStudentManagement(ctx) {
   if (!isAdmin(ctx)) return denyUnauthorized(ctx);
   userState.delete(ctx.from.id);
   await answerIfCallback(ctx);
-  const stages = await adminData.stages();
+  const [stages,registrationOpen] = await Promise.all([adminData.stages(),db.isStudentRegistrationOpen()]);
   const rows = stages.map(s => [callbackButton(
     limitButtonText(`${s.is_active ? '🎓' : '🗄️'} ${s.name} — ${s.student_count} طالب`),
     `students_stage:${s.id}`)]);
+  rows.push([callbackButton('➕ إضافة طالب يدويًا بالـ ID', 'admin_student_add')]);
+  rows.push([callbackButton(
+    registrationOpen ? '🔒 إيقاف انضمام الطلبة الجدد' : '🔓 فتح انضمام الطلبة الجدد',
+    `admin_registration:${registrationOpen?'off':'on'}`,
+    registrationOpen ? 'danger' : 'success'
+  )]);
   rows.push([callbackButton('🔎 البحث في جميع الطلبة', 'students_search:0')]);
-  return ctx.reply('اختر المرحلة لعرض طلبتها وموادها ومجموعاتها:', Markup.inlineKeyboard(rows));
+  return ctx.reply(
+    `إدارة الطلبة\nحالة الانضمام الجديد: ${registrationOpen?'🟢 مفتوح':'🔴 متوقف'}\n\nاختر المرحلة أو الإجراء المطلوب:`,
+    Markup.inlineKeyboard(rows)
+  );
 }
 
 async function showStageStudents(ctx, stageId, page = 0, q = '') {
@@ -2639,6 +2725,83 @@ bot.hears('🖥️ لوحة الإدارة',openAdminWeb);
 bot.command('admin_web',openAdminWeb);
 bot.action('admin_students', openStudentManagement);
 bot.hears('🎓 إدارة الطلبة', openStudentManagement);
+
+bot.action(/admin_registration:(on|off)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const open=ctx.match[1]==='on';
+  await db.setStudentRegistrationOpen(open);
+  return openStudentManagement(ctx);
+});
+
+bot.action('admin_student_add', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  userState.set(ctx.from.id,{action:'admin_manual_student_id'});
+  await ctx.answerCbQuery();
+  return ctx.reply(
+    'أرسل Telegram ID للطالب بالأرقام فقط.\nمثال: 123456789\n\nسيُضاف الطالب يدويًا حتى لو كان الانضمام العام متوقفًا.'
+  );
+});
+
+bot.action(/admin_manual_student_stage:(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const state=userState.get(ctx.from.id);
+  if(!state||state.action!=='admin_manual_student_stage')return ctx.answerCbQuery('انتهت خطوة الإضافة. ابدأ من إدارة الطلبة.');
+  const stageId=Number(ctx.match[1]);
+  try{
+    const student=await db.createStudent(state.telegramId,state.fullName,stageId);
+    userState.delete(ctx.from.id);
+    await ctx.answerCbQuery('تمت الإضافة ✅');
+    let note='';
+    try{
+      await bot.telegram.sendMessage(student.telegram_id,
+        `تمت إضافتك يدويًا إلى نظام معهد تراث الأنبياء ✅\nافتح البوت وأرسل /start لإكمال الدخول وتأكيد صفة التسجيل.`);
+      note='\n📨 أُرسل للطالب إشعار بالدخول إلى البوت.';
+    }catch(err){
+      note='\nℹ️ تمت الإضافة، لكن تليجرام لم يسمح بإرسال رسالة للطالب الآن. يجب أن يفتح الطالب البوت بنفسه ويرسل /start أولًا.';
+    }
+    return ctx.editMessageText(`✅ تمت إضافة «${student.full_name}» يدويًا.\nTelegram ID: ${student.telegram_id}${note}`);
+  }catch(err){
+    if(err.code==='23505'){userState.delete(ctx.from.id);return ctx.answerCbQuery('هذا الـ ID مسجل مسبقًا.',{show_alert:true});}
+    return ctx.answerCbQuery(`تعذر الإضافة: ${err.message}`,{show_alert:true});
+  }
+});
+
+async function buildStudentManualReminder(studentId){
+  const student=await db.getStudentById(studentId);
+  if(!student)return null;
+  const tasks=[];
+  if(!student.official_confirmed_at)tasks.push('افتح البوت واضغط زر تأكيد التسجيل الرسمي.');
+  const activity=await db.getStudentActiveStageSeason(studentId);
+  if(activity){
+    const missing=(await db.pool.query(`SELECT sub.name FROM subjects sub
+      WHERE sub.stage_id=$1 AND participation_enabled(sub.id,$2)
+        AND NOT EXISTS(SELECT 1 FROM participation_modes pm WHERE pm.student_id=$3 AND pm.subject_id=sub.id AND pm.stage_season_id=$2)
+      ORDER BY sub.name`,[activity.stage_id,activity.stage_season_id,studentId])).rows.map(r=>r.name);
+    if(missing.length)tasks.push(`اختر نوع المشاركة (مباحثة أو تقرير) في: ${missing.join('، ')}.`);
+    const unjoined=(await db.pool.query(`SELECT sub.name FROM participation_modes pm
+      JOIN subjects sub ON sub.id=pm.subject_id
+      WHERE pm.student_id=$1 AND pm.stage_season_id=$2 AND pm.mode='mubahatha'
+        AND NOT EXISTS(SELECT 1 FROM group_memberships gm WHERE gm.student_id=pm.student_id AND gm.subject_id=pm.subject_id AND gm.stage_season_id=pm.stage_season_id)
+      ORDER BY sub.name`,[studentId,activity.stage_season_id])).rows.map(r=>r.name);
+    if(unjoined.length)tasks.push(`ادخل إلى مجموعة المباحثة في: ${unjoined.join('، ')}.`);
+  }
+  if(await db.getPendingTransition(studentId))tasks.push('افتح البوت وحدد حالتك للموسم الجديد (إعادة المرحلة أو الانتقال).');
+  if(!tasks.length)return {student,text:null};
+  return {student,text:`📌 تذكير من إدارة المعهد\n\n${tasks.map((t,i)=>`${i+1}. ${t}`).join('\n')}\n\nيرجى تنفيذ المطلوب من خلال البوت.`};
+}
+
+bot.action(/stu_remind:(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const reminder=await buildStudentManualReminder(Number(ctx.match[1]));
+  if(!reminder)return ctx.answerCbQuery('الطالب غير موجود.',{show_alert:true});
+  if(!reminder.text)return ctx.answerCbQuery('لا يوجد إجراء معلّق واضح لهذا الطالب حاليًا.',{show_alert:true});
+  try{
+    await bot.telegram.sendMessage(reminder.student.telegram_id,reminder.text);
+    return ctx.answerCbQuery('أُرسل التذكير للطالب ✅',{show_alert:true});
+  }catch(err){
+    return ctx.answerCbQuery('تعذر الإرسال. إذا لم يسبق للطالب فتح البوت، يجب أن يرسل /start أولًا.',{show_alert:true});
+  }
+});
 
 bot.action(/stu_select:(\d+)/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
@@ -2918,6 +3081,7 @@ bot.action(/admin_teacher:(\d+)/, async (ctx) => {
       [Markup.button.callback('📘 إسناد مادة', `admin_teacher_assign:${teacher.id}`)],
       [Markup.button.callback('🚫 سحب مادة', `admin_teacher_unassign:${teacher.id}`)],
       [Markup.button.callback('🔑 إعادة توليد كود التفعيل', `admin_teacher_regen:${teacher.id}`)],
+      [Markup.button.callback('📣 إرسال تذكير بالمطلوب', `admin_teacher_remind:${teacher.id}`)],
       [
         teacher.is_active
           ? Markup.button.callback('🗄️ تعطيل الأستاذ', `admin_teacher_toggle:${teacher.id}:0`)
@@ -2926,6 +3090,29 @@ bot.action(/admin_teacher:(\d+)/, async (ctx) => {
       [Markup.button.callback('🗑️ حذف نهائي', `admin_teacher_del:${teacher.id}`)],
     ])
   );
+});
+
+bot.action(/admin_teacher_remind:(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const teacher=await db.getTeacherById(Number(ctx.match[1]));
+  if(!teacher)return ctx.answerCbQuery('الأستاذ غير موجود.',{show_alert:true});
+  if(!teacher.telegram_id)return ctx.answerCbQuery('الأستاذ لم يربط حسابه بالبوت بعد، فلا يمكن إرسال إشعار له.',{show_alert:true});
+  const pending=(await db.pool.query(`SELECT sub.name,COUNT(r.id)::int AS pending
+    FROM teaching_assignments ta
+    JOIN stage_seasons ss ON ss.id=ta.stage_season_id AND ss.is_active=true
+    JOIN subjects sub ON sub.id=ta.subject_id
+    JOIN student_reports r ON r.subject_id=ta.subject_id AND r.stage_season_id=ta.stage_season_id AND r.score IS NULL
+    WHERE ta.teacher_id=$1
+    GROUP BY sub.id,sub.name ORDER BY sub.name`,[teacher.id])).rows;
+  if(!pending.length)return ctx.answerCbQuery('لا توجد تقارير غير مقيّمة لهذا الأستاذ حاليًا.',{show_alert:true});
+  const total=pending.reduce((n,r)=>n+Number(r.pending),0);
+  const text=`📌 تذكير من إدارة المعهد\n\nلديك ${total} تقريرًا بانتظار التقييم:\n${pending.map(r=>`• ${r.name}: ${Number(r.pending)} تقرير`).join('\n')}\n\nيرجى فتح «📄 تقارير الطلبة» وتقييم التقارير المعلّقة.`;
+  try{
+    await bot.telegram.sendMessage(teacher.telegram_id,text);
+    return ctx.answerCbQuery('أُرسل التذكير للأستاذ ✅',{show_alert:true});
+  }catch(err){
+    return ctx.answerCbQuery('تعذر إرسال التذكير إلى حساب الأستاذ.',{show_alert:true});
+  }
 });
 
 bot.action(/admin_teacher_regen:(\d+)/, async (ctx) => {

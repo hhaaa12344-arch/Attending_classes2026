@@ -410,6 +410,15 @@ async function initSchema() {
       updated_at TIMESTAMP NOT NULL DEFAULT now()
     );
 
+    -- إعدادات تشغيل بسيطة يغيّرها الأدمن من داخل البوت دون الحاجة إلى Variables.
+    CREATE TABLE IF NOT EXISTS bot_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT now()
+    );
+    INSERT INTO bot_settings(key,value) VALUES('student_registration_open','true')
+    ON CONFLICT(key) DO NOTHING;
+
     -- تصحيح أي لقطة أنشأها الإصدار 2.3.0 ليوم كان الطالب فيه بإجازة معتمدة.
     UPDATE student_attendance_days d
     SET is_excused_leave=true, is_full_absence=false
@@ -420,6 +429,16 @@ async function initSchema() {
     );
   `);
 }
+
+// ---------- إعدادات البوت ----------
+const isStudentRegistrationOpen = () =>
+  pool.query("SELECT value FROM bot_settings WHERE key='student_registration_open'")
+    .then(r => !r.rows[0] || r.rows[0].value === 'true');
+
+const setStudentRegistrationOpen = (open) =>
+  pool.query(`INSERT INTO bot_settings(key,value,updated_at) VALUES('student_registration_open',$1,now())
+    ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now() RETURNING value`, [open ? 'true' : 'false'])
+    .then(r => r.rows[0].value === 'true');
 
 // ---------- المراحل ----------
 async function addStage(name, stageType = 'full') {
@@ -2259,6 +2278,8 @@ const getStudentSeasonReport = (studentId, stageSeasonId = null, timeZone = 'Asi
 module.exports = {
   pool,
   initSchema,
+  isStudentRegistrationOpen,
+  setStudentRegistrationOpen,
   addStage,
   listStages,
   listAllStages,
