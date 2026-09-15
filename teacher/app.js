@@ -23,6 +23,7 @@
   const dayNames=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
   const timeText=(h,m)=>`${String(n(h)).padStart(2,'0')}:${String(n(m)).padStart(2,'0')}`;
   const dateTime=(v)=>{if(!v)return '—';try{return new Intl.DateTimeFormat('ar-IQ',{dateStyle:'medium',timeStyle:'short',timeZone:'Asia/Baghdad'}).format(new Date(v));}catch{return '—';}};
+  const todayIso=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 
   function notify(message){
     toast.textContent=message;toast.classList.remove('hidden');
@@ -182,8 +183,89 @@
     openSheet(`امتحانات ${sub.subject_name}`,sub.stage_name);
     try{
       const rows=await api(`/api/teacher/exams?subjectId=${n(sub.subject_id)}&seasonId=${n(sub.stage_season_id)}`);
-      sheetBody.innerHTML=rows.length?rows.map(e=>`<article class="list-card"><div class="list-card-head"><div><h4>${esc(e.title||`الامتحان ${e.exam_number}`)}</h4><p>الأسئلة: ${n(e.question_count)} · التسليمات: ${n(e.submitted_count)}</p></div><span class="badge">${esc(e.status||'—')}</span></div></article>`).join(''):empty('لا توجد امتحانات لهذه المادة.');
+      const used=new Set(rows.map(e=>n(e.exam_number)));
+      const available=[1,2,3].filter(x=>!used.has(x));
+      sheetBody.innerHTML=`
+        ${available.length?'<button id="createExamBtn" class="primary-button wide-button" type="button">➕ إنشاء امتحان جديد</button>':''}
+        <div class="exam-list">${rows.length?rows.map(e=>`
+          <article class="list-card exam-card">
+            <div class="list-card-head"><div><h4>${esc(e.title||`الامتحان الشهري ${e.exam_number}`)}</h4><p>الأسئلة: ${n(e.question_count)} · التسليمات: ${n(e.submitted_count)}<br>يفتح: ${esc(dateTime(e.opens_at))}</p></div><span class="badge ${e.status==='published'?'live':''}">${e.status==='published'?'منشور':'مجدول'}</span></div>
+            <div class="card-actions"><button class="mini-button" type="button" data-manage-exam="${n(e.id)}">${e.status==='published'?'عرض الامتحان':'إدارة الامتحان'}</button></div>
+          </article>`).join(''):empty('لا توجد امتحانات لهذه المادة بعد.')}</div>`;
+      $('#createExamBtn')?.addEventListener('click',()=>showExamCreateForm(sub,available));
+      $$('[data-manage-exam]',sheetBody).forEach(b=>b.addEventListener('click',()=>openExamEditor(n(b.dataset.manageExam),sub)));
     }catch(err){sheetBody.innerHTML=empty(err.message);}
+  }
+
+  function showExamCreateForm(sub,available){
+    sheetTitle.textContent=`إنشاء امتحان — ${sub.subject_name}`;
+    sheetKicker.textContent=sub.stage_name;
+    const choices=(available?.length?available:[1,2,3]).map(x=>`<option value="${x}">الامتحان الشهري ${x}</option>`).join('');
+    sheetBody.innerHTML=`
+      <form id="examCreateForm" class="form-stack">
+        <label><span class="field-label">رقم الامتحان</span><select id="examNumber" class="select-control" required>${choices}</select></label>
+        <label><span class="field-label">موضوع الامتحان</span><input id="examTitle" class="text-control" type="text" minlength="3" maxlength="150" placeholder="مثال: أحكام البيع" required></label>
+        <label><span class="field-label">تاريخ الامتحان</span><input id="examDate" class="text-control" type="date" value="${todayIso()}" required></label>
+        <label><span class="field-label">مدة الإتاحة بالساعات</span><input id="examHours" class="text-control" type="number" min="1" max="720" step="1" value="24" inputmode="numeric" required></label>
+        <p class="form-hint">عند إنشاء الامتحان يصل إشعار لطلبة المادة يتضمن الموضوع والموعد. أضف الأسئلة فقط، وسيصبح الامتحان متاحًا تلقائيًا عند الموعد المحدد دون زر نشر.</p>
+        <div class="form-actions"><button class="secondary-button" id="cancelExamCreate" type="button">رجوع</button><button class="primary-button" type="submit">إنشاء وجدولة الامتحان</button></div>
+      </form>`;
+    $('#cancelExamCreate').addEventListener('click',()=>openExams(sub));
+    $('#examCreateForm').addEventListener('submit',async e=>{
+      e.preventDefault();
+      const examNumber=n($('#examNumber').value),dateIso=$('#examDate').value,hours=n($('#examHours').value),title=$('#examTitle').value.trim();
+      const submit=e.submitter;submit.disabled=true;submit.textContent='جاري الإنشاء…';
+      try{
+        const exam=await api('/api/teacher/exams',{method:'POST',body:JSON.stringify({subjectId:n(sub.subject_id),seasonId:n(sub.stage_season_id),examNumber,title,dateIso,hours})});
+        notify('تم إنشاء الامتحان وإشعار الطلبة. سيُفتح تلقائيًا في موعده.');await openExamEditor(n(exam.id),sub);
+      }catch(err){notify(err.message);submit.disabled=false;submit.textContent='إنشاء وجدولة الامتحان';}
+    });
+  }
+
+  async function openExamEditor(examId,sub){
+    sheetTitle.textContent=`إدارة امتحان ${sub.subject_name}`;sheetKicker.textContent=sub.stage_name;sheetBody.innerHTML=empty('جاري تحميل الامتحان…');
+    try{
+      const data=await api(`/api/teacher/exams/${examId}`),e=data.exam,questions=data.questions||[],draft=e.status!=='published';
+      sheetBody.innerHTML=`
+        <div class="detail-grid"><div class="detail-box"><span>الحالة</span><strong>${draft?'مجدول تلقائيًا':'منشور'}</strong></div><div class="detail-box"><span>عدد الأسئلة</span><strong>${questions.length}</strong></div></div>
+        <article class="list-card exam-summary"><div class="list-card-head"><div><h4>${esc(e.title||`الامتحان الشهري ${e.exam_number}`)}</h4><p>يفتح: ${esc(dateTime(e.opens_at))}<br>يغلق: ${esc(dateTime(e.closes_at))} · الدرجة: ${esc(e.max_score)}</p></div><span class="badge ${draft?'':'live'}">${draft?'مجدول':'منشور'}</span></div></article>
+        ${draft?`<p class="form-hint">تم إشعار الطلبة بالامتحان. أكمل إضافة الأسئلة قبل الموعد، وسيُنشر تلقائيًا عند حلول وقت الفتح.</p><div class="exam-editor-actions"><button class="mini-button" id="addTfQuestion" type="button">➕ صح / خطأ</button><button class="mini-button" id="addMcqQuestion" type="button">➕ اختيار متعدد</button></div>`:''}
+        <div class="section-head compact-head"><div><span class="section-kicker">الأسئلة</span><h3>${questions.length} سؤال</h3></div></div>
+        <div class="question-list">${questions.length?questions.map((q,i)=>`<article class="question-card"><span class="question-number">${i+1}</span><div><h4>${esc(q.prompt)}</h4><p>${q.question_type==='tf'?'صح / خطأ':(Array.isArray(q.options)?q.options:[]).map(esc).join(' · ')}</p><small>الإجابة الصحيحة: ${esc(q.correct_answer)}</small></div></article>`).join(''):empty('لم تُضف أسئلة بعد.')}</div>
+        <button id="backToExamList" class="secondary-button wide-button" type="button">رجوع إلى قائمة الامتحانات</button>`;
+      $('#backToExamList').addEventListener('click',()=>openExams(sub));
+      if(draft){
+        $('#addTfQuestion').addEventListener('click',()=>showTfQuestionForm(examId,sub));
+        $('#addMcqQuestion').addEventListener('click',()=>showMcqQuestionForm(examId,sub));
+      }
+    }catch(err){sheetBody.innerHTML=empty(err.message);}
+  }
+
+  function showTfQuestionForm(examId,sub){
+    sheetTitle.textContent='إضافة سؤال صح / خطأ';sheetKicker.textContent=sub.subject_name;
+    sheetBody.innerHTML=`<form id="questionForm" class="form-stack"><label><span class="field-label">نص السؤال</span><textarea id="questionPrompt" class="text-area" rows="5" maxlength="3000" required></textarea></label><label><span class="field-label">الإجابة الصحيحة</span><select id="tfCorrect" class="select-control"><option value="صح">صح</option><option value="خطأ">خطأ</option></select></label><div class="form-actions"><button id="cancelQuestion" class="secondary-button" type="button">رجوع</button><button class="primary-button" type="submit">إضافة السؤال</button></div></form>`;
+    $('#cancelQuestion').addEventListener('click',()=>openExamEditor(examId,sub));
+    $('#questionForm').addEventListener('submit',async e=>{
+      e.preventDefault();const submit=e.submitter;submit.disabled=true;submit.textContent='جاري الإضافة…';
+      try{await api(`/api/teacher/exams/${examId}/questions`,{method:'POST',body:JSON.stringify({type:'tf',prompt:$('#questionPrompt').value.trim(),correct:$('#tfCorrect').value})});notify('تمت إضافة السؤال.');await openExamEditor(examId,sub);}
+      catch(err){notify(err.message);submit.disabled=false;submit.textContent='إضافة السؤال';}
+    });
+  }
+
+  function showMcqQuestionForm(examId,sub){
+    sheetTitle.textContent='إضافة سؤال اختيار متعدد';sheetKicker.textContent=sub.subject_name;
+    sheetBody.innerHTML=`<form id="questionForm" class="form-stack"><label><span class="field-label">نص السؤال</span><textarea id="questionPrompt" class="text-area" rows="4" maxlength="3000" required></textarea></label><label><span class="field-label">الخيارات — كل خيار في سطر مستقل (2 إلى 6)</span><textarea id="questionOptions" class="text-area" rows="6" maxlength="1800" placeholder="الخيار الأول
+الخيار الثاني
+الخيار الثالث" required></textarea></label><label><span class="field-label">الإجابة الصحيحة</span><select id="mcqCorrect" class="select-control"><option value="">أدخل الخيارات أولًا</option></select></label><div class="form-actions"><button id="cancelQuestion" class="secondary-button" type="button">رجوع</button><button class="primary-button" type="submit">إضافة السؤال</button></div></form>`;
+    const optionsEl=$('#questionOptions'),correctEl=$('#mcqCorrect');
+    const syncOptions=()=>{const opts=optionsEl.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean).slice(0,6);const old=correctEl.value;correctEl.innerHTML=opts.length?opts.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join(''):'<option value="">أدخل الخيارات أولًا</option>';if(opts.includes(old))correctEl.value=old;};
+    optionsEl.addEventListener('input',syncOptions);$('#cancelQuestion').addEventListener('click',()=>openExamEditor(examId,sub));
+    $('#questionForm').addEventListener('submit',async e=>{
+      e.preventDefault();const options=optionsEl.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);if(options.length<2||options.length>6||new Set(options).size!==options.length){notify('أدخل من خيارين إلى 6 خيارات مختلفة.');return;}const correct=correctEl.value;if(!options.includes(correct)){notify('اختر الإجابة الصحيحة.');return;}
+      const submit=e.submitter;submit.disabled=true;submit.textContent='جاري الإضافة…';
+      try{await api(`/api/teacher/exams/${examId}/questions`,{method:'POST',body:JSON.stringify({type:'mcq',prompt:$('#questionPrompt').value.trim(),options,correct})});notify('تمت إضافة السؤال.');await openExamEditor(examId,sub);}
+      catch(err){notify(err.message);submit.disabled=false;submit.textContent='إضافة السؤال';}
+    });
   }
 
   async function loadReportStudents(){
