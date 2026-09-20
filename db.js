@@ -119,7 +119,7 @@ async function initSchema() {
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS reminder_sent BOOLEAN NOT NULL DEFAULT false;
   `);
 
-  // المواسم مستقلة لكل مرحلة: يمكن بدء موسم لمراحل محددة وترك غيرها في موسمها الحالي.
+  // المواسم مستقلة لكل مرحلة: يمكن بدء ��وسم لمراحل محددة وترك غيرها في موسمها الحالي.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS seasons (
       id SERIAL PRIMARY KEY,
@@ -2308,17 +2308,32 @@ function lessonScheduleDates(startIso) {
   }
   return dates;
 }
+
+function normalizeDateString(value) {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
 async function getLessonSchedule(stageSeasonId) {
-  const ss=(await pool.query(`SELECT ss.id AS stage_season_id,ss.stage_id,ss.started_at::date AS start_date,
-    st.name AS stage_name,se.name AS season_name FROM stage_seasons ss
-    JOIN stages st ON st.id=ss.stage_id JOIN seasons se ON se.id=ss.season_id WHERE ss.id=$1`,[stageSeasonId])).rows[0];
-  if(!ss)return null;
-  const subjects=(await pool.query('SELECT id,name FROM subjects WHERE stage_id=$1 ORDER BY id',[ss.stage_id])).rows;
-  const entries=(await pool.query(`SELECT id,subject_id,lesson_date::text AS lesson_date
-    FROM lesson_schedule_entries WHERE stage_season_id=$1 ORDER BY lesson_date,subject_id`,[stageSeasonId])).rows;
-  const startDate=String(ss.start_date).slice(0,10);
-  return {...ss,start_date:startDate,end_date_exclusive:addMonthsIso(startDate,6),
-    subjects,entries,dates:lessonScheduleDates(startDate)};
+  const ss = (await pool.query(`
+    SELECT
+      ss.id AS stage_season_id,
+      ss.stage_id,
+      TO_CHAR(ss.started_at, 'YYYY-MM-DD') AS start_date,
+      st.name AS stage_name,
+      se.name AS season_name
+    FROM stage_seasons ss
+    JOIN stages st ON st.id=ss.stage_id
+    JOIN seasons se ON se.id=ss.season_id
+    WHERE ss.id=$1
+  `, [stageSeasonId])).rows[0];
+  if (!ss) return null;
+  const subjects = (await pool.query('SELECT id,name FROM subjects WHERE stage_id=$1 ORDER BY id', [ss.stage_id])).rows;
+  const entries = (await pool.query(`SELECT id,subject_id,lesson_date::text AS lesson_date
+    FROM lesson_schedule_entries WHERE stage_season_id=$1 ORDER BY lesson_date,subject_id`, [stageSeasonId])).rows;
+  const startDate = normalizeDateString(ss.start_date) || '';
+  return { ...ss, start_date: startDate, end_date_exclusive: addMonthsIso(startDate, 6), subjects, entries, dates: lessonScheduleDates(startDate) };
 }
 
 // المواد المجدولة للنشر في تاريخ محدد داخل موسم المرحلة.
@@ -2331,7 +2346,7 @@ async function getScheduledSubjectsForDate(stageSeasonId, lessonDate) {
     JOIN subjects sub ON sub.id=lse.subject_id
     JOIN stage_seasons ss ON ss.id=lse.stage_season_id AND ss.stage_id=sub.stage_id
     WHERE lse.stage_season_id=$1 AND lse.lesson_date=$2
-    ORDER BY sub.id`,[stageSeasonId,lessonDate])).rows;
+    ORDER BY sub.id`, [stageSeasonId, lessonDate])).rows;
 }
 
 // المواد المجدولة التي لم تُفعّل بعد في يوم النشر.
@@ -2353,23 +2368,29 @@ async function getPendingScheduledSubjectsForDate(stageSeasonId, lessonDate) {
           AND l.subject_id=sub.id
           AND (l.activated_at AT TIME ZONE 'Asia/Baghdad')::date=$2::date
       )
-    ORDER BY sub.id`,[stageSeasonId,lessonDate])).rows;
+    ORDER BY sub.id`, [stageSeasonId, lessonDate])).rows;
 }
 async function setLessonScheduleEntry(stageSeasonId,subjectId,lessonDate,checked) {
   const date=String(lessonDate||'');
-  if(!/^\d{4}-\d{2}-\d{2}$/.test(date))throw new Error('تاريخ الجدول غير صالح.');
-  const ss=(await pool.query('SELECT id,stage_id,started_at::date AS start_date FROM stage_seasons WHERE id=$1',[stageSeasonId])).rows[0];
-  if(!ss)throw new Error('الموسم الدراسي غير موجود.');
-  if(!(await pool.query('SELECT id FROM subjects WHERE id=$1 AND stage_id=$2',[subjectId,ss.stage_id])).rows[0])
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('تاريخ الجدول غير صالح.');
+  const ss=(await pool.query(`SELECT id, stage_id, TO_CHAR(started_at, 'YYYY-MM-DD') AS start_date
+    FROM stage_seasons WHERE id=$1`, [stageSeasonId])).rows[0];
+  if(!ss) throw new Error('الموسم الدراسي غير موجود.');
+  if(!(await pool.query('SELECT id FROM subjects WHERE id=$1 AND stage_id=$2', [subjectId, ss.stage_id])).rows[0])
     throw new Error('المادة لا تنتمي إلى المرحلة المختارة.');
-  if(!new Set(lessonScheduleDates(String(ss.start_date).slice(0,10))).has(date))
+  const normalizedStartDate = normalizeDateString(ss.start_date) || '';
+  if(!new Set(lessonScheduleDates(normalizedStartDate)).has(date))
     throw new Error('يمكن اختيار أيام الدراسة فقط، مع استبعاد الخميس والجمعة.');
-  if(checked)return (await pool.query(`INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date)
-    VALUES($1,$2,$3) ON CONFLICT(stage_season_id,subject_id,lesson_date) DO NOTHING RETURNING *`,
-    [stageSeasonId,subjectId,date])).rows[0]||{stage_season_id:stageSeasonId,subject_id:subjectId,lesson_date:date};
+  if(checked) {
+    const inserted = await pool.query(`INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date)
+      VALUES($1,$2,$3) ON CONFLICT(stage_season_id,subject_id,lesson_date) DO NOTHING RETURNING *`,
+      [stageSeasonId, subjectId, date]);
+    const row = inserted.rows[0];
+    return row ? { ...row, lesson_date: normalizeDateString(row.lesson_date) } : { stage_season_id: stageSeasonId, subject_id: subjectId, lesson_date: date };
+  }
   await pool.query('DELETE FROM lesson_schedule_entries WHERE stage_season_id=$1 AND subject_id=$2 AND lesson_date=$3',
     [stageSeasonId,subjectId,date]);
-  return {stage_season_id:stageSeasonId,subject_id:subjectId,lesson_date:date,checked:false};
+  return { stage_season_id: stageSeasonId, subject_id: subjectId, lesson_date: date, checked: false };
 }
 
 module.exports = {
