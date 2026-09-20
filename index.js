@@ -5282,29 +5282,47 @@ async function handleChannelLesson(ctx) {
     if (!hasLessonContent(message)) return; // إعلان نصي عادي وليس درسًا
 
     const hashtags = extractHashtags(message);
-    if (hashtags.length === 0) {
-      // ينبَّه الأدمن فقط إذا كان المنشور يبدو درسًا فعليًا (مرفق صوتي/مرئي أو رابط وسائط)،
-      // حتى لا يتحول كل إعلان عادي يحتوي رابطًا إلى تنبيه متكرر.
-      if (looksLikeLessonMedia(message)) {
-        await notifyAdmins(
-          `⚠️ لم يُفعَّل منشور في قناة «${channel.title || chatId}» لأنه يحتوي درسًا بلا هاشتاغ مادة.\n` +
-            'أضف الهاشتاغ بتعديل المنشور نفسه ليُفعَّل الدرس تلقائيًا.'
-        );
-      }
-      return;
-    }
+    const currentDate = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
 
+    // الهاشتاغ والجدول الدراسي يعملان داخل نفس مسار اكتشاف الدرس:
+    // 1) الهاشتاغ هو التعريف الصريح للمادة، ويبقى صالحًا كالمعتاد.
+    // 2) عند غياب الهاشتاغ، يُستخدم جدول اليوم إذا كانت مادة واحدة فقط مجدولة في ذلك التاريخ.
+    // 3) عند وجود أكثر من مادة مجدولة في اليوم نفسه، لا نخمن المادة؛ نطلب الهاشتاغ لضمان الدقة.
     let subject = null;
+    let activationSourceType = 'channel';
+
     for (const tag of hashtags) {
       subject = await db.findSubjectByHashtag(channel.stage_id, tag);
       if (subject) break;
     }
+
+    if (!subject && hashtags.length === 0) {
+      const scheduled = await db.getScheduledSubjectsForDate(channel.stage_season_id, currentDate);
+      if (scheduled.length === 1) {
+        subject = scheduled[0];
+        activationSourceType = 'channel_schedule';
+      } else if (scheduled.length > 1) {
+        await notifyAdmins(
+          `⚠️ لم يُفعّل منشور في قناة «${channel.title || chatId}» رغم وجوده في يوم مجدول؛` +
+            ` لأن ${scheduled.length} مواد مجدولة في ${currentDate}: ${scheduled.map((item) => `«${item.name}»`).join('، ')}.\n` +
+            'أضف هاشتاغ المادة إلى المنشور لتحديد الدرس بدقة.'
+        );
+        return;
+      }
+    }
+
     if (!subject) {
-      await notifyAdmins(
-        `⚠️ لم يُفعَّل منشور في قناة «${channel.title || chatId}». الهاشتاغات الموجودة (${hashtags
-          .map((tag) => `#${tag}`)
-          .join('، ')}) لا تطابق مواد المرحلة.`
-      );
+      if (hashtags.length) {
+        await notifyAdmins(
+          `⚠️ لم يُفعّل منشور في قناة «${channel.title || chatId}». الهاشتاغات الموجودة (${hashtags
+            .map((tag) => `#${tag}`)
+            .join('، ')}) لا تطابق مواد المرحلة.`
+        );
+      } else if (looksLikeLessonMedia(message)) {
+        await notifyAdmins(
+          `⚠️ لم يُفعّل منشور في قناة «${channel.title || chatId}» لأنه لا يحتوي هاشتاغًا ولم تُحدد له مادة في جدول اليوم (${currentDate}).`
+        );
+      }
       return;
     }
 
@@ -5319,7 +5337,7 @@ async function handleChannelLesson(ctx) {
     const activated = await db.activateLesson(
       subject.id,
       LESSON_ACTIVE_HOURS,
-      'channel',
+      activationSourceType,
       sourceUrl,
       chatId,
       message.message_id
@@ -5342,7 +5360,7 @@ async function handleChannelLesson(ctx) {
     await notifyAdmins(
       `✅ فُعّل تلقائيًا الدرس رقم ${Number(lesson.lesson_number)} لمادة «${subject.name}» من قناة «${
         channel.title || chatId
-      }». حُفظ تنبيه دروس اليوم للإرسال إلى ${delivery.queued ?? delivery.delivered} طالب` +
+      }» عبر ${activationSourceType === 'channel_schedule' ? 'جدول الدروس' : 'الهاشتاغ'}. حُفظ تنبيه دروس اليوم للإرسال إلى ${delivery.queued ?? delivery.delivered} طالب` +
         (delivery.alreadyNotifiedToday ? `، وسبق تنبيه ${delivery.alreadyNotifiedToday} اليوم` : '') +
         (delivery.skippedOnLeave ? ` (تُخطّي ${delivery.skippedOnLeave} في إجازة).` : '.')
     );

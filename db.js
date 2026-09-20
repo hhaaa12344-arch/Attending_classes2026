@@ -2320,6 +2320,19 @@ async function getLessonSchedule(stageSeasonId) {
   return {...ss,start_date:startDate,end_date_exclusive:addMonthsIso(startDate,6),
     subjects,entries,dates:lessonScheduleDates(startDate)};
 }
+
+// المواد المجدولة للنشر في تاريخ محدد داخل موسم المرحلة.
+// يُستعمل كمسار ثانٍ مكمّل للهاشتاغ عند نشر الدرس في القناة من دون هاشتاغ.
+async function getScheduledSubjectsForDate(stageSeasonId, lessonDate) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return [];
+  return (await pool.query(`
+    SELECT DISTINCT sub.id, sub.name, lse.lesson_date::text AS lesson_date
+    FROM lesson_schedule_entries lse
+    JOIN subjects sub ON sub.id=lse.subject_id
+    JOIN stage_seasons ss ON ss.id=lse.stage_season_id AND ss.stage_id=sub.stage_id
+    WHERE lse.stage_season_id=$1 AND lse.lesson_date=$2
+    ORDER BY sub.id`,[stageSeasonId,lessonDate])).rows;
+}
 async function setLessonScheduleEntry(stageSeasonId,subjectId,lessonDate,checked) {
   const date=String(lessonDate||'');
   if(!/^\d{4}-\d{2}-\d{2}$/.test(date))throw new Error('تاريخ الجدول غير صالح.');
@@ -2376,6 +2389,7 @@ module.exports = {
   getStudentActiveStageSeason,
   listStageSeasons,
   getLessonSchedule,
+  getScheduledSubjectsForDate,
   setLessonScheduleEntry,
   listStudentSeasons,
   startSeasonForStages,
