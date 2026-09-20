@@ -65,6 +65,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(route==='/reports')result=await adminData.reports(q);
         else if(route==='/sessions')result=await adminData.sessions(positiveInt(q.seasonId));
         else if(route==='/schedule')result=await studies.listStageSeasonSlots(positiveInt(q.seasonId));
+        else if(route==='/lesson-schedule')result=await db.getLessonSchedule(positiveInt(q.stageSeasonId));
         else if(/^\/exams\/\d+$/.test(route)){
           const id=positiveInt(route.split('/')[2]);const exam=await studies.getExamById(id);
           if(!exam)throw appError('الامتحان غير موجود.','NOT_FOUND',404);
@@ -144,6 +145,11 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           if(!teacher?.is_active)throw appError('اختر أستاذًا نشطًا.');
           result=await db.assignTeacherToSubject(teacher.id,positiveInt(body.subjectId));
           if(result)await audit(actor.id,'assign_teacher','subject',Number(body.subjectId),null,{teacher_id:teacher.id});
+        }
+        else if(route==='/lesson-schedule'&&req.method==='POST'){
+          result=await db.setLessonScheduleEntry(positiveInt(body.stageSeasonId),positiveInt(body.subjectId),body.lessonDate,body.checked===true);
+          await audit(actor.id,body.checked===true?'set_lesson_schedule':'remove_lesson_schedule','lesson_schedule',
+            Number(body.subjectId),null,{stage_season_id:Number(body.stageSeasonId),lesson_date:body.lessonDate,checked:body.checked===true});
         }
         else if(route==='/schedule'&&req.method==='POST'){
           result=await studies.addScheduleSlot(positiveInt(body.groupId),{dayOfWeek:body.dayOfWeek,hour:body.hour,minute:body.minute,teacherId:positiveInt(body.teacherId)});

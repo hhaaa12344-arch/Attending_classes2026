@@ -91,6 +91,18 @@ async function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_attendance_lesson ON attendance(lesson_id);
     CREATE INDEX IF NOT EXISTS idx_attendance_student_lesson ON attendance(student_id, lesson_id);
     CREATE INDEX IF NOT EXISTS idx_channels_stage ON channels(stage_id);
+
+    -- جدول نشر الدروس المخطط: مستقل عن اكتشاف منشورات القناة عبر الهاشتاك.
+    CREATE TABLE IF NOT EXISTS lesson_schedule_entries (
+      id SERIAL PRIMARY KEY,
+      stage_season_id INTEGER NOT NULL REFERENCES stage_seasons(id) ON DELETE CASCADE,
+      subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+      lesson_date DATE NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT now(),
+      UNIQUE(stage_season_id, subject_id, lesson_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_lesson_schedule_stage_season_date
+      ON lesson_schedule_entries(stage_season_id, lesson_date);
   `);
 
   // ترقية آمنة لقواعد بيانات أُنشئت بنسخة سابقة من هذا البوت (قبل إضافة هذه الأعمدة)
@@ -2275,6 +2287,56 @@ const getStudentSeasonReport = (studentId, stageSeasonId = null, timeZone = 'Asi
     .then((r) => r.rows);
 };
 
+// ---------------- جدول الدروس الدراسي ----------------
+function addMonthsIso(dateIso, months) {
+  const d = new Date(`${dateIso}T00:00:00Z`);
+  const day = d.getUTCDate();
+  d.setUTCDate(1);
+  d.setUTCMonth(d.getUTCMonth() + months);
+  const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  d.setUTCDate(Math.min(day, last));
+  return d.toISOString().slice(0, 10);
+}
+function lessonScheduleDates(startIso) {
+  const start = new Date(`${startIso}T00:00:00Z`);
+  const endExclusive = new Date(`${addMonthsIso(startIso, 6)}T00:00:00Z`);
+  const dates = [];
+  for (const d = new Date(start); d < endExclusive; d.setUTCDate(d.getUTCDate() + 1)) {
+    const day = d.getUTCDay();
+    if (day === 4 || day === 5) continue;
+    dates.push(d.toISOString().slice(0, 10));
+  }
+  return dates;
+}
+async function getLessonSchedule(stageSeasonId) {
+  const ss=(await pool.query(`SELECT ss.id AS stage_season_id,ss.stage_id,ss.started_at::date AS start_date,
+    st.name AS stage_name,se.name AS season_name FROM stage_seasons ss
+    JOIN stages st ON st.id=ss.stage_id JOIN seasons se ON se.id=ss.season_id WHERE ss.id=$1`,[stageSeasonId])).rows[0];
+  if(!ss)return null;
+  const subjects=(await pool.query('SELECT id,name FROM subjects WHERE stage_id=$1 ORDER BY id',[ss.stage_id])).rows;
+  const entries=(await pool.query(`SELECT id,subject_id,lesson_date::text AS lesson_date
+    FROM lesson_schedule_entries WHERE stage_season_id=$1 ORDER BY lesson_date,subject_id`,[stageSeasonId])).rows;
+  const startDate=String(ss.start_date).slice(0,10);
+  return {...ss,start_date:startDate,end_date_exclusive:addMonthsIso(startDate,6),
+    subjects,entries,dates:lessonScheduleDates(startDate)};
+}
+async function setLessonScheduleEntry(stageSeasonId,subjectId,lessonDate,checked) {
+  const date=String(lessonDate||'');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date))throw new Error('تاريخ الجدول غير صالح.');
+  const ss=(await pool.query('SELECT id,stage_id,started_at::date AS start_date FROM stage_seasons WHERE id=$1',[stageSeasonId])).rows[0];
+  if(!ss)throw new Error('الموسم الدراسي غير موجود.');
+  if(!(await pool.query('SELECT id FROM subjects WHERE id=$1 AND stage_id=$2',[subjectId,ss.stage_id])).rows[0])
+    throw new Error('المادة لا تنتمي إلى المرحلة المختارة.');
+  if(!new Set(lessonScheduleDates(String(ss.start_date).slice(0,10))).has(date))
+    throw new Error('يمكن اختيار أيام الدراسة فقط، مع استبعاد الخميس والجمعة.');
+  if(checked)return (await pool.query(`INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date)
+    VALUES($1,$2,$3) ON CONFLICT(stage_season_id,subject_id,lesson_date) DO NOTHING RETURNING *`,
+    [stageSeasonId,subjectId,date])).rows[0]||{stage_season_id:stageSeasonId,subject_id:subjectId,lesson_date:date};
+  await pool.query('DELETE FROM lesson_schedule_entries WHERE stage_season_id=$1 AND subject_id=$2 AND lesson_date=$3',
+    [stageSeasonId,subjectId,date]);
+  return {stage_season_id:stageSeasonId,subject_id:subjectId,lesson_date:date,checked:false};
+}
+
 module.exports = {
   pool,
   initSchema,
@@ -2313,6 +2375,8 @@ module.exports = {
   claimDailyLessonRecipients,
   getStudentActiveStageSeason,
   listStageSeasons,
+  getLessonSchedule,
+  setLessonScheduleEntry,
   listStudentSeasons,
   startSeasonForStages,
   getPendingTransition,

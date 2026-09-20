@@ -757,14 +757,12 @@ async function showTodayLessons(ctx, options = {}) {
 
   const lessons = await db.getActiveLessonsForStudent(student.stage_id, student.id);
   if (lessons.length === 0) {
-    return replyStudentScreen(
-      ctx,
-      student,
-      options.confirmation
-        ? `${options.confirmation}\n\nلا توجد دروس أخرى غير مؤشَّرة حاليًا لمرحلتك.`
-        : 'لا توجد دروس غير مؤشَّرة حاليًا لمرحلتك. تحقق لاحقًا.',
-      studentMainMenu(student)
-    );
+    const text = options.confirmation
+      ? `${options.confirmation}\n\nلا توجد دروس أخرى غير مؤشَّرة حاليًا لمرحلتك.`
+      : 'لا توجد دروس غير مؤشَّرة حاليًا لمرحلتك. تحقق لاحقًا.';
+    return replyStudentScreen(ctx, student, text, Markup.inlineKeyboard([
+      [callbackButton('📅 الجدول الدراسي', 'student_lesson_schedule')]
+    ]));
   }
 
   const heading = options.confirmation
@@ -1904,6 +1902,31 @@ bot.action('menu_today', async (ctx) => {
 });
 
 bot.hears('📚 دروس اليوم', (ctx) => showTodayLessons(ctx));
+
+
+function studentScheduleDateLabel(iso){
+  return new Date(`${iso}T00:00:00Z`).toLocaleDateString('ar-IQ',{timeZone:'UTC',weekday:'long',day:'numeric',month:'long',year:'numeric'});
+}
+async function showStudentLessonSchedule(ctx){
+  const student=await effectiveStudent(ctx);
+  if(!student)return ctx.reply('الرجاء التسجيل أولًا عبر /start');
+  const ss=await db.getStudentActiveStageSeason(student.id,currentDateInTimeZone(ATTENDANCE_TIME_ZONE));
+  if(!ss)return ctx.reply('لا يوجد موسم دراسي نشط لمرحلتك حاليًا.');
+  const data=await db.getLessonSchedule(ss.id);
+  if(!data||data.subjects.length===0)return ctx.reply('لا توجد مواد أو جدول دراسي معدّ لهذه المرحلة بعد.');
+  const checked=new Set(data.entries.map(e=>`${e.subject_id}:${e.lesson_date}`));
+  const lines=[];
+  for(const iso of data.dates){
+    const names=data.subjects.filter(sub=>checked.has(`${sub.id}:${iso}`)).map(sub=>sub.name);
+    if(names.length)lines.push(`✓ ${studentScheduleDateLabel(iso)}\n   ${names.join('، ')}`);
+  }
+  const text=`📅 الجدول الدراسي — ${data.stage_name}\nالموسم: ${data.season_name}\nالفترة: ${studentScheduleDateLabel(data.start_date)} إلى ما قبل ${studentScheduleDateLabel(data.end_date_exclusive)}\n\n`+
+    (lines.length?lines.join('\n\n'):'لم تُحدّد مواعيد نشر المواد في الجدول بعد.');
+  return replyStudentScreen(ctx,student,text,Markup.inlineKeyboard([
+    [callbackButton('↩️ العودة إلى دروس اليوم','menu_today')]
+  ]));
+}
+bot.action('student_lesson_schedule', async ctx=>{await ctx.answerCbQuery();return showStudentLessonSchedule(ctx);});
 
 async function openMyReport(ctx) {
   const student = await effectiveStudent(ctx);
