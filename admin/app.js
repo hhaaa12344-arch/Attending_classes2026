@@ -4,10 +4,11 @@ const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;
 const date=value=>value?new Date(value).toLocaleDateString('ar-IQ',{timeZone:'Asia/Baghdad'}):'—';
 const stamp=value=>value?new Date(value).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad'}):'—';
 const labels={pending:'بانتظار القرار',approved:'معتمدة',rejected:'مرفوضة',ended:'منتهية',cancelled:'ملغاة',sent:'أُرسلت',sending:'قيد الإرسال',failed:'تعذّر إرسالها',expired:'انتهت المهلة',draft:'مسودة',published:'منشور'};
-const actionLabels={participation_settings:'إعدادات المباحثات والتقارير',update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',update_group:'تعديل مجموعة',assign_teacher:'إسناد أستاذ',unassign_teacher:'إلغاء إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',remove_question:'حذف سؤال',create_teacher:'إضافة أستاذ',update_teacher:'تعديل أستاذ',toggle_teacher:'تفعيل/إيقاف أستاذ',regenerate_code:'توليد كود ربط'};
-const entityLabels={student:'طالب',stage:'مرحلة',subject:'مادة',group:'مجموعة',leave:'إجازة',report:'تقرير',session:'مباحثة',slot:'موعد',exam:'امتحان',question:'سؤال',teacher:'أستاذ',assignment:'إسناد'};
+const actionLabels={participation_settings:'إعدادات المباحثات والتقارير',update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',update_group:'تعديل مجموعة',assign_teacher:'إسناد أستاذ',unassign_teacher:'إلغاء إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',set_lesson_schedule:'إضافة موعد نشر في جدول الدروس',remove_lesson_schedule:'إزالة موعد نشر من جدول الدروس',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',remove_question:'حذف سؤال',create_teacher:'إضافة أستاذ',update_teacher:'تعديل أستاذ',toggle_teacher:'تفعيل/إيقاف أستاذ',regenerate_code:'توليد كود ربط'};
+const entityLabels={student:'طالب',stage:'مرحلة',subject:'مادة',group:'مجموعة',leave:'إجازة',report:'تقرير',session:'مباحثة',slot:'موعد',exam:'امتحان',question:'سؤال',teacher:'أستاذ',assignment:'إسناد',lesson_schedule:'جدول الدروس'};
 const DAY_NAMES=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
 let token='',stages=[],teachers=[],seasons=[],currentSeasonId='',currentStage=null,currentStudent=null,currentExam=null,currentTeacher=null,matrixStageId=null,matrixDay=new Date().getDay(),matrixEligible=[],tab='students',page=0,view='home',sequence=0,dialogSequence=0,busy=false;
+let lessonScheduleStageId=null,lessonScheduleData=null;
 let filters={q:'',status:'active',groupId:'',mode:''};
 function notify(text,error=false){const n=$('#detail').open?$('#dialog-notice'):$('#notice');n.hidden=false;n.className=error?'error':'';n.textContent=text;}
 function clearNotice(){$('#notice').hidden=true;$('#dialog-notice').hidden=true;}
@@ -181,7 +182,34 @@ async function showExam(id){
     (exam.status==='draft'?`<form id="exam-question" class="detail-section"><h3>إضافة سؤال</h3><label>النوع<select name="type"><option value="tf">صح أو خطأ</option><option value="mcq">اختيار من متعدد</option></select></label><label>نص السؤال<textarea name="prompt" maxlength="3000" required></textarea></label><label>الخيارات: كل خيار في سطر (للاختيار المتعدد فقط)<textarea name="options"></textarea></label><label>الإجابة الصحيحة بالنص المطابق للخيار<input name="correct" maxlength="300" required placeholder="صح أو خطأ أو نص أحد الخيارات"></label><div class="form-actions"><button class="primary">إضافة السؤال</button></div></form><div class="form-actions">${button('نشر الامتحان وإشعار الطلبة','publish-exam','','primary')}</div>`:'')+
     `<form id="postpone-exam" class="detail-section"><h3>تغيير الموعد</h3><p class="subtle">متاح فقط قبل بدء أي طالب محاولة. تُحفظ الإجابات السابقة.</p><label>التاريخ الجديد<input name="dateIso" type="date" required></label><div class="form-actions"><button>حفظ الموعد</button></div></form>`);
 }
-async function refresh(){if(view==='lesson-attendance')return attendanceHome();if(view==='stage'){currentStage=await api('/stages/'+currentStage.id+(currentSeasonId?'?seasonId='+currentSeasonId:''));return renderStage();}if(view==='leaves')return allLeaves();if(view==='teachers')return loadTeachers();if(view==='schedule-matrix')return loadScheduleMatrix();return home();}
+
+function isoDateLabel(iso){return new Date(`${iso}T00:00:00Z`).toLocaleDateString('ar-IQ',{timeZone:'UTC',day:'numeric',month:'numeric',year:'numeric'});}
+function monthLabel(iso){return new Date(`${iso}T00:00:00Z`).toLocaleDateString('ar-IQ',{timeZone:'UTC',month:'long',year:'numeric'});}
+async function loadLessonSchedule(){
+  view='lesson-schedule';currentStage=null;setNav('lesson-schedule');$('#breadcrumb').textContent='المعهد / جدول الدروس';const n=++sequence;
+  if(!stages.length)stages=await api('/stages');if(n!==sequence)return;
+  const eligible=stages.filter(s=>s.stage_season_id);
+  if(!eligible.length){setContent(head('جدول الدروس','خطة نشر مستقلة عن نظام الهاشتاك.')+empty('لا توجد مراحل مرتبطة بموسم نشط.'));return;}
+  if(!lessonScheduleStageId||!eligible.some(s=>String(s.id)===String(lessonScheduleStageId)))lessonScheduleStageId=eligible[0].id;
+  await renderLessonSchedule(eligible);
+}
+async function renderLessonSchedule(eligible){
+  const stage=eligible.find(x=>String(x.id)===String(lessonScheduleStageId));if(!stage)return;
+  const data=await api('/lesson-schedule?stageSeasonId='+stage.stage_season_id);lessonScheduleData=data;
+  const checked=new Set(data.entries.map(e=>`${e.subject_id}:${e.lesson_date}`));let lastMonth='';
+  const rows=(data.dates||[]).map(iso=>{
+    const month=monthLabel(iso),monthCell=month!==lastMonth?month:'';lastMonth=month;
+    const cells=data.subjects.map(sub=>{const key=`${sub.id}:${iso}`,on=checked.has(key);
+      return `<td><button type="button" class="schedule-check ${on?'checked':''}" data-action="lesson-schedule-toggle" data-subject-id="${sub.id}" data-date="${iso}" data-checked="${on?'true':'false'}" aria-label="${esc(sub.name)} ${esc(isoDateLabel(iso))}">${on?'✓':'·'}</button></td>`;}).join('');
+    return `<tr><td class="month-cell">${esc(monthCell)}</td><td class="date-cell">${esc(isoDateLabel(iso))}</td>${cells}</tr>`;
+  }).join('');
+  setContent(head('جدول الدروس','ضع علامة ✓ في تاريخ نشر كل مادة. هذا الجدول التخطيطي لا يفعّل الدرس ولا يرسل الإشعارات.')+
+    `<div class="toolbar"><label>المرحلة الدراسية<select id="lesson-schedule-stage">${eligible.map(e=>`<option value="${e.id}" ${String(e.id)===String(lessonScheduleStageId)?'selected':''}>${esc(e.name)}</option>`).join('')}</select></label>
+    <div class="subtle">من ${esc(isoDateLabel(data.start_date))} إلى ما قبل ${esc(isoDateLabel(data.end_date_exclusive))} · الخميس والجمعة مستبعدان تلقائيًا.</div></div>`+
+    `<div class="summary"><div><b>${data.dates.length}</b> يومًا دراسيًا</div><div><b>${data.subjects.length}</b> مادة</div><div><b>${data.entries.length}</b> موعد نشر مخطط</div></div>`+
+    `<div class="table-wrap lesson-schedule-wrap"><table class="lesson-schedule"><thead><tr><th>الشهر الميلادي</th><th>التاريخ</th>${data.subjects.map(s=>`<th>${esc(s.name)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`);
+}
+async function refresh(){if(view==='lesson-attendance')return attendanceHome();if(view==='stage'){currentStage=await api('/stages/'+currentStage.id+(currentSeasonId?'?seasonId='+currentSeasonId:''));return renderStage();}if(view==='leaves')return allLeaves();if(view==='teachers')return loadTeachers();if(view==='schedule-matrix')return loadScheduleMatrix();if(view==='lesson-schedule')return loadLessonSchedule();return home();}
 document.addEventListener('click',async event=>{
   const target=event.target.closest('[data-action]');if(!target||busy)return;const a=target.dataset.action;
   if(target.closest('form')&&target.type==='submit')event.preventDefault();
@@ -230,6 +258,12 @@ document.addEventListener('click',async event=>{
       busy=true;await api('/schedule/'+target.dataset.id+'/remove',{},'POST');await renderScheduleMatrix();
     }else if(a==='teachers')await loadTeachers();
     else if(a==='schedule-matrix')await loadScheduleMatrix();
+    else if(a==='lesson-schedule')await loadLessonSchedule();
+    else if(a==='lesson-schedule-toggle'){
+      busy=true;const next=target.dataset.checked!=='true';
+      try{await api('/lesson-schedule',{stageSeasonId:lessonScheduleData.stage_season_id,subjectId:Number(target.dataset.subjectId),lessonDate:target.dataset.date,checked:next},'POST');await renderLessonSchedule(stages.filter(s=>s.stage_season_id));notify(next?'تمت إضافة تاريخ النشر إلى الجدول.':'أزيل تاريخ النشر من الجدول.');}
+      catch(e){notify(e.message,true);}finally{busy=false;}
+    }
     else if(a==='stats')await loadStats();
     else if(a==='watchlist')await loadWatchlist();
     else if(a==='teacher-performance')await showTeacherPerformance(target.dataset.id);
@@ -264,6 +298,8 @@ document.addEventListener('change',async event=>{
   if(event.target.name==='stageId'&&event.target.closest('#attendance-stage')){if(busy)return;busy=true;clearNotice();try{attendanceStageId=event.target.value;page=0;await attendanceHome();}catch(e){notify(e.message,true);}finally{busy=false;}
   }else if(event.target.name==='stageId'&&event.target.closest('#matrix-stage')){if(busy)return;busy=true;clearNotice();
     try{matrixStageId=event.target.value;await renderScheduleMatrix();}catch(e){notify(e.message,true);}finally{busy=false;}
+  }else if(event.target.id==='lesson-schedule-stage'){if(busy)return;busy=true;clearNotice();
+    try{lessonScheduleStageId=event.target.value;await renderLessonSchedule(stages.filter(s=>s.stage_season_id));}catch(e){notify(e.message,true);}finally{busy=false;}
   }else if(event.target.id==='season-select'){if(busy)return;busy=true;clearNotice();
     try{currentSeasonId=event.target.value;if(view==='stage'&&currentStage)await openStage(currentStage.id);else if(view==='lesson-attendance'){page=0;await attendanceHome();}else await home();}catch(e){notify(e.message,true);}finally{busy=false;}
   }
