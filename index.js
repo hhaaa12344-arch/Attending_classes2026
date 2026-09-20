@@ -5284,10 +5284,13 @@ async function handleChannelLesson(ctx) {
     const hashtags = extractHashtags(message);
     const currentDate = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
 
-    // الهاشتاغ والجدول الدراسي يعملان داخل نفس مسار اكتشاف الدرس:
-    // 1) الهاشتاغ هو التعريف الصريح للمادة، ويبقى صالحًا كالمعتاد.
-    // 2) عند غياب الهاشتاغ، يُستخدم جدول اليوم إذا كانت مادة واحدة فقط مجدولة في ذلك التاريخ.
-    // 3) عند وجود أكثر من مادة مجدولة في اليوم نفسه، لا نخمن المادة؛ نطلب الهاشتاغ لضمان الدقة.
+    // الهاشتاغ والجدول الدراسي يعملان داخل مسار اكتشاف واحد للدرس:
+    // 1) إذا وُجد هاشتاغ صحيح، فهو تعريف صريح للمادة ويأخذ الأولوية.
+    // 2) إذا لم يوجد هاشتاغ، نستخدم جدول اليوم للمواد التي لم تُفعّل بعد.
+    // 3) إذا كانت هناك عدة مواد في اليوم نفسه (وهو الوضع الطبيعي)، يطابق كل منشور
+    //    غير مُهاشتك المادة التالية غير المُفعّلة بحسب ترتيب أعمدة الجدول.
+    // 4) إذا سبق تفعيل إحدى المواد بالهاشتاغ، تُستبعد من قائمة الجدول تلقائيًا،
+    //    فيستمر المنشور التالي على المادة التالية دون تعارض.
     let subject = null;
     let activationSourceType = 'channel';
 
@@ -5297,17 +5300,23 @@ async function handleChannelLesson(ctx) {
     }
 
     if (!subject && hashtags.length === 0) {
-      const scheduled = await db.getScheduledSubjectsForDate(channel.stage_season_id, currentDate);
-      if (scheduled.length === 1) {
-        subject = scheduled[0];
+      const pendingScheduled = await db.getPendingScheduledSubjectsForDate(
+        channel.stage_season_id,
+        currentDate
+      );
+      if (pendingScheduled.length > 0) {
+        // أولًا نحاول التعرف على اسم المادة إذا كان مذكورًا في عنوان/وصف المنشور
+        // حتى لو لم يُستخدم هاشتاغ. وإذا لم يُذكر الاسم، نستخدم ترتيب أعمدة الجدول.
+        const messageText = String(message.caption || message.text || '');
+        const normalizedMessageText = normalizeHashtag(messageText);
+        const namedMatch = pendingScheduled.find((item) => {
+          const normalizedSubjectName = normalizeHashtag(item.name || '');
+          return normalizedSubjectName.length >= 3 && normalizedMessageText.includes(normalizedSubjectName);
+        });
+
+        // ترتيب subject_id هو نفسه ترتيب المواد الظاهر في الصف العلوي من جدول الأدمن والطالب.
+        subject = namedMatch || pendingScheduled[0];
         activationSourceType = 'channel_schedule';
-      } else if (scheduled.length > 1) {
-        await notifyAdmins(
-          `⚠️ لم يُفعّل منشور في قناة «${channel.title || chatId}» رغم وجوده في يوم مجدول؛` +
-            ` لأن ${scheduled.length} مواد مجدولة في ${currentDate}: ${scheduled.map((item) => `«${item.name}»`).join('، ')}.\n` +
-            'أضف هاشتاغ المادة إلى المنشور لتحديد الدرس بدقة.'
-        );
-        return;
       }
     }
 
@@ -5320,7 +5329,7 @@ async function handleChannelLesson(ctx) {
         );
       } else if (looksLikeLessonMedia(message)) {
         await notifyAdmins(
-          `⚠️ لم يُفعّل منشور في قناة «${channel.title || chatId}» لأنه لا يحتوي هاشتاغًا ولم تُحدد له مادة في جدول اليوم (${currentDate}).`
+          `⚠️ لم يُفعّل منشور في قناة «${channel.title || chatId}» لأنه لا يحتوي هاشتاغًا ولا توجد مادة مجدولة غير مُفعّلة متبقية في ${currentDate}.`
         );
       }
       return;
