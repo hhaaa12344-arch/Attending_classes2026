@@ -189,7 +189,7 @@ async function loadLessonSchedule(){
   view='lesson-schedule';currentStage=null;setNav('lesson-schedule');$('#breadcrumb').textContent='المعهد / جدول الدروس';const n=++sequence;
   if(!stages.length)stages=await api('/stages');if(n!==sequence)return;
   const eligible=stages.filter(s=>s.stage_season_id);
-  if(!eligible.length){setContent(head('جدول الدروس','خطة نشر مستقلة عن نظام الهاشتاك.')+empty('لا توجد مراحل مرتبطة بموسم نشط.'));return;}
+  if(!eligible.length){setContent(head('جدول الدروس','خطة نشر مكملة للهاشتاك؛ عند غياب الهاشتاك يمكن للجدول تحديد المادة تلقائيًا إذا كانت مادة واحدة مجدولة في ذلك اليوم.')+empty('لا توجد مراحل مرتبطة بموسم نشط.'));return;}
   if(!lessonScheduleStageId||!eligible.some(s=>String(s.id)===String(lessonScheduleStageId)))lessonScheduleStageId=eligible[0].id;
   await renderLessonSchedule(eligible);
 }
