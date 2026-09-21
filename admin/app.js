@@ -206,7 +206,7 @@ async function renderLessonSchedule(eligible){
   setContent(head('جدول الدروس','ضع علامة ✓ في تاريخ نشر كل مادة. هذا الجدول التخطيطي لا يفعّل الدرس ولا يرسل الإشعارات.')+
     `<div class="toolbar"><label>المرحلة الدراسية<select id="lesson-schedule-stage">${eligible.map(e=>`<option value="${e.id}" ${String(e.id)===String(lessonScheduleStageId)?'selected':''}>${esc(e.name)}</option>`).join('')}</select></label>
     <div class="subtle">من ${esc(isoDateLabel(data.start_date))} إلى ما قبل ${esc(isoDateLabel(data.end_date_exclusive))} · الخميس والجمعة مستبعدان تلقائيًا.</div></div>`+
-    `<div class="summary"><div><b>${data.dates.length}</b> يومًا دراسيًا</div><div><b>${data.subjects.length}</b> مادة</div><div><b>${data.entries.length}</b> موعد نشر مخطط</div></div>`+
+    `<div class="summary"><div><b>${data.dates.length}</b> يومًا دراسيًا</div><div><b>${data.subjects.length}</b> مادة</div><div><b class="lesson-schedule-summary-count">${data.entries.length}</b> موعد نشر مخطط</div></div>`+
     `<div class="table-wrap lesson-schedule-wrap"><table class="lesson-schedule"><thead><tr><th>الشهر الميلادي</th><th>التاريخ</th>${data.subjects.map(s=>`<th>${esc(s.name)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 async function refresh(){if(view==='lesson-attendance')return attendanceHome();if(view==='stage'){currentStage=await api('/stages/'+currentStage.id+(currentSeasonId?'?seasonId='+currentSeasonId:''));return renderStage();}if(view==='leaves')return allLeaves();if(view==='teachers')return loadTeachers();if(view==='schedule-matrix')return loadScheduleMatrix();if(view==='lesson-schedule')return loadLessonSchedule();return home();}
@@ -261,8 +261,23 @@ document.addEventListener('click',async event=>{
     else if(a==='lesson-schedule')await loadLessonSchedule();
     else if(a==='lesson-schedule-toggle'){
       busy=true;const next=target.dataset.checked!=='true';
-      try{await api('/lesson-schedule',{stageSeasonId:lessonScheduleData.stage_season_id,subjectId:Number(target.dataset.subjectId),lessonDate:target.dataset.date,checked:next},'POST');await renderLessonSchedule(stages.filter(s=>s.stage_season_id));notify(next?'تمت إضافة تاريخ النشر إلى الجدول.':'أزيل تاريخ النشر من الجدول.');}
-      catch(e){notify(e.message,true);}finally{busy=false;}
+      try{
+        await api('/lesson-schedule',{stageSeasonId:lessonScheduleData.stage_season_id,subjectId:Number(target.dataset.subjectId),lessonDate:target.dataset.date,checked:next},'POST');
+        target.dataset.checked=next?'true':'false';
+        target.classList.toggle('checked',next);
+        target.textContent=next?'✓':'·';
+        const key=`${target.dataset.subjectId}:${target.dataset.date}`;
+        if(next){
+          if(!lessonScheduleData.entries.some(e=>`${e.subject_id}:${e.lesson_date}`===key)){
+            lessonScheduleData.entries.push({subject_id:Number(target.dataset.subjectId),lesson_date:target.dataset.date});
+          }
+        }else{
+          lessonScheduleData.entries=lessonScheduleData.entries.filter(e=>`${e.subject_id}:${e.lesson_date}`!==key);
+        }
+        const summary=document.querySelector('.lesson-schedule-summary-count');
+        if(summary)summary.textContent=String(lessonScheduleData.entries.length);
+        notify(next?'تمت إضافة تاريخ النشر إلى الجدول.':'أزيل تاريخ النشر من الجدول.');
+      }catch(e){notify(e.message,true);}finally{busy=false;}
     }
     else if(a==='stats')await loadStats();
     else if(a==='watchlist')await loadWatchlist();
@@ -332,27 +347,17 @@ document.addEventListener('submit',async event=>{
 });
 (async()=>{
   const tg=window.Telegram?.WebApp;
-  tg?.ready();
-  const fitAdminViewport=()=>{
-    try{tg?.expand?.();}catch{}
-    try{tg?.requestFullscreen?.();}catch{}
-  };
+  tg?.ready();tg?.expand();
   try{tg?.disableVerticalSwipes?.();}catch{}
   try{tg?.setHeaderColor?.('#101b2b');}catch{}
   try{tg?.setBackgroundColor?.('#f4f6f9');}catch{}
-  if(tg?.onEvent){
-    try{tg.onEvent('fullscreenFailed',()=>{try{tg.expand?.();}catch{}});}catch{}
-    try{tg.onEvent('viewportChanged',()=>{if(!tg.isFullscreen)try{tg.expand?.();}catch{}});}catch{}
-  }
+  try{tg?.requestFullscreen?.();}catch{}
   if(!tg?.initData){setContent(empty('افتح اللوحة من البوت','سجّل دخولك إلى تليجرام، ثم اضغط «لوحة الإدارة» في حساب الأدمن. فتح الرابط وحده لا يمنح صلاحية الاطلاع على بيانات الطلبة.'));return;}
   try{
     const session=await api('/auth',{initData:tg.initData},'POST');token=session.token;$('#identity').textContent=session.user.name;
     seasons=await api('/seasons');
     if(seasons.length>1){const sel=$('#season-select');sel.hidden=false;sel.innerHTML=seasons.map(se=>`<option value="${se.is_current?'':se.id}">${esc(se.name)}${se.is_current?' — الموسم الحالي':''}</option>`).join('');}
     await home();
-    fitAdminViewport();
-    setTimeout(fitAdminViewport,150);
-    setTimeout(fitAdminViewport,700);
   }
   catch(e){setContent(empty('تعذر فتح لوحة الإدارة',e.message));}
 })();

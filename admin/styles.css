@@ -183,12 +183,13 @@ dialog>header h2{margin:0;font-size:1.05rem}
 .study-choice input{width:auto;min-height:0}
 #participation-settings fieldset{border:1px solid var(--line,#ddd);border-radius:.5rem;margin:1rem 0;padding:.6rem}
 
-.lesson-schedule-wrap{max-height:70vh;overflow:auto}
+.lesson-schedule-wrap{max-height:70vh;overflow:auto;overscroll-behavior:contain;scroll-behavior:auto}
 .lesson-schedule{min-width:max-content}
 .lesson-schedule th{position:sticky;top:0;z-index:3;background:var(--surface,#fff)}
 .lesson-schedule th:first-child,.lesson-schedule td:first-child{position:sticky;right:0;z-index:2;background:var(--surface,#fff)}
 .lesson-schedule th:nth-child(2),.lesson-schedule td:nth-child(2){position:sticky;right:120px;z-index:2;background:var(--surface,#fff)}
 .lesson-schedule .month-cell{font-weight:700;min-width:120px}
 .lesson-schedule .date-cell{white-space:nowrap;min-width:105px}
-.schedule-check{width:36px;height:36px;border:1px solid var(--border,#d5dbe5);border-radius:8px;background:transparent;cursor:pointer;font-size:20px;line-height:1}
+.lesson-schedule td:not(.month-cell):not(.date-cell){min-width:64px;text-align:center;vertical-align:middle;padding:.45rem .35rem}
+.schedule-check{width:46px;height:46px;border:1px solid var(--line-strong,#c9d2de);border-radius:8px;background:transparent;cursor:pointer;font-size:22px;line-height:1;padding:0;display:inline-grid;place-items:center;font-weight:700;touch-action:manipulation}
 .schedule-check.checked{background:var(--success-soft,#e8f5e9);border-color:var(--success,#2e7d32);color:var(--success,#2e7d32);font-weight:800}
