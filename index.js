@@ -1954,13 +1954,38 @@ function studentScheduleDays(data, startDate, endDate){
   return days;
 }
 
+// يعثر على جدول الطالب من الموسم الفعلي لمرحلته، مع fallback عند وجود تسجيل
+// قديم ما زال مرتبطًا بموسم سابق. هذا يمنع ظهور رسالة «لا توجد مواد»
+// رغم أن الأدمن وضع علامات في جدول الموسم الحالي.
+async function getStudentLessonScheduleData(student){
+  const today=currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
+  const enrolledSeason=await db.getStudentActiveStageSeason(student.id,today);
+  if(enrolledSeason){
+    const enrolledData=await db.getLessonSchedule(enrolledSeason.stage_season_id);
+    if(enrolledData && enrolledData.subjects && enrolledData.subjects.length>0){
+      return enrolledData;
+    }
+  }
+
+  if(!student.stage_id)return null;
+  const activeSeason=(await db.pool.query(`
+    SELECT ss.id AS stage_season_id
+    FROM stage_seasons ss
+    JOIN stages st ON st.id=ss.stage_id AND st.is_active=true
+    WHERE ss.stage_id=$1 AND ss.is_active=true
+    ORDER BY ss.id DESC
+    LIMIT 1`,[student.stage_id])).rows[0];
+  if(!activeSeason)return null;
+
+  return db.getLessonSchedule(activeSeason.stage_season_id);
+}
+
 async function showStudentLessonSchedule(ctx){
   const student=await effectiveStudent(ctx);
   if(!student)return ctx.reply('الرجاء التسجيل أولًا عبر /start');
-  const ss=await db.getStudentActiveStageSeason(student.id,currentDateInTimeZone(ATTENDANCE_TIME_ZONE));
-  if(!ss)return ctx.reply('لا يوجد موسم دراسي نشط لمرحلتك حاليًا.');
-  const data=await db.getLessonSchedule(ss.id);
-  if(!data||data.subjects.length===0)return ctx.reply('لا توجد مواد أو جدول دراسي معدّ لهذه المرحلة بعد.');
+  const data=await getStudentLessonScheduleData(student);
+  if(!data)return ctx.reply('لا يوجد موسم دراسي نشط لمرحلتك حاليًا.');
+  if(!data.subjects || data.subjects.length===0)return ctx.reply('لا توجد مواد مرتبطة بمرحلتك حاليًا.');
 
   const today=currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
   const window=studentScheduleWindow(today);
@@ -1981,10 +2006,9 @@ async function showStudentLessonSchedule(ctx){
 async function showStudentScheduleDay(ctx, iso){
   const student=await effectiveStudent(ctx);
   if(!student)return ctx.reply('الرجاء التسجيل أولًا عبر /start');
-  const ss=await db.getStudentActiveStageSeason(student.id,currentDateInTimeZone(ATTENDANCE_TIME_ZONE));
-  if(!ss)return ctx.reply('لا يوجد موسم دراسي نشط لمرحلتك حاليًا.');
-  const data=await db.getLessonSchedule(ss.id);
-  if(!data||data.subjects.length===0)return ctx.reply('لا توجد مواد أو جدول دراسي معدّ لهذه المرحلة بعد.');
+  const data=await getStudentLessonScheduleData(student);
+  if(!data)return ctx.reply('لا يوجد موسم دراسي نشط لمرحلتك حاليًا.');
+  if(!data.subjects || data.subjects.length===0)return ctx.reply('لا توجد مواد مرتبطة بمرحلتك حاليًا.');
 
   const today=currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
   const window=studentScheduleWindow(today);
