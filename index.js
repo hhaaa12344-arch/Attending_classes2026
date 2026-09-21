@@ -693,6 +693,7 @@ function lessonKeyboard(lessons) {
       ),
     ]);
   }
+  rows.push([callbackButton('📅 الجدول الدراسي', 'student_lesson_schedule')]);
   return Markup.inlineKeyboard(rows);
 }
 
@@ -1905,28 +1906,137 @@ bot.hears('📚 دروس اليوم', (ctx) => showTodayLessons(ctx));
 
 
 function studentScheduleDateLabel(iso){
-  return new Date(`${iso}T00:00:00Z`).toLocaleDateString('ar-IQ',{timeZone:'UTC',weekday:'long',day:'numeric',month:'long',year:'numeric'});
+  return new Date(`${iso}T00:00:00Z`).toLocaleDateString('ar-IQ',{timeZone:'UTC',weekday:'long',day:'numeric',month:'numeric',year:'numeric'});
 }
+
+function shiftIsoDate(iso, days){
+  const date = new Date(`${iso}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + Number(days || 0));
+  return date.toISOString().slice(0,10);
+}
+
+function isoWeekday(iso){
+  return new Date(`${iso}T00:00:00Z`).getUTCDay();
+}
+
+function studentScheduleWindow(todayIso){
+  // يبدأ الأسبوع الدراسي من السبت وينتهي الأربعاء، والخميس والجمعة
+  // يعرضان الجدول المقرر للأسبوع القادم.
+  const weekday = isoWeekday(todayIso);
+  const showNextWeek = weekday === 4 || weekday === 5; // الخميس والجمعة
+  const saturdayOffset = showNextWeek
+    ? (6 - weekday) + 7
+    : -((weekday + 1) % 7);
+  const startDate = shiftIsoDate(todayIso, saturdayOffset);
+  const endDate = shiftIsoDate(startDate, 4); // السبت إلى الأربعاء
+  return {
+    startDate,
+    endDate,
+    label: showNextWeek ? 'الأسبوع القادم' : 'هذا الأسبوع',
+  };
+}
+
+function studentScheduleDayLabel(iso){
+  return new Date(`${iso}T00:00:00Z`).toLocaleDateString('ar-IQ',{
+    timeZone:'UTC', weekday:'long', day:'numeric', month:'numeric'
+  });
+}
+
+function studentScheduleDays(data, startDate, endDate){
+  const checked=new Set(data.entries.map(e=>`${e.subject_id}:${e.lesson_date}`));
+  const days=[];
+  let cursor=startDate;
+  while(cursor<=endDate){
+    const subjects=data.subjects.filter(sub=>checked.has(`${sub.id}:${cursor}`));
+    if(subjects.length)days.push({date:cursor,subjects});
+    cursor=shiftIsoDate(cursor,1);
+  }
+  return days;
+}
+
+// يعثر على جدول الطالب من الموسم الفعلي لمرحلته، مع fallback عند وجود تسجيل
+// قديم ما زال مرتبطًا بموسم سابق. هذا يمنع ظهور رسالة «لا توجد مواد»
+// رغم أن الأدمن وضع علامات في جدول الموسم الحالي.
+async function getStudentLessonScheduleData(student){
+  const today=currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
+  const enrolledSeason=await db.getStudentActiveStageSeason(student.id,today);
+  if(enrolledSeason){
+    const enrolledData=await db.getLessonSchedule(enrolledSeason.stage_season_id);
+    if(enrolledData && enrolledData.subjects && enrolledData.subjects.length>0){
+      return enrolledData;
+    }
+  }
+
+  if(!student.stage_id)return null;
+  const activeSeason=(await db.pool.query(`
+    SELECT ss.id AS stage_season_id
+    FROM stage_seasons ss
+    JOIN stages st ON st.id=ss.stage_id AND st.is_active=true
+    WHERE ss.stage_id=$1 AND ss.is_active=true
+    ORDER BY ss.id DESC
+    LIMIT 1`,[student.stage_id])).rows[0];
+  if(!activeSeason)return null;
+
+  return db.getLessonSchedule(activeSeason.stage_season_id);
+}
+
 async function showStudentLessonSchedule(ctx){
   const student=await effectiveStudent(ctx);
   if(!student)return ctx.reply('الرجاء التسجيل أولًا عبر /start');
-  const ss=await db.getStudentActiveStageSeason(student.id,currentDateInTimeZone(ATTENDANCE_TIME_ZONE));
-  if(!ss)return ctx.reply('لا يوجد موسم دراسي نشط لمرحلتك حاليًا.');
-  const data=await db.getLessonSchedule(ss.id);
-  if(!data||data.subjects.length===0)return ctx.reply('لا توجد مواد أو جدول دراسي معدّ لهذه المرحلة بعد.');
-  const checked=new Set(data.entries.map(e=>`${e.subject_id}:${e.lesson_date}`));
-  const lines=[];
-  for(const iso of data.dates){
-    const names=data.subjects.filter(sub=>checked.has(`${sub.id}:${iso}`)).map(sub=>sub.name);
-    if(names.length)lines.push(`✓ ${studentScheduleDateLabel(iso)}\n   ${names.join('، ')}`);
+  const data=await getStudentLessonScheduleData(student);
+  if(!data)return ctx.reply('لا يوجد موسم دراسي نشط لمرحلتك حاليًا.');
+  if(!data.subjects || data.subjects.length===0)return ctx.reply('لا توجد مواد مرتبطة بمرحلتك حاليًا.');
+
+  const today=currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
+  const window=studentScheduleWindow(today);
+  const days=studentScheduleDays(data,window.startDate,window.endDate);
+  const rows=days.map(day=>[
+    callbackButton(`📅 ${studentScheduleDayLabel(day.date)}`,`student_schedule_day:${day.date}`)
+  ]);
+  const text=
+    `📅 الجدول الدراسي لـ${window.label}\n`+
+    `المرحلة: ${data.stage_name}\n\n`+
+    (days.length
+      ? 'اختر يوم النشر لعرض المواد المقررة فيه:'
+      : 'لا توجد مواعيد نشر محددة في الجدول لهذه الفترة.');
+  rows.push([callbackButton('↩️ العودة إلى دروس اليوم','menu_today')]);
+  return replyStudentScreen(ctx,student,text,Markup.inlineKeyboard(rows));
+}
+
+async function showStudentScheduleDay(ctx, iso){
+  const student=await effectiveStudent(ctx);
+  if(!student)return ctx.reply('الرجاء التسجيل أولًا عبر /start');
+  const data=await getStudentLessonScheduleData(student);
+  if(!data)return ctx.reply('لا يوجد موسم دراسي نشط لمرحلتك حاليًا.');
+  if(!data.subjects || data.subjects.length===0)return ctx.reply('لا توجد مواد مرتبطة بمرحلتك حاليًا.');
+
+  const today=currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
+  const window=studentScheduleWindow(today);
+  if(iso<window.startDate || iso>window.endDate || [4,5].includes(isoWeekday(iso))){
+    await ctx.answerCbQuery('هذا اليوم ليس ضمن الجدول المعروض حاليًا.');
+    return showStudentLessonSchedule(ctx);
   }
-  const text=`📅 الجدول الدراسي — ${data.stage_name}\nالموسم: ${data.season_name}\nالفترة: ${studentScheduleDateLabel(data.start_date)} إلى ما قبل ${studentScheduleDateLabel(data.end_date_exclusive)}\n\n`+
-    (lines.length?lines.join('\n\n'):'لم تُحدّد مواعيد نشر المواد في الجدول بعد.');
+
+  const checked=new Set(data.entries.map(e=>`${e.subject_id}:${e.lesson_date}`));
+  const subjects=data.subjects.filter(sub=>checked.has(`${sub.id}:${iso}`));
+  if(!subjects.length){
+    await ctx.answerCbQuery('لا توجد مواد مقررة لهذا اليوم.');
+    return showStudentLessonSchedule(ctx);
+  }
+
+  const list=subjects.map((subject,index)=>`${index+1}. ${subject.name}`).join('\n');
+  const text=
+    `📅 ${studentScheduleDayLabel(iso)}\n`+
+    `المرحلة: ${data.stage_name}\n\n`+
+    `مواد النشر:\n${list}`;
+  await ctx.answerCbQuery();
   return replyStudentScreen(ctx,student,text,Markup.inlineKeyboard([
-    [callbackButton('↩️ العودة إلى دروس اليوم','menu_today')]
+    [callbackButton('↩️ أيام الجدول الدراسي','student_lesson_schedule')],
+    [callbackButton('📚 دروس اليوم','menu_today')]
   ]));
 }
 bot.action('student_lesson_schedule', async ctx=>{await ctx.answerCbQuery();return showStudentLessonSchedule(ctx);});
+bot.action(/^student_schedule_day:(\d{4}-\d{2}-\d{2})$/, async ctx=>showStudentScheduleDay(ctx,ctx.match[1]));
 
 async function openMyReport(ctx) {
   const student = await effectiveStudent(ctx);
