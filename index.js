@@ -5659,7 +5659,28 @@ function isStandaloneLessonHashtag(message) {
   return /^(?:#[\p{L}\p{N}_\u0640]+(?:[\s،,؛;]*)?)+$/u.test(text);
 }
 
+function channelPostContentKind(message, standaloneHashtag = false) {
+  if (standaloneHashtag) return 'hashtag_only';
+  if (message.voice) return 'voice';
+  if (message.audio) return 'audio';
+  if (message.document) {
+    const mime = String(message.document.mime_type || '').toLowerCase();
+    const name = String(message.document.file_name || '');
+    if (mime.startsWith('audio/') || /\.(mp3|m4a|aac|wav|ogg|oga|opus|flac|wma)$/i.test(name)) return 'audio_document';
+    return 'document';
+  }
+  if (message.video || message.video_note) return 'video';
+  if (extractFirstUrl(message)) return 'link';
+  if (message.text || message.caption) return 'text';
+  return 'other';
+}
+
 async function handleChannelLesson(ctx) {
+  let activityChatId = null;
+  let activityMessageId = null;
+  let activityStageId = null;
+  let activityStageSeasonId = null;
+  let activityLessonId = null;
   try {
     const message = ctx.channelPost || ctx.editedChannelPost;
     if (!message) return;
@@ -5667,17 +5688,56 @@ async function handleChannelLesson(ctx) {
     const hashtags = extractHashtags(message);
     const standaloneHashtag = isStandaloneLessonHashtag(message);
     const lessonContent = hasLessonContent(message);
+    const updateKind = ctx.editedChannelPost ? 'edited_channel_post' : 'channel_post';
+    activityChatId = chatId;
+    activityMessageId = message.message_id || null;
+
+    // نسجل الوصول أولًا قبل أي شرط. بهذه المعلومة تستطيع اللوحة التفاعلية حسم السؤال:
+    // هل تليجرام أوصل المنشور للبوت أصلًا، أم وصل وتوقف داخل منطق الربط/الهاشتاغ/الجدول؟
+    await db.recordChannelPostActivity({
+      chatId,
+      title: message.chat.title || null,
+      username: message.chat.username ? `@${message.chat.username}` : null,
+      messageId: activityMessageId,
+      updateKind,
+      contentKind: channelPostContentKind(message, standaloneHashtag),
+      hashtags,
+    });
+
     const channel = await db.getChannelByChatId(chatId);
     if (!channel) {
-      // القناة إما غير مرتبطة إطلاقًا، أو مرتبطة بموسم لم يعد نشطًا (تم بدء موسم جديد أو فُكّ الربط).
+      // القناة إما غير مرتبطة إطلاقًا، أو مرتبطة بموسم/مرحلة غير صالحين.
+      const status = await db.getChannelLinkStatus(chatId);
+      activityStageId = status?.stage_id || null;
+      activityStageSeasonId = status?.stage_season_id || null;
+      const outcome = status && !status.season_is_active ? 'season_inactive' : 'unlinked';
+      await db.setChannelPostActivityOutcome(
+        chatId,
+        activityMessageId,
+        outcome,
+        status ? `الربط الموجود: ${status.stage_name || 'مرحلة غير معروفة'}؛ الموسم ${status.season_is_active ? 'نشط' : 'غير نشط'}.` : 'لم يُعثر على ربط لهذا Telegram Chat ID.',
+        { stageId: activityStageId, stageSeasonId: activityStageSeasonId }
+      );
       // نعتبر أيضًا رسالة الهاشتاغ المستقلة محاولة تفعيل درس، كي لا تضيع بصمت.
       if (lessonContent || standaloneHashtag) await reportUnlinkedChannelPost(message, chatId);
       return;
     }
 
+    activityStageId = channel.stage_id;
+    activityStageSeasonId = channel.stage_season_id;
+
     // سابقًا كان الشرط التالي يُسقط «#الفقه» إذا أُرسل كرسالة مستقلة لأن الرسالة
     // لا تحتوي صوتًا/فيديو/رابطًا. الآن الهاشتاغ المستقل الصريح يعمل في جميع المراحل.
-    if (!lessonContent && !standaloneHashtag) return;
+    if (!lessonContent && !standaloneHashtag) {
+      await db.setChannelPostActivityOutcome(
+        chatId,
+        activityMessageId,
+        'ignored_non_lesson',
+        'وصل المنشور للبوت وربط القناة سليم، لكنه ليس محتوى درس ولا رسالة هاشتاغ مستقلة.',
+        { stageId: activityStageId, stageSeasonId: activityStageSeasonId }
+      );
+      return;
+    }
 
     const currentDate = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
 
@@ -5719,14 +5779,36 @@ async function handleChannelLesson(ctx) {
 
     if (!subject) {
       if (hashtags.length) {
+        await db.setChannelPostActivityOutcome(
+          chatId,
+          activityMessageId,
+          'hashtag_no_match',
+          `وصل المنشور، لكن الهاشتاغات (${hashtags.map((tag)=>`#${tag}`).join('، ')}) لا تطابق مواد المرحلة رقم ${channel.stage_id}.`,
+          { stageId: activityStageId, stageSeasonId: activityStageSeasonId }
+        );
         await notifyAdmins(
           `⚠️ لم يُفعّل منشور في قناة «${channel.title || chatId}». الهاشتاغات الموجودة (${hashtags
             .map((tag) => `#${tag}`)
             .join('، ')}) لا تطابق مواد المرحلة.`
         );
       } else if (looksLikeLessonMedia(message)) {
+        await db.setChannelPostActivityOutcome(
+          chatId,
+          activityMessageId,
+          'schedule_no_match',
+          `وصل ملف الدرس للبوت، لكن لا توجد مادة مجدولة غير مُفعّلة متبقية في ${currentDate}.`,
+          { stageId: activityStageId, stageSeasonId: activityStageSeasonId }
+        );
         await notifyAdmins(
           `⚠️ لم يُفعّل منشور في قناة «${channel.title || chatId}» لأنه لا يحتوي هاشتاغًا ولا توجد مادة مجدولة غير مُفعّلة متبقية في ${currentDate}.`
+        );
+      } else {
+        await db.setChannelPostActivityOutcome(
+          chatId,
+          activityMessageId,
+          'no_subject',
+          'وصل المنشور للبوت لكن تعذر تحديد مادة له.',
+          { stageId: activityStageId, stageSeasonId: activityStageSeasonId }
         );
       }
       return;
@@ -5734,7 +5816,17 @@ async function handleChannelLesson(ctx) {
 
     // التعديل المتكرر لنفس منشور القناة لا ينشئ درسًا جديدًا ولا يكرر الإشعار.
     const existing = await db.getLessonBySource(chatId, message.message_id);
-    if (existing) return;
+    if (existing) {
+      activityLessonId = existing.id;
+      await db.setChannelPostActivityOutcome(
+        chatId,
+        activityMessageId,
+        'duplicate_post',
+        `هذا المنشور سبق أن فعّل الدرس #${existing.id}؛ لم يُنشأ درس مكرر.`,
+        { stageId: activityStageId, stageSeasonId: activityStageSeasonId, lessonId: activityLessonId }
+      );
+      return;
+    }
 
     const postLink = telegramMessageLink(message);
     const externalUrl = extractFirstUrl(message);
@@ -5749,7 +5841,16 @@ async function handleChannelLesson(ctx) {
       message.message_id
     );
     if (!activated) throw new Error('المرحلة مؤرشفة أو لا يوجد لها موسم نشط.');
+    activityLessonId = activated.id;
     const lesson = await db.getLessonById(activated.id);
+
+    await db.setChannelPostActivityOutcome(
+      chatId,
+      activityMessageId,
+      'activated',
+      `فُعّل «${subject.name}» — الدرس رقم ${Number(lesson.lesson_number)}.`,
+      { stageId: activityStageId, stageSeasonId: activityStageSeasonId, lessonId: activityLessonId }
+    );
 
     // نبّه أولًا من انتهت إجازتهم توًّا (أول درس بعد الإجازة) بضرورة متابعة الدروس الفائتة.
     await notifyReturningFromLeave(channel.stage_id);
@@ -5771,6 +5872,19 @@ async function handleChannelLesson(ctx) {
         (delivery.skippedOnLeave ? ` (تُخطّي ${delivery.skippedOnLeave} في إجازة).` : '.')
     );
   } catch (err) {
+    if (activityChatId != null) {
+      try {
+        await db.setChannelPostActivityOutcome(
+          activityChatId,
+          activityMessageId,
+          activityLessonId ? 'activated_notification_error' : 'processing_error',
+          String(err.message || 'خطأ غير معروف').slice(0, 500),
+          { stageId: activityStageId, stageSeasonId: activityStageSeasonId, lessonId: activityLessonId }
+        );
+      } catch (diagErr) {
+        console.error('تعذر تحديث تشخيص منشور القناة:', diagErr.message);
+      }
+    }
     console.error('خطأ أثناء معالجة منشور القناة:', err);
     await notifyAdmins(`❌ حدث خطأ أثناء معالجة منشور قناة: ${err.message || 'خطأ غير معروف'}`);
   }

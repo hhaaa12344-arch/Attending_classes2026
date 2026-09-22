@@ -105,6 +105,26 @@ async function initSchema() {
       last_notified_at TIMESTAMPTZ
     );
 
+    -- آخر تحديث استلمه البوت من كل قناة، حتى يمكن تشخيص الفرق بين:
+    -- «تليجرام لم يرسل المنشور للبوت» و«البوت استلمه لكنه لم يفعّل درسًا».
+    CREATE TABLE IF NOT EXISTS channel_post_activity (
+      telegram_chat_id BIGINT PRIMARY KEY,
+      chat_title TEXT,
+      chat_username TEXT,
+      last_message_id BIGINT,
+      last_update_kind TEXT,
+      last_content_kind TEXT,
+      last_hashtags JSONB NOT NULL DEFAULT '[]'::jsonb,
+      last_received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_outcome TEXT NOT NULL DEFAULT 'received',
+      last_detail TEXT,
+      stage_id_at_receive INTEGER,
+      stage_season_id_at_receive INTEGER,
+      last_lesson_id INTEGER,
+      received_updates INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX IF NOT EXISTS idx_channel_post_activity_seen ON channel_post_activity(last_received_at DESC);
+
   `);
 
   // ترقية آمنة لقواعد بيانات أُنشئت بنسخة سابقة من هذا البوت (قبل إضافة هذه الأعمدة)
@@ -119,6 +139,7 @@ async function initSchema() {
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_chat_id BIGINT;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_message_id BIGINT;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS reminder_sent BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE channels ADD COLUMN IF NOT EXISTS public_link TEXT;
   `);
 
   // المواسم مستقلة لكل مرحلة: يمكن بدء ��وسم لمراحل محددة وترك غيرها في موسمها الحالي.
@@ -1467,7 +1488,7 @@ const unlinkChannel = (id) => pool.query('DELETE FROM channels WHERE id=$1', [id
 const getChannelLinkStatus = (chatId) =>
   pool
     .query(
-      `SELECT c.id, s.name AS stage_name, ss.is_active AS season_is_active
+      `SELECT c.id,c.stage_id,c.stage_season_id,s.name AS stage_name,ss.is_active AS season_is_active
        FROM channels c JOIN stages s ON s.id=c.stage_id
        LEFT JOIN stage_seasons ss ON ss.id=c.stage_season_id
        WHERE c.telegram_chat_id=$1`,
@@ -1505,6 +1526,129 @@ const listUnlinkedChannelAlerts = () =>
 
 const dismissUnlinkedChannelAlert = (chatId) =>
   pool.query('DELETE FROM unlinked_channel_posts WHERE telegram_chat_id=$1', [chatId]);
+
+// يسجل كل channel_post / edited_channel_post فور وصوله، قبل محاولة التعرف على المادة.
+// لا نخزن نص المنشور نفسه؛ فقط بيانات تشخيصية آمنة تكفي لمعرفة أين توقف المسار.
+const recordChannelPostActivity = ({
+  chatId, title = null, username = null, messageId = null, updateKind = 'channel_post',
+  contentKind = 'other', hashtags = []
+}) =>
+  pool.query(
+    `INSERT INTO channel_post_activity(
+       telegram_chat_id,chat_title,chat_username,last_message_id,last_update_kind,last_content_kind,last_hashtags
+     ) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)
+     ON CONFLICT(telegram_chat_id) DO UPDATE SET
+       chat_title=EXCLUDED.chat_title,chat_username=EXCLUDED.chat_username,
+       last_message_id=EXCLUDED.last_message_id,last_update_kind=EXCLUDED.last_update_kind,
+       last_content_kind=EXCLUDED.last_content_kind,last_hashtags=EXCLUDED.last_hashtags,
+       last_received_at=now(),last_outcome='received',last_detail=NULL,
+       stage_id_at_receive=NULL,stage_season_id_at_receive=NULL,last_lesson_id=NULL,
+       received_updates=channel_post_activity.received_updates+1
+     RETURNING *`,
+    [chatId,title,username,messageId,updateKind,contentKind,JSON.stringify(hashtags)]
+  ).then((r)=>r.rows[0]);
+
+// يحدّث نتيجة معالجة آخر منشور فقط. شرط message_id يمنع منشورًا أبطأ من أن يكتب
+// نتيجته فوق منشور أحدث وصل أثناء المعالجة.
+const setChannelPostActivityOutcome = (
+  chatId, messageId, outcome, detail = null, { stageId = null, stageSeasonId = null, lessonId = null } = {}
+) =>
+  pool.query(
+    `UPDATE channel_post_activity SET
+       last_outcome=$3,last_detail=$4,stage_id_at_receive=$5,stage_season_id_at_receive=$6,last_lesson_id=$7
+     WHERE telegram_chat_id=$1 AND ($2::bigint IS NULL OR last_message_id=$2)
+     RETURNING *`,
+    [chatId,messageId,outcome,detail,stageId,stageSeasonId,lessonId]
+  ).then((r)=>r.rows[0]||null);
+
+function telegramUsernameFromPublicLink(value) {
+  if (!value) return null;
+  try {
+    const u = new URL(String(value));
+    if (!['t.me','telegram.me'].includes(u.hostname.toLowerCase())) return null;
+    const first = u.pathname.split('/').filter(Boolean)[0];
+    if (!first || first === 'c' || first === 'joinchat' || first.startsWith('+')) return null;
+    return first.replace(/^@/,'').toLowerCase();
+  } catch (_) { return null; }
+}
+
+// فحص عميق للوحة الويب: يعرض الربط الفعلي في DB، آخر منشور وصل للبوت،
+// وآخر درس فُعّل من نفس Chat ID، ثم يصنف حالات التبديل/التعارض المحتملة.
+const getDeepChannelDiagnostics = async () => {
+  const rows = (await pool.query(
+    `WITH latest_lesson AS (
+       SELECT DISTINCT ON (l.source_chat_id)
+         l.source_chat_id,l.id AS lesson_id,l.activated_at,l.source_message_id,
+         sub.name AS lesson_subject_name,sub.stage_id AS lesson_stage_id,sg.name AS lesson_stage_name
+       FROM lessons l
+       JOIN subjects sub ON sub.id=l.subject_id
+       JOIN stages sg ON sg.id=sub.stage_id
+       WHERE l.source_chat_id IS NOT NULL
+       ORDER BY l.source_chat_id,l.activated_at DESC,l.id DESC
+     ), lesson_stage_history AS (
+       SELECT l.source_chat_id,COUNT(DISTINCT sub.stage_id)::int AS lesson_stage_count,
+         string_agg(DISTINCT sg.name,'، ' ORDER BY sg.name) AS lesson_stage_names
+       FROM lessons l JOIN subjects sub ON sub.id=l.subject_id JOIN stages sg ON sg.id=sub.stage_id
+       WHERE l.source_chat_id IS NOT NULL
+       GROUP BY l.source_chat_id
+     )
+     SELECT c.id,c.telegram_chat_id,c.title,c.public_link,c.stage_id,s.name AS stage_name,s.is_active AS stage_is_active,
+       c.stage_season_id,ss.stage_id AS season_stage_id,ss.is_active AS season_is_active,se.name AS season_name,
+       a.chat_title AS observed_title,a.chat_username AS observed_username,a.last_message_id,a.last_update_kind,
+       a.last_content_kind,a.last_hashtags,a.last_received_at,a.last_outcome,a.last_detail,
+       a.stage_id_at_receive,a.stage_season_id_at_receive,a.last_lesson_id,a.received_updates,
+       ll.lesson_id AS latest_lesson_id,ll.activated_at AS latest_lesson_at,ll.source_message_id AS latest_lesson_message_id,
+       ll.lesson_subject_name,ll.lesson_stage_id,ll.lesson_stage_name,
+       COALESCE(lh.lesson_stage_count,0) AS lesson_stage_count,lh.lesson_stage_names
+     FROM channels c
+     JOIN stages s ON s.id=c.stage_id
+     LEFT JOIN stage_seasons ss ON ss.id=c.stage_season_id
+     LEFT JOIN seasons se ON se.id=ss.season_id
+     LEFT JOIN channel_post_activity a ON a.telegram_chat_id=c.telegram_chat_id
+     LEFT JOIN latest_lesson ll ON ll.source_chat_id=c.telegram_chat_id
+     LEFT JOIN lesson_stage_history lh ON lh.source_chat_id=c.telegram_chat_id
+     ORDER BY s.sort_order NULLS LAST,s.id,c.id`
+  )).rows;
+
+  const linkCounts = new Map();
+  for (const row of rows) {
+    const key = String(row.public_link || '').trim().toLowerCase();
+    if (key) linkCounts.set(key,(linkCounts.get(key)||0)+1);
+  }
+
+  return rows.map((row) => {
+    const problems = [];
+    const dbStageId = Number(row.stage_id);
+    const seasonStageId = row.season_stage_id == null ? null : Number(row.season_stage_id);
+    const observedStageId = row.stage_id_at_receive == null ? null : Number(row.stage_id_at_receive);
+    const lessonStageId = row.lesson_stage_id == null ? null : Number(row.lesson_stage_id);
+    const publicUsername = telegramUsernameFromPublicLink(row.public_link);
+    const observedUsername = String(row.observed_username || '').replace(/^@/,'').toLowerCase() || null;
+    const linkKey = String(row.public_link || '').trim().toLowerCase();
+
+    if (seasonStageId == null) problems.push({ severity:'error', code:'season_missing', text:'القناة لا تشير إلى موسم مرحلة موجود.' });
+    else if (seasonStageId !== dbStageId) problems.push({ severity:'error', code:'stage_season_mismatch', text:'المرحلة المسجلة لا تطابق مرحلة الموسم المرتبط بالقناة.' });
+    if (row.stage_is_active !== true) problems.push({ severity:'error', code:'stage_inactive', text:'المرحلة نفسها غير نشطة.' });
+    if (row.season_is_active !== true) problems.push({ severity:'error', code:'season_inactive', text:'الموسم المرتبط بالقناة غير نشط.' });
+    if (observedStageId != null && observedStageId !== dbStageId) problems.push({ severity:'warn', code:'mapping_changed', text:'آخر منشور استلمه البوت كان أثناء ربط هذه القناة بمرحلة مختلفة.' });
+    if (lessonStageId != null && lessonStageId !== dbStageId) problems.push({ severity:'error', code:'lesson_stage_mismatch', text:'آخر درس فُعّل من هذا Chat ID يعود إلى مرحلة مختلفة عن الربط الحالي.' });
+    if (Number(row.lesson_stage_count) > 1) problems.push({ severity:'warn', code:'multi_stage_history', text:`هذا Chat ID فعّل دروسًا تاريخيًا لأكثر من مرحلة (${row.lesson_stage_names || 'مراحل متعددة'})؛ راجع ما إذا حصل تبديل سابق بين القنوات.` });
+    if (publicUsername && observedUsername && publicUsername !== observedUsername) problems.push({ severity:'error', code:'public_link_mismatch', text:'رابط القناة الظاهر لا يطابق username الحقيقي الذي استلمه البوت من هذا Chat ID.' });
+    if (linkKey && (linkCounts.get(linkKey)||0) > 1) problems.push({ severity:'warn', code:'duplicate_public_link', text:'الرابط الظاهر نفسه مستخدم لأكثر من قناة في قاعدة البيانات.' });
+
+    const outcome = row.last_outcome;
+    if (outcome === 'processing_error') problems.push({ severity:'error', code:'last_processing_error', text:'آخر منشور وصل للبوت انتهى بخطأ أثناء المعالجة.' });
+    else if (['hashtag_no_match','schedule_no_match','unlinked','season_inactive'].includes(outcome))
+      problems.push({ severity:'warn', code:'last_post_not_activated', text:'آخر منشور وصل للبوت لكنه لم يفعّل درسًا.' });
+
+    let health = 'ok';
+    if (problems.some((p)=>p.severity==='error')) health='error';
+    else if (problems.some((p)=>p.severity==='warn')) health='warn';
+    else if (!row.last_received_at) health='unknown';
+
+    return { ...row, public_username:publicUsername, health, problems };
+  });
+};
 
 // ---------- الدروس ----------
 const activateLesson = (
@@ -2594,6 +2738,9 @@ module.exports = {
   clearUnlinkedChannelPost,
   listUnlinkedChannelAlerts,
   dismissUnlinkedChannelAlert,
+  recordChannelPostActivity,
+  setChannelPostActivityOutcome,
+  getDeepChannelDiagnostics,
   activateLesson,
   getLessonBySource,
   getActiveLessonsForStudent,

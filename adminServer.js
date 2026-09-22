@@ -99,8 +99,19 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(route==='/notifications')result=(await db.pool.query('SELECT status,COUNT(*) AS count FROM notification_outbox GROUP BY status')).rows;
         else if(route==='/lessons')result=await db.getRecentLessonsForStage(positiveInt(q.stageId),q.limit?positiveInt(q.limit):15);
         else if(route==='/channel-diagnostics'){
-          const [alerts,channels]=await Promise.all([db.listUnlinkedChannelAlerts(),db.listChannelsWithStage()]);
-          result={alerts,channels};
+          const [alerts,channels,deep]=await Promise.all([
+            db.listUnlinkedChannelAlerts(),db.listChannelsWithStage(),db.getDeepChannelDiagnostics()
+          ]);
+          result={
+            alerts,channels,deep,
+            summary:{
+              total:deep.length,
+              ok:deep.filter(x=>x.health==='ok').length,
+              warn:deep.filter(x=>x.health==='warn').length,
+              error:deep.filter(x=>x.health==='error').length,
+              unknown:deep.filter(x=>x.health==='unknown').length
+            }
+          };
         }
         else if(route==='/attendance.md'||route==='/attendance.csv'){
           if(!['lessons','discussions'].includes(q.kind||'lessons'))throw appError('نوع التصدير غير صالح.');
