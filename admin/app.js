@@ -245,13 +245,21 @@ async function lessonManagementContent(stageId){
 async function sessionManagementContent(stage,ro){
   const data=await api('/session-management?'+new URLSearchParams({stageId:stage.id,page:sessionPage,...(sessionSubjectId?{subjectId:sessionSubjectId}:{}),...(currentSeasonId?{seasonId:currentSeasonId}:{})}));
   if(data.total&&sessionPage>0&&!data.rows.length){sessionPage--;return sessionManagementContent(stage,ro);}
+  const startDelay=Number(data.startAttendanceDelayMinutes||10),autoLead=Number(data.endAttendanceMinutes||10);
+  const addMinutes=(value,mins)=>value?new Date(new Date(value).getTime()+mins*60000):null;
   return '<section class="detail-section"><h2>المباحثات المفعّلة</h2><p>إعادة الفتح تتيح تسجيل البداية والنهاية حتى مرور 24 ساعة من النشر الأصلي، وتحفظ الحضور السابق. التحضير الإداري يكمل البداية والنهاية لطلبة المجموعة المؤهلين.</p>'+
     managementSummary(data,'مباحثة')+subjectSelector(data,'session-mgt',sessionSubjectId)+
-    table(['رقم المباحثة في المادة','المادة والمجموعة','النشر الأصلي','نهاية التسجيل','الحضور المكتمل',...(ro?[]:['الإجراءات'])],data.rows.map(x=>[
-      `${x.item_number}<div class="subtle">المعرف #${x.id}</div>`,`${esc(x.subject_name)}<div>${esc(x.group_title)}</div><div>${esc(x.title)}</div>`,stamp(x.opened_at),`البداية: ${stamp(x.closes_at)}<div>النهاية: ${stamp(x.end_closes_at)}</div>`,esc(x.complete_count),
-      ...(ro?[]:[(!x.is_closed&&!x.end_opened_at&&new Date(x.closes_at)>new Date()?button('إنهاء وفتح الحضور الثاني','end-session',`data-id="${x.id}"`):'')+
+    table(['رقم المباحثة في المادة','المادة والمجموعة','موعد المباحثة','نوافذ تسجيل الحضور','الحضور المكتمل',...(ro?[]:['الإجراءات'])],data.rows.map(x=>{
+      const firstOpen=addMinutes(x.opened_at,startDelay),autoEnd=addMinutes(x.closes_at,-autoLead),lastMinute=addMinutes(x.closes_at,-1);
+      const canEnd=!x.is_closed&&!x.end_opened_at&&x.start_notifications_queued&&new Date(x.closes_at)>new Date()&&firstOpen&&firstOpen<=new Date();
+      return [
+      `${x.item_number}<div class="subtle">المعرف #${x.id}</div>`,`${esc(x.subject_name)}<div>${esc(x.group_title)}</div><div>${esc(x.title)}</div>`,stamp(x.opened_at),
+      `الحضور الأول: يبدأ ${stamp(firstOpen)}<div>ويبقى حتى ${stamp(lastMinute)}</div>`+
+        `<div style="margin-top:.35rem">الحضور الثاني: ${x.end_opened_at?'بدأ '+stamp(x.end_opened_at):'يفتح عند إنهاء الأستاذ أو تلقائيًا '+stamp(autoEnd)}</div><div>ويبقى حتى ${stamp(lastMinute)}</div>`,esc(x.complete_count),
+      ...(ro?[]:[(canEnd?button('إنهاء وفتح الحضور الثاني','end-session',`data-id="${x.id}"`):'')+
         (x.can_reopen?button('إعادة فتح للوقت المتبقي','session-reopen',`data-id="${x.id}"`):'<span class="subtle">مضت مهلة إعادة الفتح</span>')+
-        button('تحضير طلبة المجموعة','session-markall',`data-id="${x.id}"`)+button('حذف المباحثة','session-cancel',`data-id="${x.id}"`,'danger')])]))+
+        button('تحضير طلبة المجموعة','session-markall',`data-id="${x.id}"`)+button('حذف المباحثة','session-cancel',`data-id="${x.id}"`,'danger')])];
+    }))+
     managementPager(data,'sessions')+'</section>';
 }
 async function loadChannels(){
