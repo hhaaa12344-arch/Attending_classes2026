@@ -89,6 +89,11 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         }
         else if(route==='/audit'){const p=pageOptions(q.page||0,25);result=(await db.pool.query('SELECT * FROM admin_audit_log ORDER BY id DESC LIMIT $1 OFFSET $2',[p.size,p.offset])).rows;}
         else if(route==='/notifications')result=(await db.pool.query('SELECT status,COUNT(*) AS count FROM notification_outbox GROUP BY status')).rows;
+        else if(route==='/lessons')result=await db.getRecentLessonsForStage(positiveInt(q.stageId),q.limit?positiveInt(q.limit):15);
+        else if(route==='/channel-diagnostics'){
+          const [alerts,channels]=await Promise.all([db.listUnlinkedChannelAlerts(),db.listChannelsWithStage()]);
+          result={alerts,channels};
+        }
         else if(route==='/attendance.md'||route==='/attendance.csv'){
           if(!['lessons','discussions'].includes(q.kind||'lessons'))throw appError('نوع التصدير غير صالح.');
           const markdown=route.endsWith('.md');
@@ -227,6 +232,25 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           if(body.inviteLink&&!/^https:\/\/t\.me\/[A-Za-z0-9_+/?=-]+$/.test(body.inviteLink))throw appError('رابط المجموعة يجب أن يكون رابط تليجرام https://t.me/');
           result=await studies.createMubahathaGroup(positiveInt(body.subjectId),positiveInt(body.seasonId),{title:body.title,capacity:positiveInt(body.capacity),inviteLink:body.inviteLink||null});
           await audit(actor.id,'create_group','group',result.id,null,result);
+        }
+        else if((m=/^\/lessons\/(\d+)\/reopen$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]);const hours=body.hours?positiveInt(body.hours):24;
+          const reopened=await db.reopenLesson(id,hours);
+          if(!reopened)throw appError('الدرس غير موجود.','NOT_FOUND',404);
+          result=reopened;await audit(actor.id,'reopen_lesson','lesson',id,null,{active_until:reopened.active_until});
+        }
+        else if((m=/^\/lessons\/(\d+)\/mark-all$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]);const added=await db.markAllPresentForLesson(id);
+          result={added};await audit(actor.id,'mark_all_present','lesson',id,null,{added});
+        }
+        else if((m=/^\/lessons\/(\d+)\/cancel$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]);const cancelled=await db.cancelLesson(id);
+          if(!cancelled)throw appError('الدرس غير موجود.','NOT_FOUND',404);
+          result={ok:true};await audit(actor.id,'cancel_lesson','lesson',id,cancelled,null);
+        }
+        else if((m=/^\/channels\/(\d+)\/unlink$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]);await db.unlinkChannel(id);
+          result={ok:true};await audit(actor.id,'unlink_channel','channel',id,null,null);
         }
         else throw appError('العملية غير متاحة في هذه الواجهة.','NOT_FOUND',404);
       }else throw appError('طريقة طلب غير مسموحة.','METHOD_NOT_ALLOWED',405);
