@@ -27,8 +27,12 @@ test('stages and stage detail exist before any search; empty stages remain visib
   const detail=await a.stage(stage.id);assert.equal(detail.groups.length,1);assert.equal(detail.subjects.length,1);
   assert.equal((await a.students({stageId:stage.id})).rows[0].groups[0].group,'المجموعة الأولى');
 });
-test('atomic attendance: concurrent duplicate presses insert once; both phases required',async()=>{
+test('atomic attendance: first opens after ten minutes, duplicate presses insert once, both phases complete attendance',async()=>{
   const session=await studies.openSession(group.id,teacher.id,'جلسة اختبار',1);
+  await db.pool.query("UPDATE group_memberships SET assigned_at=now()-interval '1 hour' WHERE student_id=$1 AND group_id=$2; UPDATE participation_modes SET joined_mubahatha_at=now()-interval '1 hour' WHERE student_id=$1 AND subject_id=$3 AND stage_season_id=$4",[student.id,group.id,subject.id,ss]);
+  assert.equal(await studies.markSessionAttendance(session.id,student.id,'start'),undefined,'first attendance is closed before +10 minutes');
+  await db.pool.query(`UPDATE mubahatha_sessions SET opened_at=now()-interval '10 minutes',
+    closes_at=now()+interval '50 minutes',start_notifications_queued=true WHERE id=$1`,[session.id]);
   const results=await Promise.all(Array.from({length:40},()=>studies.markSessionAttendance(session.id,student.id,'start')));
   assert.equal(results.filter(Boolean).length,1);
   await studies.openEndAttendance(session.id);
@@ -42,10 +46,16 @@ test('wrong group, archived student and expired window cannot insert attendance'
   const own=await studies.openSession(group.id,teacher.id,'منتهية',1);
   await db.pool.query("UPDATE mubahatha_sessions SET closes_at=now()-interval '1 second' WHERE id=$1",[own.id]);
   assert.equal(await studies.markSessionAttendance(own.id,student.id,'start'),undefined);
-  await studies.openEndAttendance(own.id);
-  assert.equal(await studies.markSessionAttendance(own.id,student.id,'end'),undefined,'end alone never counts without a start');
-  const reopened=(await db.pool.query('SELECT closes_at,end_closes_at FROM mubahatha_sessions WHERE id=$1',[own.id])).rows[0];
-  assert.equal(new Date(reopened.end_closes_at)-new Date(reopened.closes_at),600000,'late manual end preserves scheduled final deadline');
+  assert.equal(await studies.openEndAttendance(own.id),undefined,'attendance is never extended beyond the original hour');
+  const noStart=await db.createStudent(90103,'طالب نهاية بلا بداية',stage.id);
+  await studies.setParticipationMode(noStart.id,subject.id,ss,'mubahatha');await studies.assignStudentToGroup(noStart.id,subject.id,ss);
+  await db.pool.query("UPDATE group_memberships SET assigned_at=now()-interval '1 hour' WHERE student_id=$1; UPDATE participation_modes SET joined_mubahatha_at=now()-interval '1 hour' WHERE student_id=$1",[noStart.id]);
+  const active=await studies.openSession(group.id,teacher.id,'نهاية مستقلة',1);
+  await db.pool.query(`UPDATE mubahatha_sessions SET opened_at=now()-interval '20 minutes',
+    closes_at=now()+interval '40 minutes',start_notifications_queued=true WHERE id=$1`,[active.id]);
+  assert.ok(await studies.openEndAttendance(active.id));
+  assert.ok(await studies.markSessionAttendance(active.id,noStart.id,'end'),'end mark is retained for audit even without start');
+  assert.equal(Number((await studies.listGroupSessions(group.id)).find(x=>x.id===active.id).attended_count),0,'end alone is not complete attendance');
 });
 test('report captures group and source message; later move never reassigns historical report',async()=>{
   const rep=await db.createStudent(90102,'طالب تقارير ثاني ثالث',stage.id);
@@ -74,9 +84,12 @@ test('1000 simultaneous submissions, stable pagination and no duplicate student 
   await db.pool.query(`INSERT INTO enrollments(student_id,stage_season_id,status) SELECT unnest($1::int[]),$2,'active'`,[ids,ss]);
   await db.pool.query(`INSERT INTO participation_modes(student_id,subject_id,stage_season_id,mode,joined_mubahatha_at)
     SELECT unnest($1::int[]),$2,$3,'mubahatha',now()`,[ids,subject.id,ss]);
-  await db.pool.query(`INSERT INTO group_memberships(student_id,group_id,subject_id,stage_season_id)
-    SELECT unnest($1::int[]),$2,$3,$4`,[ids,group.id,subject.id,ss]);
+  await db.pool.query(`INSERT INTO group_memberships(student_id,group_id,subject_id,stage_season_id,assigned_at)
+    SELECT unnest($1::int[]),$2,$3,$4,now()-interval '1 hour'`,[ids,group.id,subject.id,ss]);
+  await db.pool.query(`UPDATE participation_modes SET joined_mubahatha_at=now()-interval '1 hour' WHERE student_id=ANY($1::int[])`,[ids]);
   const s=await studies.openSession(group.id,teacher.id,'اختبار ألف طلب',1);
+  await db.pool.query(`UPDATE mubahatha_sessions SET opened_at=now()-interval '10 minutes',
+    closes_at=now()+interval '50 minutes',start_notifications_queued=true WHERE id=$1`,[s.id]);
   const started=performance.now();
   const results=await Promise.all(ids.map(id=>studies.markSessionAttendance(s.id,id,'start')));
   assert.equal(results.filter(Boolean).length,1000);
@@ -120,11 +133,14 @@ test('leave quota: duplicate simultaneous requests cannot reserve more than ten 
   await db.requestLeave(st.id,'2030-03-01',4,null);
   await assert.rejects(()=>db.requestLeave(st.id,'2030-04-01',1,null),{code:'LEAVE_SEASON_LIMIT'});
 });
-test('scheduled start is automatic, idempotent, keeps original closing time and rejects late decisions',async()=>{
+test('scheduled start requires explicit teacher confirmation, is idempotent and keeps the original closing time',async()=>{
   const g=await studies.createMubahathaGroup(subject.id,ss,{title:'مجموعة الجدول'});
   const slot=(await db.pool.query(`INSERT INTO schedule_slots(group_id,subject_id,stage_season_id,teacher_id,day_of_week,hour,minute)
     SELECT $1,$2,$3,$4,extract(dow from t)::int,extract(hour from t)::int,extract(minute from t)::int
     FROM (SELECT now() AT TIME ZONE 'Asia/Baghdad'-interval '2 minutes' t) x RETURNING *`,[g.id,subject.id,ss,teacher.id])).rows[0];
+  assert.ok(!(await studies.getSlotsReadyToStart()).some(x=>x.id===slot.id),'no session without pressing yes');
+  const localDate=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  assert.ok(await studies.recordSlotDecision(slot.id,localDate,'confirmed',1));
   const ready=(await studies.getSlotsReadyToStart()).find(x=>x.id===slot.id);assert.ok(ready);
   const results=await Promise.all(Array.from({length:15},()=>studies.startSessionFromSlot(ready)));
   assert.equal(results.filter(Boolean).length,1);
@@ -133,17 +149,19 @@ test('scheduled start is automatic, idempotent, keeps original closing time and 
   const scheduler=require('../scheduler').createScheduler({pool:db.pool,studies});
   await scheduler.tick();await scheduler.tick();
 });
-test('automatic second attendance opens for ten minutes from scheduled end, never resurrects old sessions',async()=>{
+test('automatic second attendance opens at the final ten minutes and never extends past the original hour',async()=>{
   const s=await studies.openSession(group.id,teacher.id,'فتح تلقائي',1);
-  await db.pool.query("UPDATE mubahatha_sessions SET closes_at=now()-interval '1 minute' WHERE id=$1",[s.id]);
+  await db.pool.query(`UPDATE mubahatha_sessions SET opened_at=now()-interval '50 minutes',
+    closes_at=now()+interval '10 minutes',start_notifications_queued=true WHERE id=$1`,[s.id]);
   assert.ok((await studies.getSessionsNeedingAutoEnd()).some(x=>x.id===s.id));
   const values=await Promise.all([studies.openEndAttendance(s.id,true),studies.openEndAttendance(s.id,true)]);
   assert.equal(values.filter(Boolean).length,1);
-  assert.equal(new Date(values.find(Boolean).end_closes_at)-new Date(values.find(Boolean).closes_at),600000);
+  assert.equal(new Date(values.find(Boolean).end_closes_at).getTime(),new Date(values.find(Boolean).closes_at).getTime());
   const old=await studies.openSession(group.id,teacher.id,'قديمة',1);
-  await db.pool.query("UPDATE mubahatha_sessions SET closes_at=now()-interval '2 days' WHERE id=$1",[old.id]);
+  await db.pool.query("UPDATE mubahatha_sessions SET opened_at=now()-interval '3 days',closes_at=now()-interval '2 days' WHERE id=$1",[old.id]);
   assert.equal(await studies.openEndAttendance(old.id,true),undefined);
   assert.ok(!(await studies.getSessionsNeedingAutoEnd()).some(x=>x.id===old.id));
+  const closed=await studies.closeExpiredSessionsWithoutEnd();assert.ok(closed.some(x=>x.id===old.id));
 });
 test('exam creation, concurrent starts, cross-exam answers, resumption and finalization',async()=>{
   const exam=await studies.createExam(subject.id,ss,teacher.id,{examNumber:1,title:'امتحان اختبار',dateIso:'2030-01-01',hours:2});
