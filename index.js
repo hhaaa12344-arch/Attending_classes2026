@@ -399,8 +399,10 @@ function adminMainMenu() {
   const rows = [
     ['➕ إضافة مرحلة دراسية', '➕ إضافة مادة'],
     ['🟢 تفعيل درس يدويًا', '📊 تقرير الحضور'],
+    ['🛠️ إدارة الدروس المفعّلة'],
     ['🎓 إدارة الطلبة', '🔗 ربط قناة بمرحلة'],
     ['📡 القنوات المرتبطة', '🏷️ المواد والهاشتاغات'],
+    ['🩺 تشخيص مشاكل القنوات'],
     ['⚙️ إدارة المراحل', '🗓️ بدء موسم جديد'],
     ['🗂️ أرشيف المواسم', '🌴 طلبات الإجازة'],
     ['👨‍🏫 إدارة الأساتذة', '🔄 تغيير أستاذ مادة'],
@@ -2660,6 +2662,136 @@ bot.action(/admin_act_subject:(\d+)/, async (ctx) => {
 });
 
 // ---------------------------------------------------------------------------
+// لوحة الأدمن — إدارة الدروس المفعّلة (إلغاء تفعيل بالخطأ، إعادة فتح، تحضير جماعي)
+// ---------------------------------------------------------------------------
+async function openManageLessons(ctx) {
+  if (!isAdmin(ctx)) return denyUnauthorized(ctx);
+  const stages = await db.listAllStages();
+  await answerIfCallback(ctx);
+  if (stages.length === 0) return ctx.reply('لا توجد مراحل بعد.');
+  return ctx.reply('اختر المرحلة لعرض آخر دروسها المفعّلة:', stagesKeyboard(stages, 'admin_mgt_stage'));
+}
+
+bot.hears('🛠️ إدارة الدروس المفعّلة', openManageLessons);
+
+async function renderLessonManagement(ctx, stageId) {
+  const lessons = await db.getRecentLessonsForStage(stageId, 15);
+  if (lessons.length === 0) {
+    return ctx.reply('لا توجد دروس مفعّلة لهذه المرحلة بعد.');
+  }
+  const buttons = lessons.map((l) => [
+    callbackButton(
+      limitButtonText(
+        `${l.is_active ? '🟢' : '⚪️'} ${l.subject_name} — ${new Date(l.activated_at).toLocaleString('ar-IQ', { timeZone: ATTENDANCE_TIME_ZONE })} (${l.attended_count}/${l.enrolled_count})`,
+        60
+      ),
+      `admin_mgt_lesson:${l.id}:${stageId}`
+    ),
+  ]);
+  return ctx.reply(
+    'آخر الدروس المفعّلة لهذه المرحلة (🟢 ضمن مهلته الآن | ⚪️ انتهت مهلته):\nاختر درسًا لإدارته:',
+    Markup.inlineKeyboard(buttons)
+  );
+}
+
+bot.action(/admin_mgt_stage:(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();
+  return renderLessonManagement(ctx, Number(ctx.match[1]));
+});
+
+bot.action(/admin_mgt_lesson:(\d+):(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const lessonId = Number(ctx.match[1]);
+  const stageId = Number(ctx.match[2]);
+  const lesson = await db.getLessonById(lessonId);
+  if (!lesson) return ctx.answerCbQuery('لم يعد هذا الدرس موجودًا.', { show_alert: true });
+  await ctx.answerCbQuery();
+  return ctx.reply(
+    `الدرس رقم ${Number(lesson.lesson_number)} — «${lesson.subject_name}»\n` +
+      `فُعّل: ${new Date(lesson.activated_at).toLocaleString('ar-IQ', { timeZone: ATTENDANCE_TIME_ZONE })}\n` +
+      `${new Date(lesson.active_until) > new Date() ? '🟢 لا يزال ضمن مهلته.' : '⚪️ انتهت مهلته.'}\n\n` +
+      'اختر الإجراء المطلوب:',
+    Markup.inlineKeyboard([
+      [callbackButton('❌ إلغاء التفعيل نهائيًا (فُعِّل بالخطأ)', `admin_mgt_cancel:${lessonId}:${stageId}`)],
+      [callbackButton(`🔁 إعادة فتح ${LESSON_ACTIVE_HOURS} ساعة لتسجيل متأخر`, `admin_mgt_reopen:${lessonId}:${stageId}`)],
+      [callbackButton('✅ تحضير جميع طلبة المرحلة', `admin_mgt_markall:${lessonId}:${stageId}`)],
+      [callbackButton('↩️ رجوع لقائمة الدروس', `admin_mgt_stage:${stageId}`)],
+    ])
+  );
+});
+
+bot.action(/admin_mgt_cancel:(\d+):(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const lessonId = Number(ctx.match[1]);
+  const stageId = Number(ctx.match[2]);
+  const lesson = await db.getLessonById(lessonId);
+  if (!lesson) return ctx.answerCbQuery('لم يعد هذا الدرس موجودًا.', { show_alert: true });
+  await ctx.answerCbQuery();
+  return ctx.editMessageText(
+    `⚠️ تحذير\nسيُحذف الدرس رقم ${Number(lesson.lesson_number)} من «${lesson.subject_name}» نهائيًا مع كل حضور مسجَّل عليه، ولن يظهر في أي تقرير بعد الآن.\nهل أنت متأكد؟`,
+    Markup.inlineKeyboard([
+      [callbackButton('✅ نعم، احذف نهائيًا', `admin_mgt_cancel_confirm:${lessonId}:${stageId}`)],
+      [callbackButton('❌ إلغاء', `admin_mgt_lesson:${lessonId}:${stageId}`)],
+    ])
+  );
+});
+
+bot.action(/admin_mgt_cancel_confirm:(\d+):(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const lessonId = Number(ctx.match[1]);
+  const stageId = Number(ctx.match[2]);
+  const cancelled = await db.cancelLesson(lessonId);
+  if (!cancelled) {
+    await ctx.answerCbQuery('لم يعد هذا الدرس موجودًا.', { show_alert: true });
+    return renderLessonManagement(ctx, stageId);
+  }
+  await ctx.answerCbQuery('تم الإلغاء ✅');
+  await ctx.editMessageText('✅ تم إلغاء تفعيل الدرس وحذف أي حضور مسجَّل عليه نهائيًا.');
+  return renderLessonManagement(ctx, stageId);
+});
+
+bot.action(/admin_mgt_reopen:(\d+):(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const lessonId = Number(ctx.match[1]);
+  const stageId = Number(ctx.match[2]);
+  const reopened = await db.reopenLesson(lessonId, LESSON_ACTIVE_HOURS);
+  if (!reopened) return ctx.answerCbQuery('لم يعد هذا الدرس موجودًا.', { show_alert: true });
+  const lesson = await db.getLessonById(lessonId);
+  await ctx.answerCbQuery('تم فتح الدرس ✅');
+  return ctx.editMessageText(
+    `✅ أُعيد فتح الدرس رقم ${Number(lesson.lesson_number)} من «${lesson.subject_name}» لمدة ${LESSON_ACTIVE_HOURS} ساعة إضافية.\n` +
+      'يمكن للطلبة الآن فتح «📚 دروس اليوم» وتأشير الحضور عليه.'
+  );
+});
+
+bot.action(/admin_mgt_markall:(\d+):(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const lessonId = Number(ctx.match[1]);
+  const stageId = Number(ctx.match[2]);
+  const lesson = await db.getLessonById(lessonId);
+  if (!lesson) return ctx.answerCbQuery('لم يعد هذا الدرس موجودًا.', { show_alert: true });
+  await ctx.answerCbQuery();
+  return ctx.editMessageText(
+    `⚠️ سيُسجَّل جميع طلبة المرحلة النشطين المسجَّلين في موسم هذا الدرس حاضرين للدرس رقم ${Number(lesson.lesson_number)} من «${lesson.subject_name}»، بمن فيهم من لم يستمع فعليًا.\nهل تريد المتابعة؟`,
+    Markup.inlineKeyboard([
+      [callbackButton('✅ نعم، سجّل الجميع حاضرين', `admin_mgt_markall_confirm:${lessonId}:${stageId}`)],
+      [callbackButton('❌ إلغاء', `admin_mgt_lesson:${lessonId}:${stageId}`)],
+    ])
+  );
+});
+
+bot.action(/admin_mgt_markall_confirm:(\d+):(\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const lessonId = Number(ctx.match[1]);
+  const stageId = Number(ctx.match[2]);
+  const added = await db.markAllPresentForLesson(lessonId);
+  await ctx.answerCbQuery('تم ✅');
+  await ctx.editMessageText(`✅ سُجِّل ${added} طالبًا حاضرًا لم يكونوا مؤشَّرين سابقًا.`);
+  return renderLessonManagement(ctx, stageId);
+});
+
+// ---------------------------------------------------------------------------
 // لوحة الأدمن — التقارير (Markdown)
 // ---------------------------------------------------------------------------
 async function openReports(ctx) {
@@ -3076,6 +3208,7 @@ bot.action(/admin_channel_stage:(\d+)/, async (ctx) => {
   const stageId = Number(ctx.match[1]);
   try {
     await db.linkChannel(stageId, state.chatId, state.title);
+    await db.clearUnlinkedChannelPost(state.chatId);
   } catch (err) {
     userState.delete(ctx.from.id);
     await ctx.answerCbQuery('تعذر الربط');
@@ -5354,6 +5487,67 @@ async function showLinkedChannels(ctx) {
 bot.action('admin_list_channels', showLinkedChannels);
 bot.hears('📡 القنوات المرتبطة', showLinkedChannels);
 
+// ---------------------------------------------------------------------------
+// 🩺 تشخيص مشاكل القنوات — شاشة واحدة تُظهر كل ما قد يمنع تفعيل الدروس:
+// قنوات أرسلت دروسًا ولم تُفعَّل (غير مرتبطة، أو مرتبطة بموسم غير نشط)،
+// وقنوات مرتبطة رسميًا لكن موسمها متوقف.
+// ---------------------------------------------------------------------------
+async function showChannelDiagnostics(ctx) {
+  if (!isAdmin(ctx)) return denyUnauthorized(ctx);
+  await answerIfCallback(ctx);
+
+  const [alerts, channels] = await Promise.all([
+    db.listUnlinkedChannelAlerts(),
+    db.listChannelsWithStage(),
+  ]);
+  const stale = channels.filter((c) => !c.season_is_active);
+
+  const parts = [];
+
+  if (alerts.length) {
+    const lines = alerts.map((a) => {
+      const reasonText = a.reason === 'season_inactive' ? 'مرتبطة بموسم متوقف' : 'غير مرتبطة إطلاقًا';
+      const who = a.chat_title || a.telegram_chat_id;
+      return (
+        `⚠️ ${who} (${a.telegram_chat_id})${a.chat_username ? ` — ${a.chat_username}` : ''}\n` +
+        `   السبب: ${reasonText} | منشورات لم تُفعَّل: ${a.post_count}\n` +
+        `   آخر منشور: ${new Date(a.last_seen_at).toLocaleString('ar-IQ', { timeZone: ATTENDANCE_TIME_ZONE })}`
+      );
+    });
+    parts.push(`🔴 قنوات وصلتها دروس ولم تُفعَّل (${alerts.length}):\n` + lines.join('\n\n'));
+  } else {
+    parts.push('🟢 لا توجد قنوات أرسلت دروسًا غير مُفعّلة مؤخرًا.');
+  }
+
+  if (stale.length) {
+    const lines = stale.map((c) => `• ${c.title || c.telegram_chat_id} → ${c.stage_name} (موسمها متوقف)`);
+    parts.push(`⚪️ قنوات مرتبطة رسميًا لكن موسمها غير نشط (${stale.length}):\n${lines.join('\n')}`);
+  }
+
+  parts.push(
+    'الحل في الحالتين: افتح «🔗 ربط قناة بمرحلة» وحوّل أي منشور من القناة الصحيحة لربطها بموسم المرحلة الحالي.'
+  );
+
+  const buttons = alerts.map((a) => [
+    Markup.button.callback(
+      `🗑️ تجاهل تنبيه ${limitButtonText(a.chat_title || String(a.telegram_chat_id), 30)}`,
+      `admin_dismiss_unlinked:${a.telegram_chat_id}`
+    ),
+  ]);
+  buttons.push([Markup.button.callback('🔗 ربط قناة الآن', 'admin_link_channel')]);
+
+  return ctx.reply(parts.join('\n\n'), Markup.inlineKeyboard(buttons));
+}
+
+bot.hears('🩺 تشخيص مشاكل القنوات', showChannelDiagnostics);
+
+bot.action(/admin_dismiss_unlinked:(-?\d+)/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  await db.dismissUnlinkedChannelAlert(Number(ctx.match[1]));
+  await ctx.answerCbQuery('تم التجاهل ✅');
+  return showChannelDiagnostics(ctx);
+});
+
 bot.action(/admin_unlink_channel:(\d+)/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
   const channelId = Number(ctx.match[1]);
@@ -5379,6 +5573,36 @@ bot.action(/admin_unlink_channel_confirm:(\d+)/, async (ctx) => {
 });
 
 // ---------------------------------------------------------------------------
+// تنبيه فوري (مع تهدئة) عندما يصل منشور درس من قناة غير مفعّلة، بدل الصمت التام
+// ---------------------------------------------------------------------------
+async function reportUnlinkedChannelPost(message, chatId) {
+  try {
+    const status = await db.getChannelLinkStatus(chatId);
+    const title = message.chat.title || String(chatId);
+    const username = message.chat.username ? `@${message.chat.username}` : null;
+    const reason = !status
+      ? 'never_linked'
+      : status.season_is_active
+      ? 'unknown' // نظريًا لا يحدث: getChannelByChatId يوافق نفس شرط الموسم النشط
+      : 'season_inactive';
+    const shouldNotify = await db.recordUnlinkedChannelPost(chatId, title, username, reason);
+    if (!shouldNotify) return;
+
+    const idLine = `\nمعرّف القناة: ${chatId}${username ? ` (${username})` : ''}`;
+    const text =
+      reason === 'season_inactive'
+        ? `⚠️ وصل منشور درس من قناة «${title}» المرتبطة بمرحلة «${status.stage_name}»، لكن موسم هذه المرحلة لم يعد نشطًا (انتهى أو أُوقف الربط).\n` +
+          'لن يُفعَّل أي درس ولن يصل أي إشعار للطلبة حتى تُربط قناة هذا الموسم من «🔗 ربط قناة بمرحلة».' + idLine
+        : `⚠️ وصل منشور درس من قناة «${title}» غير مرتبطة بأي مرحلة إطلاقًا.\n` +
+          'لن يُفعَّل أي درس ولن يصل أي إشعار للطلبة حتى تربطها من «🔗 ربط قناة بمرحلة».' + idLine +
+          '\n\nإذا كانت هذه القناة قد رُبطت سابقًا ثم فُكّ ربطها، فهذا هو سبب توقف الدروس.';
+    await notifyAdmins(text);
+  } catch (err) {
+    console.error('تعذر تسجيل/تنبيه قناة غير مرتبطة:', err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // الاستماع لمنشورات القنوات (وكذلك تعديلاتها) وتفعيل الدروس تلقائيًا
 // ---------------------------------------------------------------------------
 async function handleChannelLesson(ctx) {
@@ -5387,7 +5611,12 @@ async function handleChannelLesson(ctx) {
     if (!message) return;
     const chatId = message.chat.id;
     const channel = await db.getChannelByChatId(chatId);
-    if (!channel) return; // قناة غير مرتبطة بأي مرحلة — تجاهل
+    if (!channel) {
+      // القناة إما غير مرتبطة إطلاقًا، أو مرتبطة بموسم لم يعد نشطًا (تم بدء موسم جديد أو فُكّ الربط).
+      // كلا الحالتين كانتا تُبتلعان بصمت سابقًا فتتوقف الدروس دون أي تنبيه — نُبلّغ الأدمن الآن بدل الصمت.
+      if (hasLessonContent(message)) await reportUnlinkedChannelPost(message, chatId);
+      return;
+    }
 
     if (!hasLessonContent(message)) return; // إعلان نصي عادي وليس درسًا
 
