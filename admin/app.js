@@ -265,10 +265,33 @@ async function sessionManagementContent(stage,ro){
 async function loadChannels(){
   view='channels';currentStage=null;setNav('channels');$('#breadcrumb').textContent='المعهد / القنوات';const n=++sequence;
   const data=await api('/channel-diagnostics');if(n!==sequence)return;
+  const outcomeLabels={received:'وصل — قيد المعالجة',activated:'تم تفعيل الدرس',duplicate_post:'وصل — سبق تفعيله',ignored_non_lesson:'وصل — ليس درسًا',hashtag_no_match:'وصل — الهاشتاغ لا يطابق مواد المرحلة',schedule_no_match:'وصل — لا توجد مادة مجدولة متبقية',no_subject:'وصل — تعذر تحديد المادة',unlinked:'وصل — Chat ID غير مرتبط',season_inactive:'وصل — الموسم المرتبط غير نشط',processing_error:'وصل — خطأ أثناء المعالجة',activated_notification_error:'فُعّل الدرس لكن حدث خطأ لاحق في الإشعارات'};
+  const contentLabels={voice:'رسالة صوتية',audio:'ملف صوتي',audio_document:'ملف صوتي كمستند',video:'فيديو',link:'رابط',hashtag_only:'هاشتاغ مستقل',text:'نص',document:'مستند',other:'محتوى آخر'};
+  const healthTag=h=>h==='ok'?'<span class="tag ok">سليم</span>':h==='error'?'<span class="tag danger">خلل مؤكد</span>':h==='warn'?'<span class="tag warn">يحتاج انتباه</span>':'<span class="tag info">بانتظار أول منشور</span>';
   const alertsBody=data.alerts.length?table(['القناة','السبب','منشورات لم تُفعَّل','آخر منشور'],data.alerts.map(a=>[esc(a.chat_title||a.telegram_chat_id),a.reason==='season_inactive'?'مرتبطة بموسم متوقف':'غير مرتبطة إطلاقًا',esc(a.post_count),stamp(a.last_seen_at)])):empty('لا توجد قنوات أرسلت دروسًا غير مُفعّلة مؤخرًا');
+  const deep=data.deep||[],summary=data.summary||{total:deep.length,ok:0,warn:0,error:0,unknown:0};
+  const deepBody=deep.length?table(
+    ['القناة وTelegram Chat ID','الربط الفعلي في قاعدة البيانات','الرابط الظاهر','آخر منشور استلمه البوت','آخر درس فُعّل من القناة','نتيجة الفحص'],
+    deep.map(c=>{
+      const tags=Array.isArray(c.last_hashtags)?c.last_hashtags:[];
+      const received=c.last_received_at?`${stamp(c.last_received_at)}<div class="subtle">${esc(contentLabels[c.last_content_kind]||c.last_content_kind||'محتوى غير معروف')} · الرسالة #${esc(c.last_message_id||'—')}${c.observed_username?' · '+esc(c.observed_username):''}</div>${tags.length?`<div class="subtle">${tags.map(t=>'#'+esc(t)).join('، ')}</div>`:''}<div>${esc(outcomeLabels[c.last_outcome]||c.last_outcome||'—')}</div>${c.last_detail?`<div class="subtle">${esc(c.last_detail)}</div>`:''}`:'<span class="subtle">لم يُسجّل البوت منشورًا من هذه القناة بعد تثبيت هذا التحديث.</span>';
+      const lastLesson=c.latest_lesson_id?`${esc(c.lesson_subject_name||'—')}<div class="subtle">الدرس #${esc(c.latest_lesson_id)} · ${stamp(c.latest_lesson_at)} · الرسالة #${esc(c.latest_lesson_message_id||'—')}</div>${Number(c.lesson_stage_id)!==Number(c.stage_id)?`<div><span class="tag danger">فُعّل سابقًا لمرحلة ${esc(c.lesson_stage_name||c.lesson_stage_id)}</span></div>`:''}`:'<span class="subtle">لا يوجد درس مفعّل تلقائيًا من هذا Chat ID.</span>';
+      const problems=(c.problems||[]).map(p=>`<div style="margin:.25rem 0"><span class="tag ${p.severity==='error'?'danger':'warn'}">${p.severity==='error'?'خلل':'تنبيه'}</span> ${esc(p.text)}</div>`).join('');
+      return [
+        `<b>${esc(c.observed_title||c.title||'قناة بلا عنوان')}</b><div class="subtle">DB title: ${esc(c.title||'—')}</div><div><bdi dir="ltr">${esc(c.telegram_chat_id)}</bdi></div>`,
+        `${esc(c.stage_name)} <span class="subtle">(stage_id ${esc(c.stage_id)})</span><div>${esc(c.season_name||'لا يوجد موسم')} <span class="subtle">(stage_season_id ${esc(c.stage_season_id||'—')})</span></div>${Number(c.season_stage_id)!==Number(c.stage_id)?'<div><span class="tag danger">الموسم لا يطابق المرحلة</span></div>':''}`,
+        c.public_link?`<bdi dir="ltr">${esc(c.public_link)}</bdi>${c.public_username?`<div class="subtle">username المتوقع: @${esc(c.public_username)}</div>`:''}`:'<span class="subtle">لا يوجد رابط ظاهر محفوظ</span>',
+        received,
+        lastLesson,
+        `${healthTag(c.health)}${problems||'<div class="subtle">لا يظهر تعارض في المرحلة أو الموسم أو آخر درس.</div>'}`
+      ];
+    })
+  ):empty('لا توجد قنوات مرتبطة بعد');
   const channelsBody=data.channels.length?table(['القناة','المرحلة','الحالة','الإجراء'],data.channels.map(c=>[esc(c.title||c.telegram_chat_id),esc(c.stage_name),c.season_is_active?'<span class="tag ok">نشطة</span>':'<span class="tag danger">متوقفة — انتهى موسمها</span>',button('فكّ الربط','channel-unlink',`data-id="${c.id}" data-title="${esc(c.title||c.telegram_chat_id)}"`,'danger')])):empty('لا توجد قنوات مرتبطة بعد');
-  setContent(head('القنوات','ربط قناة جديدة يتم من البوت (تحويل منشور من داخل القناة إلى البوت). هنا مراقبة القنوات المرتبطة، وتشخيص المنشورات التي لم تُفعِّل دروسًا، وفكّ الربط.')+
-    '<h2>تنبيهات — منشورات لم تُفعِّل دروسًا</h2>'+alertsBody+'<h2>القنوات المرتبطة</h2>'+channelsBody);
+  setContent(head('القنوات','الفحص العميق يطابق Telegram Chat ID مع المرحلة والموسم والرابط، ويعرض آخر منشور وصل فعليًا للبوت وآخر درس فُعّل من القناة.',button('إعادة الفحص الآن','channels-refresh','','primary'))+
+    `<div class="summary"><div><b>${esc(summary.total)}</b>قناة</div><div><b>${esc(summary.ok)}</b>سليمة</div><div><b>${esc(summary.warn)}</b>تنبيه</div><div><b>${esc(summary.error)}</b>خلل مؤكد</div><div><b>${esc(summary.unknown)}</b>بانتظار منشور</div></div>`+
+    '<div class="empty" style="text-align:right;margin-bottom:1.2rem"><p style="margin:0"><b>طريقة الحسم:</b> أرسل ملفًا صوتيًا أو #هاشتاغ في القناة المشكوك بها، ثم اضغط «إعادة الفحص الآن». إذا ظهر وقت المنشور هنا فالبوت استلمه، وستظهر نتيجة المعالجة وسبب عدم التفعيل. إذا لم يتغير «آخر منشور» فالمشكلة قبل قاعدة البيانات/منطق الدرس، أي في وصول تحديث القناة إلى البوت أو صلاحياته.</p></div>'+
+    '<h2>الفحص العميق للقنوات</h2>'+deepBody+'<h2>تنبيهات — منشورات لم تُفعِّل دروسًا</h2>'+alertsBody+'<h2>إدارة القنوات المرتبطة</h2>'+channelsBody);
 }
 async function refresh(){if(view==='lesson-attendance')return attendanceHome();if(view==='stage'){currentStage=await api('/stages/'+currentStage.id+(currentSeasonId?'?seasonId='+currentSeasonId:''));return renderStage();}if(view==='leaves')return allLeaves();if(view==='teachers')return loadTeachers();if(view==='schedule-matrix')return loadScheduleMatrix();if(view==='lesson-schedule')return loadLessonSchedule();if(view==='lesson-management')return loadLessonManagement();if(view==='channels')return loadChannels();return home();}
 document.addEventListener('click',async event=>{
@@ -348,7 +371,7 @@ document.addEventListener('click',async event=>{
     }else if(a==='lesson-cancel'){
       if(!confirm(`حذف درس «${target.dataset.subject}» نهائيًا مع كل حضور مسجَّل عليه؟ لا يمكن التراجع.`))return;
       busy=true;await api('/lessons/'+target.dataset.id+'/cancel',{},'POST');notify('أُلغي تفعيل الدرس وحُذف أي حضور مسجَّل عليه.');await loadLessonManagement();
-    }else if(a==='channels')await loadChannels();
+    }else if(a==='channels'||a==='channels-refresh')await loadChannels();
     else if(a==='channel-unlink'){
       if(!confirm(`فكّ ربط قناة «${target.dataset.title}» عن مرحلتها؟ تبقى الدروس والحضور السابقة محفوظة، ولن تُفعّل دروسًا جديدة.`))return;
       busy=true;await api('/channels/'+target.dataset.id+'/unlink',{},'POST');notify('فُكّ ربط القناة.');await loadChannels();
