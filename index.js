@@ -3250,7 +3250,7 @@ bot.action(/admin_channel_stage:(\d+)/, async (ctx) => {
   await ctx.answerCbQuery('تم الربط ✅');
   return ctx.editMessageText(
     `تم ربط قناة "${state.title}" بموسم هذه المرحلة الحالي بنجاح ✅\n\n` +
-      'من الآن، أي منشور في القناة يحتوي على صوت أو ملف صوتي أو فيديو أو رابط مع هاشتاغ اسم المادة (مثل #المحاسبة) سيُفعّل الدرس تلقائيًا، حتى لو أُضيف الهاشتاغ بتعديل المنشور لاحقًا.\n\n' +
+      'من الآن، أي منشور في القناة يحتوي على صوت أو ملف صوتي أو فيديو أو رابط مع هاشتاغ اسم المادة (مثل #المحاسبة) سيُفعّل الدرس تلقائيًا، حتى لو أُضيف الهاشتاغ بتعديل المنشور لاحقًا. ويمكن أيضًا إرسال الهاشتاغ وحده في رسالة مستقلة (مثل #المحاسبة) لتفعيل المادة مباشرة.\n\n' +
       'ملاحظة: عند بدء موسم جديد لهذه المرحلة ستتوقف هذه القناة تلقائيًا، وتربط قناة الموسم الجديد.'
   );
 });
@@ -5649,22 +5649,36 @@ async function reportUnlinkedChannelPost(message, chatId) {
 // ---------------------------------------------------------------------------
 // الاستماع لمنشورات القنوات (وكذلك تعديلاتها) وتفعيل الدروس تلقائيًا
 // ---------------------------------------------------------------------------
+function isStandaloneLessonHashtag(message) {
+  // رسالة مستقلة مثل «#الفقه» يجب أن تُعد أمر تفعيل صريحًا، لا إعلانًا نصيًا عاديًا.
+  // نقبل فقط رسالة مؤلفة بالكامل من هاشتاغ/هاشتاغات ومسافات أو فواصل؛
+  // حتى لا يؤدي ذكر #الفقه داخل إعلان نصي عادي إلى إنشاء درس بالخطأ.
+  if (hasLessonContent(message)) return false;
+  const text = String(message.caption || message.text || '').trim();
+  if (!text || !extractHashtags(message).length) return false;
+  return /^(?:#[\p{L}\p{N}_\u0640]+(?:[\s،,؛;]*)?)+$/u.test(text);
+}
+
 async function handleChannelLesson(ctx) {
   try {
     const message = ctx.channelPost || ctx.editedChannelPost;
     if (!message) return;
     const chatId = message.chat.id;
+    const hashtags = extractHashtags(message);
+    const standaloneHashtag = isStandaloneLessonHashtag(message);
+    const lessonContent = hasLessonContent(message);
     const channel = await db.getChannelByChatId(chatId);
     if (!channel) {
       // القناة إما غير مرتبطة إطلاقًا، أو مرتبطة بموسم لم يعد نشطًا (تم بدء موسم جديد أو فُكّ الربط).
-      // كلا الحالتين كانتا تُبتلعان بصمت سابقًا فتتوقف الدروس دون أي تنبيه — نُبلّغ الأدمن الآن بدل الصمت.
-      if (hasLessonContent(message)) await reportUnlinkedChannelPost(message, chatId);
+      // نعتبر أيضًا رسالة الهاشتاغ المستقلة محاولة تفعيل درس، كي لا تضيع بصمت.
+      if (lessonContent || standaloneHashtag) await reportUnlinkedChannelPost(message, chatId);
       return;
     }
 
-    if (!hasLessonContent(message)) return; // إعلان نصي عادي وليس درسًا
+    // سابقًا كان الشرط التالي يُسقط «#الفقه» إذا أُرسل كرسالة مستقلة لأن الرسالة
+    // لا تحتوي صوتًا/فيديو/رابطًا. الآن الهاشتاغ المستقل الصريح يعمل في جميع المراحل.
+    if (!lessonContent && !standaloneHashtag) return;
 
-    const hashtags = extractHashtags(message);
     const currentDate = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
 
     // الهاشتاغ والجدول الدراسي يعملان داخل مسار اكتشاف واحد للدرس:
@@ -5675,7 +5689,7 @@ async function handleChannelLesson(ctx) {
     // 4) إذا سبق تفعيل إحدى المواد بالهاشتاغ، تُستبعد من قائمة الجدول تلقائيًا،
     //    فيستمر المنشور التالي على المادة التالية دون تعارض.
     let subject = null;
-    let activationSourceType = 'channel';
+    let activationSourceType = standaloneHashtag ? 'channel_hashtag' : 'channel';
 
     for (const tag of hashtags) {
       subject = await db.findSubjectByHashtag(channel.stage_id, tag);
@@ -5752,7 +5766,7 @@ async function handleChannelLesson(ctx) {
     await notifyAdmins(
       `✅ فُعّل تلقائيًا الدرس رقم ${Number(lesson.lesson_number)} لمادة «${subject.name}» من قناة «${
         channel.title || chatId
-      }» عبر ${activationSourceType === 'channel_schedule' ? 'جدول الدروس' : 'الهاشتاغ'}. حُفظ تنبيه دروس اليوم للإرسال إلى ${delivery.queued ?? delivery.delivered} طالب` +
+      }» عبر ${activationSourceType === 'channel_schedule' ? 'جدول الدروس' : standaloneHashtag ? 'رسالة هاشتاغ مستقلة' : 'الهاشتاغ'}. حُفظ تنبيه دروس اليوم للإرسال إلى ${delivery.queued ?? delivery.delivered} طالب` +
         (delivery.alreadyNotifiedToday ? `، وسبق تنبيه ${delivery.alreadyNotifiedToday} اليوم` : '') +
         (delivery.skippedOnLeave ? ` (تُخطّي ${delivery.skippedOnLeave} في إجازة).` : '.')
     );
