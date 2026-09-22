@@ -12,6 +12,13 @@ async function setup({authorized=true}={}){
     if(u.pathname.endsWith('/auth'))data={token:'a'.repeat(64),user:{name:'إدارة الاختبار'}};
     else if(u.pathname.endsWith('/seasons'))data=[{id:1,name:'الموسم الأول',is_current:true}];
     else if(u.pathname.endsWith('/lesson-attendance'))data={season:{season_name:'الموسم الأول',as_of:'2026-09-14T12:00:00Z'},subjects:[{id:1,name:'الفقه'},{id:2,name:'العقائد'}],rows:[{id:1,sequence:1,full_name:'طالب <img src=x> اسم رباعي',attendance:[{attended:40,total:42},{attended:0,total:0}]}],total:1,page:0,size:50};
+    else if(u.pathname.endsWith('/lesson-attendance.md'))data='حضور الدروس';
+    else if(u.pathname.endsWith('/lesson-management')||u.pathname.endsWith('/session-management')){
+      const subject=u.searchParams.get('subjectId'),page=Number(u.searchParams.get('page')||0);
+      data={season:{is_active:true},subjects:[{id:1,name:'الفقه',total:26,open_count:1}],total:subject?1:26,page,size:25,
+        rows:[{id:71,item_number:page?1:26,subject_name:'الفقه',title:'جلسة <img src=x>',group_title:'الأولى',activated_at:'2026-09-22T12:00:00Z',opened_at:'2026-09-22T12:00:00Z',active_until:'2026-09-23T12:00:00Z',closes_at:'2026-09-23T12:00:00Z',can_reopen:true,is_active:true,attended_count:3,enrolled_count:5,complete_count:3}]};
+    }
+    else if(/\/(lessons|sessions)\/71\/(reopen|cancel|mark-all)$/.test(u.pathname))data={ok:true,added:2,records:4};
     else if(u.pathname.endsWith('/participation-settings'))data={grouped:false,pausedSlots:0};
     else if(u.pathname.endsWith('/stages'))data=[stage];else if(u.pathname.endsWith('/stages/1'))data=stage;
     else if(u.pathname.endsWith('/students/1')){
@@ -31,7 +38,7 @@ async function setup({authorized=true}={}){
     else if(u.pathname.endsWith('/teachers'))data=[{id:1,full_name:'الأستاذ الأول',is_active:true}];
     else if(u.pathname.endsWith('/logout'))data={ok:true};
     else throw Error('Unexpected UI request '+url);
-    return {ok:status===200,status,json:async()=>data};
+    return {ok:status===200,status,json:async()=>data,blob:async()=>new w.Blob([String(data)])};
   };
   w.eval(fs.readFileSync(path.join(__dirname,'../admin/app.js'),'utf8'));
   async function until(fn){for(let i=0;i<100;i++){if(fn())return;await new Promise(r=>setTimeout(r,5));}throw Error('UI did not reach expected state: '+w.document.querySelector('#notice').textContent);}
@@ -90,7 +97,7 @@ test('admin attendance matrix: independent stage selection, subject columns and 
   assert.equal(w.document.querySelectorAll('#content table').length,0);
   const select=w.document.querySelector('#attendance-stage select');select.value='1';select.dispatchEvent(new w.Event('change',{bubbles:true}));
   await until(()=>w.document.querySelector('.attendance-ratio'));
-  assert.equal(w.document.querySelectorAll('#content th').length,4);
+  assert.equal(w.document.querySelectorAll('#content th').length,5);
   assert.equal(w.document.querySelector('.attendance-ratio').getAttribute('dir'),'ltr');
   assert.equal(w.document.querySelector('.attendance-ratio').textContent,'40 / 42');
   assert.equal(w.document.querySelector('#content img'),null);
@@ -107,5 +114,40 @@ test('admin participation settings: explicit subject exclusion and whole-stage o
   await until(()=>requests.some(r=>r.url.includes('/participation-settings')));
   const req=requests.find(r=>r.url.includes('/participation-settings'));assert.equal(req.options.method,'PATCH');assert.deepEqual(JSON.parse(req.options.body),{grouped:false,enabledSubjectIds:[]});
   await until(()=>w.document.querySelector('#notice').textContent.includes('حُفظت إعدادات')); 
+ }finally{dom.window.close();}
+});
+
+test('admin DOM: lesson counters, subject filters, pagination, fixed deadline action and MD download',async()=>{
+ const {dom,w,requests,until,click}=await setup();try{
+  await until(()=>w.document.querySelector('.stage-card'));click('[data-action="lesson-management"]');
+  await until(()=>w.document.querySelector('#lesson-mgt-subject'));
+  assert.match(w.document.querySelector('#content').textContent,/26/);assert.match(w.document.querySelector('#content').textContent,/رقم الدرس/);
+  click('[data-action="management-page"][data-page="1"]');await until(()=>w.document.querySelector('[data-action="management-page"][data-page="0"]'));
+  assert.ok(requests.some(r=>r.url.includes('/lesson-management?')&&r.url.includes('page=1')));
+  const filter=w.document.querySelector('#lesson-mgt-subject');filter.value='1';filter.dispatchEvent(new w.Event('change',{bubbles:true}));
+  await until(()=>requests.some(r=>r.url.includes('/lesson-management?')&&r.url.includes('subjectId=1')&&r.url.includes('page=0')));
+  await until(()=>!w.document.querySelector('[data-action="management-page"]'));
+  click('[data-action="lesson-reopen"]');await until(()=>requests.some(r=>r.url.endsWith('/lessons/71/reopen')));
+  assert.deepEqual(JSON.parse(requests.find(r=>r.url.endsWith('/lessons/71/reopen')).options.body),{});
+  await until(()=>w.document.querySelector('#notice').textContent.includes('أُعيد فتح'));
+  click('[data-action="lesson-attendance"]');await until(()=>w.document.querySelector('#attendance-stage'));
+  const select=w.document.querySelector('#attendance-stage select');select.value='1';select.dispatchEvent(new w.Event('change',{bubbles:true}));
+  await until(()=>w.document.querySelector('[data-action="attendance-export"]'));
+  let download='';w.URL.createObjectURL=()=> 'blob:test';w.URL.revokeObjectURL=()=>{};w.HTMLAnchorElement.prototype.click=function(){download=this.download;};
+  click('[data-action="attendance-export"]');await until(()=>download.endsWith('.md'));
+  assert.ok(requests.some(r=>r.url.includes('/lesson-attendance.md?stageId=1')));
+ }finally{dom.window.close();}
+});
+test('admin DOM: discussion management exposes numbered sessions, complete attendance and deletion',async()=>{
+ const {dom,w,requests,until,click}=await setup();try{
+  await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
+  click('[data-action="tab"][data-tab="schedule"]');await until(()=>w.document.querySelector('[data-action="session-reopen"]'));
+  assert.match(w.document.querySelector('#content').textContent,/رقم المباحثة/);assert.equal(w.document.querySelector('#content img'),null);
+  click('[data-action="session-reopen"]');await until(()=>requests.some(r=>r.url.endsWith('/sessions/71/reopen')));
+  await until(()=>w.document.querySelector('#notice').textContent.includes('أُعيد فتح'));
+  click('[data-action="session-markall"]');await until(()=>w.document.querySelector('#notice').textContent.includes('اكتمل حضور 2'));
+  assert.ok(requests.some(r=>r.url.endsWith('/sessions/71/mark-all')));
+  click('[data-action="session-cancel"]');await until(()=>w.document.querySelector('#notice').textContent.includes('حُذفت المباحثة'));
+  assert.ok(requests.some(r=>r.url.endsWith('/sessions/71/cancel')));
  }finally{dom.window.close();}
 });

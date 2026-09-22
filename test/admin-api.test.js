@@ -103,3 +103,45 @@ test('admin HTTP: exam editor, protected publication, question immutability, pos
   assert.equal((await (await request('/exams/'+exam.id)).json()).questions.length,1);
   assert.equal((await request('/logout',{})).status,200);assert.equal((await request('/students')).status,401);
 });
+
+test('admin HTTP: management filters, MD download and fixed-deadline mutation routes',async()=>{
+ token=(await (await request('/auth',{initData:signed()},'POST',null)).json()).token;
+ const l=await db.activateLesson(subject.id,1);
+ let response=await request('/lessons/'+l.id+'/reopen',{hours:999});assert.equal(response.status,200);
+ const reopened=await response.json();assert.equal(new Date(reopened.active_until)-new Date(reopened.activated_at),86400000);
+ response=await request('/lesson-management?stageId='+stage.id+'&subjectId='+subject.id);assert.equal(response.status,200);assert.equal((await response.json()).total,1);
+ response=await request('/lesson-attendance.md?stageId='+stage.id);assert.equal(response.status,200);
+ assert.match(response.headers.get('content-type'),/text\/markdown/);assert.match(await response.text(),/إجمالي الحضور/);
+ const session=await studies.openSession(group.id,teacher.id,'إدارة',1);
+ response=await request('/sessions/'+session.id+'/reopen',{});assert.equal(response.status,200);
+ response=await request('/session-management?stageId='+stage.id);assert.equal(response.status,200);assert.equal((await response.json()).total,1);
+ assert.equal((await request('/sessions/'+session.id+'/mark-all',{},'POST',null)).status,401);
+ assert.equal((await request('/sessions/'+session.id+'/mark-all',{})).status,200);
+ await db.pool.query("UPDATE mubahatha_sessions SET opened_at=now()-interval '25 hours' WHERE id=$1",[session.id]);
+ assert.equal((await request('/sessions/'+session.id+'/reopen',{})).status,409);
+ assert.equal((await request('/sessions/'+session.id+'/cancel',{})).status,200);
+ assert.equal((await request('/sessions/'+session.id+'/cancel',{})).status,404);
+ await db.pool.query("UPDATE lessons SET activated_at=now()-interval '25 hours' WHERE id=$1",[l.id]);
+ assert.equal((await request('/lessons/'+l.id+'/reopen',{})).status,409);
+ assert.equal((await request('/lesson-attendance.md?stageId='+stage.id,null,'GET',null)).status,401);
+});
+test('teacher HTTP: reports submitted before assignment become readable and gradable after linking and activation',async()=>{
+ const sub=await db.addSubject(stage.id,'تقارير قبل الإسناد','تقارير_قديمة');
+ await studies.createMubahathaGroup(sub.id,ss,{title:'تقارير'});
+ await studies.setParticipationMode(student.id,sub.id,ss,'report');await studies.assignStudentToGroup(student.id,sub.id,ss);
+ const report=await studies.submitReport(student.id,sub.id,ss,{kind:'text',note:'هذا التقرير سبق إسناد الأستاذ'});assert.ok(report);
+ const late=await db.addTeacher('الأستاذ المسند لاحقًا');await db.linkTeacherAccount(late.link_code,780001);
+ async function teacherRequest(path,body,auth){return fetch(base+'/api/teacher'+path,{method:body?'POST':'GET',headers:{...(auth?{Authorization:'Bearer '+auth}:{}),...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});}
+ const auth=await teacherRequest('/auth',{initData:signed(780001)});assert.equal(auth.status,200);const key=(await auth.json()).token;
+ const route=`/reports?studentId=${student.id}&subjectId=${sub.id}&seasonId=${ss}`;
+ assert.equal((await teacherRequest(route,null,key)).status,403);
+ await db.assignTeacherToSubject(late.id,sub.id);
+ const visible=await teacherRequest(route,null,key);assert.equal(visible.status,200);assert.ok((await visible.json()).some(r=>r.id===report.id));
+ const students=await teacherRequest(`/reports/students?subjectId=${sub.id}&seasonId=${ss}`,null,key);
+ assert.ok((await students.json()).some(r=>r.student_id===student.id&&Number(r.report_count)===1));
+ assert.equal((await teacherRequest('/reports/'+report.id+'/score',{score:12},key)).status,200);
+ await db.setTeacherActive(late.id,false);assert.equal((await teacherRequest(route,null,key)).status,401);
+ await db.setTeacherActive(late.id,true);
+ const again=(await (await teacherRequest('/auth',{initData:signed(780001)})).json()).token;
+ assert.equal((await teacherRequest(route,null,again)).status,200);
+});
