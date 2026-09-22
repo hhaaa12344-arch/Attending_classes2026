@@ -5817,7 +5817,26 @@ async function main() {
   tick();
   checkReminders();
   checkConsecutiveAbsence();
-  await bot.launch({},()=>console.log('البوت يعمل الآن ✅'));
+  await launchBotWithRetry();
+}
+
+// خطأ 409 من تليجرام يعني أن نسخة أخرى من البوت (بنفس التوكن) لا تزال تستقبل getUpdates —
+// غالبًا نسخة سابقة لم تُغلق بعد أثناء إعادة نشر Railway. بدل إسقاط الحاوية فورًا (ما يسبب
+// حلقة تعطّل متكررة قد تُطيل التعارض)، نعيد المحاولة بمهلة متصاعدة فقط لهذا الخطأ تحديدًا.
+// أي خطأ آخر، أو استمرار 409 بعد كل المحاولات، يُرمى كما هو فيوقف العملية كالسابق.
+async function launchBotWithRetry(maxAttempts = 6) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await bot.launch({}, () => console.log('البوت يعمل الآن ✅'));
+      return; // launch() لا يُحلّ الوعد إلا عند الإغلاق المنظم (bot.stop) — لا نصل هنا إلا حينها
+    } catch (err) {
+      const isConflict = err?.response?.error_code === 409;
+      if (!isConflict || attempt === maxAttempts) throw err;
+      const waitMs = Math.min(5000 * attempt, 30000);
+      console.warn(`تعارض getUpdates (409): نسخة سابقة من البوت لا تزال تعمل على الأرجح. إعادة المحاولة خلال ${waitMs / 1000} ثانية (محاولة ${attempt}/${maxAttempts})...`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
 }
 
 // تنظيف الخرائط في الذاكرة كي لا تنمو بلا حدّ مع كثرة المستخدمين
