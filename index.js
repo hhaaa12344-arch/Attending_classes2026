@@ -689,7 +689,7 @@ function lessonKeyboard(lessons) {
     const title = `${lesson.subject_name} — الدرس ${number}`;
     rows.push([
       callbackButton(
-        limitButtonText(`✅ تأشير تم الاستماع — ${title}`),
+        limitButtonText(`أضغط لتأشير الحضور — ${title}`),
         `attend:${lesson.lesson_id}`,
         'success'
       ),
@@ -2063,8 +2063,14 @@ bot.hears(['📊 تقرير الحضور','📊 تقريري'], openMyReport);
 bot.action(/my_report_season:(\d+)/, async (ctx) => {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
+  const seasonId = Number(ctx.match[1]);
+  // لا نسمح بزر قديم محفوظ في تليجرام أن يفتح موسمًا سابقًا بعد نقل الطالب.
+  const visibleSeasons = await db.listStudentSeasons(student.id);
+  if (!visibleSeasons.some((season) => Number(season.id) === seasonId)) {
+    return ctx.answerCbQuery('هذا الموسم لم يعد ضمن مرحلتك الحالية.', { show_alert: true });
+  }
   await ctx.answerCbQuery();
-  const rows = await sendStudentReportMessages(ctx, student.id, Number(ctx.match[1]), { student });
+  const rows = await sendStudentReportMessages(ctx, student.id, seasonId, { student });
   if (rows.length === 0) return replyStudentScreen(ctx, student, 'لا توجد بيانات لهذا الموسم.');
   return undefined;
 });

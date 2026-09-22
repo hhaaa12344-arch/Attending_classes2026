@@ -960,16 +960,19 @@ const listStageSeasons = (stageId) =>
     )
     .then((r) => r.rows);
 
-// مواسم مرحلة معيّنة التي كان الطالب مسجَّلًا فيها فعليًا (لأي حالة تسجيل) — لقائمة اختيار «تقريري».
+// واجهة الطالب لا تعرض السجل التاريخي عند «تقرير الحضور»؛ تعرض فقط تسجيله الفعلي
+// في مرحلته الحالية وموسمها النشط. تبقى المواسم والمراحل السابقة محفوظة في قاعدة البيانات
+// ومتاحة لتقارير الإدارة والأرشيف، لكنها لا تظهر للطالب بعد نقله إلى مرحلة أخرى.
 const listStudentSeasons = (studentId) =>
   pool
     .query(
       `WITH ranked AS (${RANKED_STAGE_SEASONS_CTE})
        SELECT r.*, COALESCE(r.stage_name_snapshot, r.current_stage_name) AS stage_name,
               (SELECT COUNT(*) FROM lessons l WHERE l.stage_season_id=r.id) AS lesson_count
-       FROM ranked r
-       JOIN enrollments e ON e.stage_season_id = r.id
-       WHERE e.student_id = $1
+       FROM students st
+       JOIN enrollments e ON e.student_id=st.id AND e.status='active'
+       JOIN ranked r ON r.id=e.stage_season_id AND r.is_active=true AND r.stage_id=st.stage_id
+       WHERE st.id=$1 AND st.is_active=true
        ORDER BY r.started_at DESC, r.id DESC`,
       [studentId]
     )
@@ -1415,13 +1418,21 @@ const linkChannel = async (stageId, chatId, title) => {
     .then((r) => r.rows[0]);
 };
 
-// لا تُرجع إلا قناة موسمها ما زال نشطًا؛ قنوات المواسم المنتهية تُتجاهل تمامًا.
+// تُبقي القناة مرتبطة تلقائيًا بالموسم النشط الحالي لنفس مرحلتها.
+// كان الربط السابق يتوقف بمجرد بدء موسم جديد لأن channels.stage_season_id يبقى على الموسم القديم؛
+// عندها لا يصل التنفيذ أصلًا إلى فحص الملف الصوتي أو الهاشتاغ، فتبدو المشكلة كأن الصوت/الهاشتاغ لا يعملان
+// في مرحلة واحدة فقط. تحديث الربط هنا يحافظ على نفس القناة والمرحلة ويمنع هذا التوقف الصامت.
 const getChannelByChatId = (chatId) =>
   pool
     .query(
-      `SELECT c.* FROM channels c
-       JOIN stage_seasons ss ON ss.id = c.stage_season_id
-       WHERE c.telegram_chat_id=$1 AND ss.is_active=true`,
+      `UPDATE channels c
+       SET stage_season_id=ss.id
+       FROM stages st
+       JOIN stage_seasons ss ON ss.stage_id=st.id AND ss.is_active=true
+       WHERE c.telegram_chat_id=$1
+         AND st.id=c.stage_id
+         AND st.is_active=true
+       RETURNING c.*`,
       [chatId]
     )
     .then((r) => r.rows[0]);
