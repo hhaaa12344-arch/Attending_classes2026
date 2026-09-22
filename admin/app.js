@@ -4,8 +4,8 @@ const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;
 const date=value=>value?new Date(value).toLocaleDateString('ar-IQ',{timeZone:'Asia/Baghdad'}):'—';
 const stamp=value=>value?new Date(value).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad'}):'—';
 const labels={pending:'بانتظار القرار',approved:'معتمدة',rejected:'مرفوضة',ended:'منتهية',cancelled:'ملغاة',sent:'أُرسلت',sending:'قيد الإرسال',failed:'تعذّر إرسالها',expired:'انتهت المهلة',draft:'مسودة',published:'منشور'};
-const actionLabels={participation_settings:'إعدادات المباحثات والتقارير',update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',update_group:'تعديل مجموعة',assign_teacher:'إسناد أستاذ',unassign_teacher:'إلغاء إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',set_lesson_schedule:'إضافة موعد نشر في جدول الدروس',remove_lesson_schedule:'إزالة موعد نشر من جدول الدروس',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',remove_question:'حذف سؤال',create_teacher:'إضافة أستاذ',update_teacher:'تعديل أستاذ',toggle_teacher:'تفعيل/إيقاف أستاذ',regenerate_code:'توليد كود ربط'};
-const entityLabels={student:'طالب',stage:'مرحلة',subject:'مادة',group:'مجموعة',leave:'إجازة',report:'تقرير',session:'مباحثة',slot:'موعد',exam:'امتحان',question:'سؤال',teacher:'أستاذ',assignment:'إسناد',lesson_schedule:'جدول الدروس'};
+const actionLabels={participation_settings:'إعدادات المباحثات والتقارير',update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',update_group:'تعديل مجموعة',assign_teacher:'إسناد أستاذ',unassign_teacher:'إلغاء إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',set_lesson_schedule:'إضافة موعد نشر في جدول الدروس',remove_lesson_schedule:'إزالة موعد نشر من جدول الدروس',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',remove_question:'حذف سؤال',create_teacher:'إضافة أستاذ',update_teacher:'تعديل أستاذ',toggle_teacher:'تفعيل/إيقاف أستاذ',regenerate_code:'توليد كود ربط',reopen_lesson:'إعادة فتح درس',mark_all_present:'تحضير جميع الطلبة',cancel_lesson:'إلغاء تفعيل درس',unlink_channel:'فكّ ربط قناة'};
+const entityLabels={student:'طالب',stage:'مرحلة',subject:'مادة',group:'مجموعة',leave:'إجازة',report:'تقرير',session:'مباحثة',slot:'موعد',exam:'امتحان',question:'سؤال',teacher:'أستاذ',assignment:'إسناد',lesson_schedule:'جدول الدروس',lesson:'درس',channel:'قناة'};
 const DAY_NAMES=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
 let token='',stages=[],teachers=[],seasons=[],currentSeasonId='',currentStage=null,currentStudent=null,currentExam=null,currentTeacher=null,matrixStageId=null,matrixDay=new Date().getDay(),matrixEligible=[],tab='students',page=0,view='home',sequence=0,dialogSequence=0,busy=false;
 let lessonScheduleStageId=null,lessonScheduleData=null;
@@ -209,7 +209,32 @@ async function renderLessonSchedule(eligible){
     `<div class="summary"><div><b>${data.dates.length}</b> يومًا دراسيًا</div><div><b>${data.subjects.length}</b> مادة</div><div><b class="lesson-schedule-summary-count">${data.entries.length}</b> موعد نشر مخطط</div></div>`+
     `<div class="table-wrap lesson-schedule-wrap"><table class="lesson-schedule"><thead><tr><th>الشهر الميلادي</th><th>التاريخ</th>${data.subjects.map(s=>`<th>${esc(s.name)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`);
 }
-async function refresh(){if(view==='lesson-attendance')return attendanceHome();if(view==='stage'){currentStage=await api('/stages/'+currentStage.id+(currentSeasonId?'?seasonId='+currentSeasonId:''));return renderStage();}if(view==='leaves')return allLeaves();if(view==='teachers')return loadTeachers();if(view==='schedule-matrix')return loadScheduleMatrix();if(view==='lesson-schedule')return loadLessonSchedule();return home();}
+let mgtStageId='';
+async function loadLessonManagement(){
+  view='lesson-management';currentStage=null;setNav('lesson-management');const n=++sequence;
+  const available=await api('/stages'+(currentSeasonId?'?seasonId='+currentSeasonId:''));
+  if(n!==sequence)return;
+  if(!available.some(s=>String(s.id)===String(mgtStageId)))mgtStageId=available[0]?String(available[0].id):'';
+  $('#breadcrumb').textContent='المعهد / الدروس المفعّلة';
+  const selector=`<form id="lesson-mgt-stage" class="toolbar"><label>المرحلة الدراسية<select name="stageId">${available.map(s=>`<option value="${s.id}" ${String(s.id)===String(mgtStageId)?'selected':''}>${esc(s.name)}</option>`).join('')}</select></label></form>`;
+  const body=mgtStageId?await lessonManagementContent(mgtStageId):empty('لا توجد مراحل بعد');
+  if(n===sequence)setContent(head('الدروس المفعّلة','آخر 15 درسًا فُعّل لهذه المرحلة. أعد فتح الدرس لتسجيل حضور متأخر، أو سجّل جميع الطلبة النشطين حاضرين، أو ألغِ درسًا فُعّل بالخطأ.')+selector+body);
+}
+async function lessonManagementContent(stageId){
+  const lessons=await api('/lessons?stageId='+stageId);
+  return lessons.length?table(['المادة','وقت التفعيل','تنتهي مهلته','الحالة','الحضور','الإجراءات'],lessons.map(l=>[esc(l.subject_name),stamp(l.activated_at),stamp(l.active_until),l.is_active?'<span class="tag ok">ضمن مهلته</span>':'<span class="tag">انتهت مهلته</span>',`${l.attended_count} / ${l.enrolled_count}`,
+    button('إعادة فتح 24 ساعة','lesson-reopen',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`)+button('تحضير الجميع','lesson-markall',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`)+button('إلغاء التفعيل','lesson-cancel',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`,'danger')
+  ])):empty('لا توجد دروس مفعّلة لهذه المرحلة بعد');
+}
+async function loadChannels(){
+  view='channels';currentStage=null;setNav('channels');$('#breadcrumb').textContent='المعهد / القنوات';const n=++sequence;
+  const data=await api('/channel-diagnostics');if(n!==sequence)return;
+  const alertsBody=data.alerts.length?table(['القناة','السبب','منشورات لم تُفعَّل','آخر منشور'],data.alerts.map(a=>[esc(a.chat_title||a.telegram_chat_id),a.reason==='season_inactive'?'مرتبطة بموسم متوقف':'غير مرتبطة إطلاقًا',esc(a.post_count),stamp(a.last_seen_at)])):empty('لا توجد قنوات أرسلت دروسًا غير مُفعّلة مؤخرًا');
+  const channelsBody=data.channels.length?table(['القناة','المرحلة','الحالة','الإجراء'],data.channels.map(c=>[esc(c.title||c.telegram_chat_id),esc(c.stage_name),c.season_is_active?'<span class="tag ok">نشطة</span>':'<span class="tag danger">متوقفة — انتهى موسمها</span>',button('فكّ الربط','channel-unlink',`data-id="${c.id}" data-title="${esc(c.title||c.telegram_chat_id)}"`,'danger')])):empty('لا توجد قنوات مرتبطة بعد');
+  setContent(head('القنوات','ربط قناة جديدة يتم من البوت (تحويل منشور من داخل القناة إلى البوت). هنا مراقبة القنوات المرتبطة، وتشخيص المنشورات التي لم تُفعِّل دروسًا، وفكّ الربط.')+
+    '<h2>تنبيهات — منشورات لم تُفعِّل دروسًا</h2>'+alertsBody+'<h2>القنوات المرتبطة</h2>'+channelsBody);
+}
+async function refresh(){if(view==='lesson-attendance')return attendanceHome();if(view==='stage'){currentStage=await api('/stages/'+currentStage.id+(currentSeasonId?'?seasonId='+currentSeasonId:''));return renderStage();}if(view==='leaves')return allLeaves();if(view==='teachers')return loadTeachers();if(view==='schedule-matrix')return loadScheduleMatrix();if(view==='lesson-schedule')return loadLessonSchedule();if(view==='lesson-management')return loadLessonManagement();if(view==='channels')return loadChannels();return home();}
 document.addEventListener('click',async event=>{
   const target=event.target.closest('[data-action]');if(!target||busy)return;const a=target.dataset.action;
   if(target.closest('form')&&target.type==='submit')event.preventDefault();
@@ -259,6 +284,21 @@ document.addEventListener('click',async event=>{
     }else if(a==='teachers')await loadTeachers();
     else if(a==='schedule-matrix')await loadScheduleMatrix();
     else if(a==='lesson-schedule')await loadLessonSchedule();
+    else if(a==='lesson-management')await loadLessonManagement();
+    else if(a==='lesson-reopen'){
+      if(!confirm(`إعادة فتح درس «${target.dataset.subject}» 24 ساعة إضافية لتسجيل حضور متأخر؟`))return;
+      busy=true;await api('/lessons/'+target.dataset.id+'/reopen',{hours:24},'POST');notify('أُعيد فتح الدرس لمدة 24 ساعة.');await loadLessonManagement();
+    }else if(a==='lesson-markall'){
+      if(!confirm(`تسجيل جميع طلبة المرحلة النشطين حاضرين لدرس «${target.dataset.subject}»، بمن فيهم من لم يستمع فعليًا؟`))return;
+      busy=true;const r=await api('/lessons/'+target.dataset.id+'/mark-all',{},'POST');notify(`سُجِّل ${r.added} طالبًا حاضرًا لم يكونوا مؤشَّرين سابقًا.`);await loadLessonManagement();
+    }else if(a==='lesson-cancel'){
+      if(!confirm(`حذف درس «${target.dataset.subject}» نهائيًا مع كل حضور مسجَّل عليه؟ لا يمكن التراجع.`))return;
+      busy=true;await api('/lessons/'+target.dataset.id+'/cancel',{},'POST');notify('أُلغي تفعيل الدرس وحُذف أي حضور مسجَّل عليه.');await loadLessonManagement();
+    }else if(a==='channels')await loadChannels();
+    else if(a==='channel-unlink'){
+      if(!confirm(`فكّ ربط قناة «${target.dataset.title}» عن مرحلتها؟ تبقى الدروس والحضور السابقة محفوظة، ولن تُفعّل دروسًا جديدة.`))return;
+      busy=true;await api('/channels/'+target.dataset.id+'/unlink',{},'POST');notify('فُكّ ربط القناة.');await loadChannels();
+    }
     else if(a==='lesson-schedule-toggle'){
       busy=true;const next=target.dataset.checked!=='true';
       try{
@@ -315,6 +355,8 @@ document.addEventListener('change',async event=>{
     try{matrixStageId=event.target.value;await renderScheduleMatrix();}catch(e){notify(e.message,true);}finally{busy=false;}
   }else if(event.target.id==='lesson-schedule-stage'){if(busy)return;busy=true;clearNotice();
     try{lessonScheduleStageId=event.target.value;await renderLessonSchedule(stages.filter(s=>s.stage_season_id));}catch(e){notify(e.message,true);}finally{busy=false;}
+  }else if(event.target.name==='stageId'&&event.target.closest('#lesson-mgt-stage')){if(busy)return;busy=true;clearNotice();
+    try{mgtStageId=event.target.value;await loadLessonManagement();}catch(e){notify(e.message,true);}finally{busy=false;}
   }else if(event.target.id==='season-select'){if(busy)return;busy=true;clearNotice();
     try{currentSeasonId=event.target.value;if(view==='stage'&&currentStage)await openStage(currentStage.id);else if(view==='lesson-attendance'){page=0;await attendanceHome();}else await home();}catch(e){notify(e.message,true);}finally{busy=false;}
   }
