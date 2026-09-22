@@ -92,6 +92,19 @@ async function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_attendance_student_lesson ON attendance(student_id, lesson_id);
     CREATE INDEX IF NOT EXISTS idx_channels_stage ON channels(stage_id);
 
+    -- يسجّل أي منشور درس يصل من قناة غير مرتبطة (أو مرتبطة بموسم غير نشط)،
+    -- حتى تظهر المشكلة بوضوح في تشخيص القنوات بدل أن تُبتلع بصمت.
+    CREATE TABLE IF NOT EXISTS unlinked_channel_posts (
+      telegram_chat_id BIGINT PRIMARY KEY,
+      chat_title TEXT,
+      chat_username TEXT,
+      reason TEXT NOT NULL,
+      post_count INTEGER NOT NULL DEFAULT 1,
+      first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_notified_at TIMESTAMPTZ
+    );
+
     -- جدول نشر الدروس المخطط: مستقل عن اكتشاف منشورات القناة عبر الهاشتاك.
     CREATE TABLE IF NOT EXISTS lesson_schedule_entries (
       id SERIAL PRIMARY KEY,
@@ -1438,6 +1451,49 @@ const listStaleChannels = (stageId) =>
 
 const unlinkChannel = (id) => pool.query('DELETE FROM channels WHERE id=$1', [id]);
 
+// تحدّد سبب فشل التعرّف على القناة: غير مرتبطة إطلاقًا، أم مرتبطة بموسم غير نشط.
+const getChannelLinkStatus = (chatId) =>
+  pool
+    .query(
+      `SELECT c.id, s.name AS stage_name, ss.is_active AS season_is_active
+       FROM channels c JOIN stages s ON s.id=c.stage_id
+       LEFT JOIN stage_seasons ss ON ss.id=c.stage_season_id
+       WHERE c.telegram_chat_id=$1`,
+      [chatId]
+    )
+    .then((r) => r.rows[0] || null);
+
+// يسجّل وصول منشور من قناة غير مفعّلة، ويُعيد true إذا حان وقت تنبيه الأدمن
+// (مرة واحدة كل ساعتين لكل قناة كحد أقصى، حتى لا يُغرق الأدمن برسائل متكررة).
+const THROTTLE_MINUTES = 120;
+const recordUnlinkedChannelPost = async (chatId, title, username, reason) => {
+  const row = (
+    await pool.query(
+      `INSERT INTO unlinked_channel_posts(telegram_chat_id, chat_title, chat_username, reason)
+       VALUES($1,$2,$3,$4)
+       ON CONFLICT (telegram_chat_id) DO UPDATE SET
+         chat_title=$2, chat_username=$3, reason=$4,
+         post_count=unlinked_channel_posts.post_count + 1, last_seen_at=now()
+       RETURNING *, (last_notified_at IS NULL OR last_notified_at < now() - ($5 || ' minutes')::interval) AS should_notify`,
+      [chatId, title || null, username || null, reason, THROTTLE_MINUTES]
+    )
+  ).rows[0];
+  if (row.should_notify) {
+    await pool.query('UPDATE unlinked_channel_posts SET last_notified_at=now() WHERE telegram_chat_id=$1', [chatId]);
+  }
+  return row.should_notify;
+};
+
+// تُستدعى عند نجاح ربط قناة بمرحلة، لتنظيف أي أثر تشخيصي سابق لها.
+const clearUnlinkedChannelPost = (chatId) =>
+  pool.query('DELETE FROM unlinked_channel_posts WHERE telegram_chat_id=$1', [chatId]);
+
+const listUnlinkedChannelAlerts = () =>
+  pool.query('SELECT * FROM unlinked_channel_posts ORDER BY last_seen_at DESC LIMIT 30').then((r) => r.rows);
+
+const dismissUnlinkedChannelAlert = (chatId) =>
+  pool.query('DELETE FROM unlinked_channel_posts WHERE telegram_chat_id=$1', [chatId]);
+
 // ---------- الدروس ----------
 const activateLesson = (
   subjectId,
@@ -1548,6 +1604,56 @@ const markAttendance = (studentId, lessonId) =>
       [studentId, lessonId]
     )
     .then((r) => r.rows[0]);
+
+// آخر الدروس المفعّلة لمرحلة معيّنة (كل موادها)، لإدارتها يدويًا: إلغاء تفعيل بالخطأ،
+// إعادة فتح للتأخر، أو تحضير جماعي. تُحسب عدد الحاضرين لكل درس مباشرة.
+const getRecentLessonsForStage = (stageId, limit = 15) =>
+  pool
+    .query(
+      `SELECT l.id, l.activated_at, l.active_until, l.source_type, s.name AS subject_name,
+              (l.active_until > now()) AS is_active,
+              (SELECT COUNT(*)::int FROM attendance a WHERE a.lesson_id=l.id) AS attended_count,
+              (SELECT COUNT(*)::int FROM enrollments e WHERE e.stage_season_id=l.stage_season_id AND e.status='active') AS enrolled_count
+       FROM lessons l JOIN subjects s ON s.id=l.subject_id
+       WHERE s.stage_id=$1
+       ORDER BY l.activated_at DESC LIMIT $2`,
+      [stageId, limit]
+    )
+    .then((r) => r.rows);
+
+// إلغاء تفعيل كامل — لدرس فُعِّل بالخطأ (مرحلة خاطئة مثلًا). يحذف الدرس وأي حضور مسجَّل عليه
+// (عبر ON DELETE CASCADE في جدول attendance)، فلا يبقى له أثر في أي تقرير.
+const cancelLesson = (lessonId) =>
+  pool.query('DELETE FROM lessons WHERE id=$1 RETURNING *', [lessonId]).then((r) => r.rows[0]);
+
+// إعادة فتح درس (سواء انتهت مهلته أو أراد الأدمن تمديدها) لغرض تسجيل حضور متأخر،
+// دون إنشاء درس جديد ودون المساس بالحضور المسجَّل مسبقًا عليه.
+const reopenLesson = (lessonId, hours = 24) =>
+  pool
+    .query(
+      `UPDATE lessons SET active_until = now() + ($2 || ' hours')::interval
+       WHERE id=$1 RETURNING *`,
+      [lessonId, hours]
+    )
+    .then((r) => r.rows[0]);
+
+// تحضير جماعي لكل طلبة المرحلة النشطين ضمن موسم الدرس ممن لم يؤشّروا بعد؛
+// يُستخدم عند رغبة الأدمن باعتبار الجميع حاضرين لهذا اليوم.
+const markAllPresentForLesson = (lessonId) =>
+  pool
+    .query(
+      `INSERT INTO attendance(student_id, lesson_id)
+       SELECT e.student_id, l.id
+       FROM lessons l
+       JOIN enrollments e ON e.stage_season_id=l.stage_season_id AND e.status='active'
+       JOIN students st ON st.id=e.student_id AND st.is_active=true
+       WHERE l.id=$1
+         AND l.activated_at >= e.started_at
+         AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
+       ON CONFLICT (student_id, lesson_id) DO NOTHING RETURNING *`,
+      [lessonId]
+    )
+    .then((r) => r.rows.length);
 
 const canStudentAttendLesson = (studentId, lessonId) =>
   pool
@@ -2461,6 +2567,11 @@ module.exports = {
   listSubjectTeachers,
   getSubjectAttendanceForTeacher,
   unlinkChannel,
+  getChannelLinkStatus,
+  recordUnlinkedChannelPost,
+  clearUnlinkedChannelPost,
+  listUnlinkedChannelAlerts,
+  dismissUnlinkedChannelAlert,
   activateLesson,
   getLessonBySource,
   getActiveLessonsForStudent,
@@ -2468,6 +2579,10 @@ module.exports = {
   releaseDailyLessonNotification,
   getLessonById,
   markAttendance,
+  getRecentLessonsForStage,
+  cancelLesson,
+  reopenLesson,
+  markAllPresentForLesson,
   canStudentAttendLesson,
   getLessonsNeedingReminder,
   markReminderSent,
