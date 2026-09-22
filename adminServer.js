@@ -58,6 +58,14 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
       if(req.method==='GET'){
         if(route==='/stages')result=await adminData.stages(q.seasonId?positiveInt(q.seasonId):null);
         else if(/^\/stages\/\d+$/.test(route))result=await adminData.stage(positiveInt(route.split('/')[2]),q.seasonId?positiveInt(q.seasonId):null);
+        else if(route==='/lesson-attendance.md'){
+          const content=await adminData.lessonAttendanceMarkdown(q);
+          res.setHeader('Content-Type','text/markdown; charset=utf-8');
+          res.setHeader('Content-Disposition',`attachment; filename="lesson-attendance-${positiveInt(q.stageId)}.md"`);
+          res.end(content);return;
+        }
+        else if(route==='/lesson-management')result=await adminData.managedItems('lessons',q);
+        else if(route==='/session-management')result=await adminData.managedItems('sessions',q);
         else if(route==='/lesson-attendance')result=await adminData.lessonAttendance(q);
         else if(route==='/students')result=await adminData.students(q);
         else if(/^\/students\/\d+$/.test(route))result=await adminData.student(positiveInt(route.split('/')[2]));
@@ -233,10 +241,13 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           result=await studies.createMubahathaGroup(positiveInt(body.subjectId),positiveInt(body.seasonId),{title:body.title,capacity:positiveInt(body.capacity),inviteLink:body.inviteLink||null});
           await audit(actor.id,'create_group','group',result.id,null,result);
         }
+        else if((m=/^\/sessions\/(\d+)\/(reopen|mark-all|cancel)$/.exec(route))&&req.method==='POST'){
+          result=await adminData.manageSession(positiveInt(m[1]),m[2],actor.id);
+        }
         else if((m=/^\/lessons\/(\d+)\/reopen$/.exec(route))&&req.method==='POST'){
-          const id=positiveInt(m[1]);const hours=body.hours?positiveInt(body.hours):24;
-          const reopened=await db.reopenLesson(id,hours);
-          if(!reopened)throw appError('الدرس غير موجود.','NOT_FOUND',404);
+          const id=positiveInt(m[1]);
+          const reopened=await db.reopenLesson(id);
+          if(!reopened)throw appError('لا يمكن إعادة الفتح: الدرس غير موجود أو موسمه مؤرشف أو مضت 24 ساعة على نشره.','EXPIRED',409);
           result=reopened;await audit(actor.id,'reopen_lesson','lesson',id,null,{active_until:reopened.active_until});
         }
         else if((m=/^\/lessons\/(\d+)\/mark-all$/.exec(route))&&req.method==='POST'){

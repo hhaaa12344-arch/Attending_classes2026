@@ -1632,16 +1632,13 @@ const getRecentLessonsForStage = (stageId, limit = 15) =>
 const cancelLesson = (lessonId) =>
   pool.query('DELETE FROM lessons WHERE id=$1 RETURNING *', [lessonId]).then((r) => r.rows[0]);
 
-// إعادة فتح درس (سواء انتهت مهلته أو أراد الأدمن تمديدها) لغرض تسجيل حضور متأخر،
-// دون إنشاء درس جديد ودون المساس بالحضور المسجَّل مسبقًا عليه.
-const reopenLesson = (lessonId, hours = 24) =>
-  pool
-    .query(
-      `UPDATE lessons SET active_until = now() + ($2 || ' hours')::interval
-       WHERE id=$1 RETURNING *`,
-      [lessonId, hours]
-    )
-    .then((r) => r.rows[0]);
+// إعادة الفتح تحفظ النشر والحضور، وتنتهي بعد 24 ساعة من التفعيل الأصلي.
+const reopenLesson = (lessonId) =>
+  pool.query(`UPDATE lessons l SET active_until=l.activated_at + interval '24 hours'
+    FROM stage_seasons ss
+    WHERE l.id=$1 AND ss.id=l.stage_season_id AND ss.is_active=true
+      AND l.activated_at <= now() AND l.activated_at + interval '24 hours' > now()
+    RETURNING l.*`,[lessonId]).then(r=>r.rows[0]);
 
 // تحضير جماعي لكل طلبة المرحلة النشطين ضمن موسم الدرس ممن لم يؤشّروا بعد؛
 // يُستخدم عند رغبة الأدمن باعتبار الجميع حاضرين لهذا اليوم.

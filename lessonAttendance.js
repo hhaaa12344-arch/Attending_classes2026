@@ -1,7 +1,7 @@
 'use strict';
 const {positiveInt,pageOptions,appError}=require('./integrity');
 function createLessonAttendance(pool){
-  async function matrix({stageId,seasonId=null,q='',page=0,size=50,status='all'}={}){
+  async function matrix({stageId,seasonId=null,q='',page=0,size=50,status='all'}={},allRows=false){
     positiveInt(stageId);if(seasonId!=null)positiveInt(seasonId);
     if(!['all','active','archived'].includes(status)||String(q).length>150)throw appError('مرشحات حضور الدروس غير صالحة.');
     const p=pageOptions(page,size),c=await pool.connect();
@@ -13,23 +13,34 @@ function createLessonAttendance(pool){
       if(!season)throw appError('لا يوجد موسم لهذه المرحلة ضمن الاختيار الحالي.','NOT_FOUND',404);
       const subjects=(await c.query(`SELECT sub.id,sub.name,COUNT(l.id)::int AS total_lessons FROM subjects sub
         LEFT JOIN lessons l ON l.subject_id=sub.id AND l.stage_season_id=$1
-          AND l.active_until <= $2::timestamp
+          AND l.activated_at <= $2::timestamp
         WHERE sub.stage_id=$3 GROUP BY sub.id ORDER BY sub.name,sub.id`,[season.id,season.as_of,stageId])).rows;
       const where=`FROM enrollments e JOIN students st ON st.id=e.student_id WHERE e.stage_season_id=$1
         AND st.full_name ILIKE $2 AND ($3='all' OR ($3='active' AND e.status='active') OR ($3='archived' AND e.status<>'active'))`;
       const args=[season.id,`%${String(q).replace(/[\\%_]/g,'\\$&')}%`,status];
       const total=Number((await c.query('SELECT COUNT(*) AS n '+where,args)).rows[0].n);
-      const students=(await c.query(`SELECT st.id,st.full_name,e.status ${where} ORDER BY st.full_name,st.id LIMIT $4 OFFSET $5`,[...args,p.size,p.offset])).rows;
+      const students=(await c.query(`SELECT st.id,st.full_name,e.status ${where} ORDER BY st.full_name,st.id LIMIT $4 OFFSET $5`,[...args,allRows?null:p.size,allRows?0:p.offset])).rows;
       const attended=(await c.query(`SELECT a.student_id,l.subject_id,COUNT(*)::int AS attended FROM attendance a JOIN lessons l ON l.id=a.lesson_id
         WHERE a.student_id=ANY($1::int[]) AND l.stage_season_id=$2
-          AND l.active_until <= $3::timestamp
-          AND a.listened_at >= l.activated_at AND a.listened_at <= l.active_until
+          AND l.activated_at <= $3::timestamp AND a.listened_at <= $3::timestamp
         GROUP BY a.student_id,l.subject_id`,[students.map(s=>s.id),season.id,season.as_of])).rows;
       const counts=new Map(attended.map(r=>[r.student_id+':'+r.subject_id,r.attended]));
-      const rows=students.map((s,i)=>({...s,sequence:p.offset+i+1,attendance:subjects.map(sub=>({subject_id:sub.id,attended:counts.get(s.id+':'+sub.id)||0,total:sub.total_lessons}))}));
+      const rows=students.map((s,i)=>({...s,sequence:(allRows?0:p.offset)+i+1,attendance:subjects.map(sub=>({subject_id:sub.id,attended:counts.get(s.id+':'+sub.id)||0,total:sub.total_lessons}))}));
       await c.query('COMMIT');return {season,subjects,rows,total,page:p.page,size:p.size};
     }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
   }
-  return {matrix};
+  async function markdown(filters){
+    const data=await matrix(filters,true);
+    const cell=v=>String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\|/g,'&#124;').replace(/[\r\n]+/g,' ');
+    const line=values=>'| '+values.map(cell).join(' | ')+' |\n';
+    const headers=['تسلسل','اسم الطالب',...data.subjects.map(s=>s.name),'إجمالي الحضور'];
+    return '# حضور الدروس — '+cell(data.season.stage_name)+'\n\nالموسم: '+cell(data.season.season_name)+
+      '\n\nيشمل الدروس المفتوحة والمنتهية والحضور المسجل إداريًا. الأعداد: حضر / مجموع الدروس.\n\n'+
+      line(headers)+line(headers.map(()=>'---'))+data.rows.map(st=>line([st.sequence,st.full_name,
+        ...st.attendance.map(a=>`${a.attended} / ${a.total}`),
+        `${st.attendance.reduce((n,a)=>n+Number(a.attended),0)} / ${st.attendance.reduce((n,a)=>n+Number(a.total),0)}`])).join('')+
+      '\nعدد الطلبة: '+data.total+'\n';
+  }
+  return {matrix,markdown};
 }
 module.exports={createLessonAttendance};

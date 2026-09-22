@@ -132,6 +132,95 @@ function createAdminData(db, studies) {
       FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id JOIN subjects sub ON sub.id=g.subject_id
       WHERE g.stage_season_id=$1 ORDER BY s.opened_at DESC,s.id DESC LIMIT 100`,[seasonId])).rows;
   }
+  // Lists and summaries share one database snapshot; totals never depend on the page.
+  async function managedItems(kind,{stageId,seasonId=null,subjectId=null,page=0,size=25}={}){
+    stageId=positiveInt(stageId);if(seasonId)seasonId=positiveInt(seasonId);if(subjectId)subjectId=positiveInt(subjectId);
+    const p=pageOptions(page,size),c=await pool.connect();
+    try{
+      await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      const season=(await c.query(`SELECT ss.*,se.name AS season_name FROM stage_seasons ss JOIN seasons se ON se.id=ss.season_id
+        WHERE ss.stage_id=$1 AND (($2::int IS NULL AND ss.is_active=true) OR ss.season_id=$2)`,[stageId,seasonId])).rows[0];
+      if(!season)throw appError('لا يوجد موسم لهذه المرحلة.','NOT_FOUND',404);
+      const lesson=kind==='lessons';
+      const source=lesson?`SELECT l.*,l.subject_id AS item_subject_id,l.activated_at AS published_at FROM lessons l WHERE l.stage_season_id=$1`:
+        `SELECT s.*,g.subject_id AS item_subject_id,s.opened_at AS published_at,discussion_group_label(g.id) AS group_title
+         FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id WHERE g.stage_season_id=$1`;
+      const subjects=(await c.query(`WITH items AS (${source}) SELECT sub.id,sub.name,COUNT(i.id)::int AS total,
+        COUNT(i.id) FILTER (WHERE ${lesson?'i.active_until > now()':'((i.is_closed=false AND i.closes_at > now()) OR i.end_closes_at > now())'})::int AS open_count
+        FROM subjects sub LEFT JOIN items i ON i.item_subject_id=sub.id WHERE sub.stage_id=$2
+        GROUP BY sub.id ORDER BY sub.name,sub.id`,[season.id,stageId])).rows;
+      if(subjectId&&!subjects.some(s=>s.id===subjectId))throw appError('المادة ليست ضمن المرحلة.');
+      const total=subjects.filter(s=>!subjectId||s.id===subjectId).reduce((n,s)=>n+s.total,0);
+      const rows=(await c.query(`WITH items AS (${source}), numbered AS (
+        SELECT i.*,ROW_NUMBER() OVER (PARTITION BY item_subject_id ORDER BY published_at,id)::int AS item_number FROM items i)
+        SELECT i.*,sub.name AS subject_name,i.published_at + interval '24 hours' AS reopen_until,
+          (i.published_at <= now() AND i.published_at + interval '24 hours' > now() AND $5::boolean) AS can_reopen,
+          ${lesson?`(i.active_until > now()) AS is_active,
+            (SELECT COUNT(*)::int FROM attendance a WHERE a.lesson_id=i.id) AS attended_count,
+            (SELECT COUNT(*)::int FROM enrollments e WHERE e.stage_season_id=$1 AND e.status='active') AS enrolled_count`:
+            `(SELECT COUNT(*)::int FROM (SELECT student_id FROM mubahatha_attendance a WHERE a.session_id=i.id
+              GROUP BY student_id HAVING bool_or(phase='start') AND bool_or(phase='end')) a) AS complete_count`}
+        FROM numbered i JOIN subjects sub ON sub.id=i.item_subject_id
+        WHERE ($2::int IS NULL OR i.item_subject_id=$2) ORDER BY i.published_at DESC,i.id DESC LIMIT $3 OFFSET $4`,
+        [season.id,subjectId,p.size,p.offset,season.is_active])).rows;
+      await c.query('COMMIT');return {season,subjects,rows,total,...p};
+    }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+  }
+  async function manageSession(id,action,actor){
+    id=positiveInt(id);const c=await pool.connect();
+    try{
+      await c.query('BEGIN');
+      const session=(await c.query(`SELECT s.*,g.subject_id,g.stage_season_id,ss.is_active AS season_active,g.is_active AS group_active,
+        participation_enabled(g.subject_id,g.stage_season_id) AS enabled,
+        (s.opened_at <= now() AND s.opened_at + interval '24 hours' > now()) AS can_reopen
+        FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id JOIN stage_seasons ss ON ss.id=g.stage_season_id
+        WHERE s.id=$1 FOR UPDATE OF s FOR SHARE OF ss`,[id])).rows[0];
+      if(!session)throw appError('المباحثة غير موجودة.','NOT_FOUND',404);
+      if(!session.season_active)throw appError('لا يمكن تعديل مباحثة من موسم مؤرشف.','ARCHIVED',409);
+      let result;
+      if(action==='cancel'){
+        // Prevent the scheduler recreating this occurrence after its FK is cleared.
+        await c.query("UPDATE slot_decisions SET decision='postponed' WHERE session_id=$1",[id]);
+        await c.query("UPDATE notification_outbox SET status='expired',expires_at=now() WHERE dedupe_key LIKE $1 AND status IN ('pending','sending')",['session:'+id+':%']);
+        await c.query('DELETE FROM mubahatha_sessions WHERE id=$1',[id]);result={ok:true};
+      }else if(action==='reopen'){
+        if(!session.can_reopen)throw appError('انتهت مهلة 24 ساعة من النشر الأصلي؛ لا يمكن إعادة فتح المباحثة.','EXPIRED',409);
+        if(!session.group_active||!session.enabled)throw appError('المجموعة أو المادة غير مفعلة.');
+        result=(await c.query(`UPDATE mubahatha_sessions SET is_closed=false,closes_at=opened_at+interval '24 hours',
+          end_opened_at=COALESCE(end_opened_at,now()),end_closes_at=opened_at+interval '24 hours',end_prompt_sent=true
+          WHERE id=$1 RETURNING *`,[id])).rows[0];
+        // Reopened attendance must be reachable even if the old Telegram buttons were consumed.
+        const payload=JSON.stringify(['أُعيد فتح تسجيل حضور المباحثة حتى '+new Date(result.closes_at).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad'})+'؛ يلزم تسجيل البداية والنهاية.',
+          {reply_markup:{inline_keyboard:[[{text:'حضرت البداية',callback_data:'mub_attend:'+id},{text:'حضرت النهاية',callback_data:'mub_end_attend:'+id}]]}}]);
+        await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
+          SELECT 'session:'||s.id||':reopen:'||st.id,st.telegram_id,$2::jsonb,s.end_closes_at
+          FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id
+          JOIN group_memberships m ON m.group_id=g.id AND m.assigned_at <= s.opened_at
+          JOIN students st ON st.id=m.student_id AND st.is_active=true
+          JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=g.stage_season_id AND e.status='active'
+          JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=g.subject_id AND pm.stage_season_id=g.stage_season_id
+            AND pm.mode='mubahatha' AND pm.joined_mubahatha_at <= s.opened_at
+          WHERE s.id=$1 ON CONFLICT(dedupe_key) DO NOTHING`,[id,payload]);
+      }else if(action==='mark-all'){
+        if(!session.group_active||!session.enabled)throw appError('المجموعة أو المادة غير مفعلة.');
+        const added=(await c.query(`INSERT INTO mubahatha_attendance(session_id,student_id,phase,marked_by)
+          SELECT s.id,st.id,phase,'admin:'||$2::text FROM mubahatha_sessions s
+          JOIN mubahatha_groups g ON g.id=s.group_id
+          JOIN group_memberships m ON m.group_id=g.id AND m.assigned_at <= s.opened_at
+          JOIN students st ON st.id=m.student_id AND st.is_active=true
+          JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=g.stage_season_id AND e.status='active'
+          JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=g.subject_id AND pm.stage_season_id=g.stage_season_id
+            AND pm.mode='mubahatha' AND pm.joined_mubahatha_at <= s.opened_at
+          CROSS JOIN unnest(ARRAY['start','end']) AS phase
+          WHERE s.id=$1 AND s.opened_at <= now()
+          ON CONFLICT(session_id,student_id,phase) DO NOTHING RETURNING student_id`,[id,actor])).rows;
+        result={added: new Set(added.map(a=>a.student_id)).size,records:added.length};
+      }else throw appError('العملية غير صالحة.');
+      await c.query(`INSERT INTO admin_audit_log(actor_id,action,entity_type,entity_id,before_data,after_data)
+        VALUES($1,$2,'session',$3,$4::jsonb,$5::jsonb)`,[actor,action+'_session',id,JSON.stringify(session),JSON.stringify(result)]);
+      await c.query('COMMIT');return result;
+    }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+  }
   const attendanceHeaders=['معرف التسجيل','معرف الطالب','الطالب','المرحلة','الموسم','المادة','المجموعة','معرف الدرس/الجلسة','نوع الحضور','تاريخ تسجيل الحضور','وقت تسجيل الحضور','وقت التسجيل UTC'];
   const attendanceCells=x=>[x.id,x.student_id,x.full_name,x.stage_name,x.season_name,x.subject_name,x.group_title,x.item_id,x.phase,x.date,x.time,x.utc];
   async function* attendanceRows(seasonId, kind='lessons') {
@@ -192,7 +281,8 @@ function createAdminData(db, studies) {
     }
     yield count?`\n**عدد تسجيلات الحضور:** ${count}\n`:'\nلا توجد تسجيلات حضور لهذا الموسم.\n';
   }
-  return {stages,stage,students,student,updateStudent,leaves,reports,sessions,attendanceCsv,attendanceMarkdown,
+  return {stages,stage,students,student,updateStudent,leaves,reports,sessions,attendanceCsv,attendanceMarkdown,managedItems,manageSession,
+    lessonAttendanceMarkdown:require('./lessonAttendance').createLessonAttendance(pool).markdown,
     lessonAttendance:require('./lessonAttendance').createLessonAttendance(pool).matrix,
     saveParticipationSettings:require('./participationSettings').createParticipationSettings(pool).save};
 }

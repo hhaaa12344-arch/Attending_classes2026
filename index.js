@@ -2714,7 +2714,7 @@ bot.action(/admin_mgt_lesson:(\d+):(\d+)/, async (ctx) => {
       'اختر الإجراء المطلوب:',
     Markup.inlineKeyboard([
       [callbackButton('❌ إلغاء التفعيل نهائيًا (فُعِّل بالخطأ)', `admin_mgt_cancel:${lessonId}:${stageId}`)],
-      [callbackButton(`🔁 إعادة فتح ${LESSON_ACTIVE_HOURS} ساعة لتسجيل متأخر`, `admin_mgt_reopen:${lessonId}:${stageId}`)],
+      [callbackButton('🔁 إعادة فتح ضمن 24 ساعة من النشر', `admin_mgt_reopen:${lessonId}:${stageId}`)],
       [callbackButton('✅ تحضير جميع طلبة المرحلة', `admin_mgt_markall:${lessonId}:${stageId}`)],
       [callbackButton('↩️ رجوع لقائمة الدروس', `admin_mgt_stage:${stageId}`)],
     ])
@@ -2755,12 +2755,12 @@ bot.action(/admin_mgt_reopen:(\d+):(\d+)/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
   const lessonId = Number(ctx.match[1]);
   const stageId = Number(ctx.match[2]);
-  const reopened = await db.reopenLesson(lessonId, LESSON_ACTIVE_HOURS);
-  if (!reopened) return ctx.answerCbQuery('لم يعد هذا الدرس موجودًا.', { show_alert: true });
+  const reopened = await db.reopenLesson(lessonId);
+  if (!reopened) return ctx.answerCbQuery('الدرس غير متاح لإعادة الفتح: مضت 24 ساعة على نشره أو موسمه غير نشط.', { show_alert: true });
   const lesson = await db.getLessonById(lessonId);
   await ctx.answerCbQuery('تم فتح الدرس ✅');
   return ctx.editMessageText(
-    `✅ أُعيد فتح الدرس رقم ${Number(lesson.lesson_number)} من «${lesson.subject_name}» لمدة ${LESSON_ACTIVE_HOURS} ساعة إضافية.\n` +
+    `✅ أُعيد فتح الدرس رقم ${Number(lesson.lesson_number)} من «${lesson.subject_name}» حتى ${new Date(reopened.active_until).toLocaleString('ar-IQ', {timeZone:'Asia/Baghdad'})}؛ ضمن 24 ساعة من النشر الأصلي.\n` +
       'يمكن للطلبة الآن فتح «📚 دروس اليوم» وتأشير الحضور عليه.'
   );
 });
@@ -3544,7 +3544,10 @@ bot.action(/mub_attend:(\d+)/, async (ctx) => {
   if (!marked) return ctx.answerCbQuery('لم يُضف سجل جديد: سجّلت مسبقًا أو انتهت المهلة أو لست مؤهلًا لهذه الجلسة.');
   await ctx.answerCbQuery('تم تسجيل حضور البداية ✅');
   return ctx.editMessageText(
-    '✅ سُجّل حضورك في بداية المباحثة.\nلا تنسَ تسجيل حضور النهاية عند إغلاقها.'
+    '✅ سُجّل حضورك في بداية المباحثة.\nلا تنسَ تسجيل حضور النهاية عند إغلاقها.',
+    await studies.isEndAttendanceOpen(sessionId)
+      ? Markup.inlineKeyboard([[callbackButton('✅ حضرت نهاية المباحثة', `mub_end_attend:${sessionId}`)]])
+      : {}
   );
 });
 
