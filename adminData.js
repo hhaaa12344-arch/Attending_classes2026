@@ -163,7 +163,9 @@ function createAdminData(db, studies) {
         FROM numbered i JOIN subjects sub ON sub.id=i.item_subject_id
         WHERE ($2::int IS NULL OR i.item_subject_id=$2) ORDER BY i.published_at DESC,i.id DESC LIMIT $3 OFFSET $4`,
         [season.id,subjectId,p.size,p.offset,season.is_active])).rows;
-      await c.query('COMMIT');return {season,subjects,rows,total,...p};
+      await c.query('COMMIT');return {season,subjects,rows,total,...p,
+        ...(kind==='sessions'?{startAttendanceDelayMinutes:studies.START_ATTENDANCE_DELAY_MINUTES,
+          endAttendanceMinutes:studies.END_ATTENDANCE_MINUTES}:{})};
     }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
   }
   async function manageSession(id,action,actor){

@@ -96,6 +96,7 @@ const PREVIEW_BLOCKED_ACTION_PREFIXES = [
 const PREVIEW_BLOCKED_TEXT_ACTIONS = new Set([
   'leave_awaiting_days', 'leave_awaiting_reason', 'student_report_upload',
   'report_item_score', 'teacher_report_score', 'grade_override', 'lessons_score',
+  'teacher_slot_postpone_reason',
 ]);
 // أزرار قوائم الطالب/الأستاذ التي تُنفّذ عمليات (لا مجرد عرض)
 const PREVIEW_BLOCKED_HEARS = new Set(['🌴 طلب إجازة', '📄 إرسال تقرير']);
@@ -1318,6 +1319,31 @@ bot.on('text', async (ctx, next) => {
       (state.reportId && !await access.reportMatches(state.reportId,state.studentId,state.subjectId,state.ssId))) {
       userState.delete(ctx.from.id);return ctx.reply('لم يعد هذا السجل متاحًا للتعديل في المادة والموسم المختارين.');
     }
+  }
+
+  // -------- الأستاذ: سبب تأجيل مباحثة اليوم --------
+  if (state.action === 'teacher_slot_postpone_reason') {
+    const reason = ctx.message.text.trim().replace(/\s+/g, ' ');
+    if (reason.length < 3 || reason.length > 300) {
+      return ctx.reply('اكتب سببًا مختصرًا وواضحًا للتأجيل (من 3 إلى 300 حرف).');
+    }
+    const teacher = await effectiveTeacher(ctx);
+    if (!isAdmin(ctx) && (!teacher || !await access.teacherObject(teacher.id, 'slot', state.slotId))) {
+      userState.delete(ctx.from.id);
+      return ctx.reply('لم يعد هذا الموعد ضمن صلاحياتك.');
+    }
+    const saved = await studies.setSlotDecisionReason(state.slotId, state.date, ctx.from.id, reason);
+    if (!saved) {
+      userState.delete(ctx.from.id);
+      return ctx.reply('لم يعد بالإمكان حفظ سبب التأجيل؛ ربما بدأ الموعد أو تغيّر القرار.');
+    }
+    const notice = await scheduler.queueSlotDecisionNotice(state.slotId, state.date, 'postponed', reason);
+    userState.delete(ctx.from.id);
+    return ctx.reply(
+      `🕓 حُفظ تأجيل مباحثة اليوم.\nالسبب: ${reason}\n` +
+      `حُفظ إشعار ${Number(notice?.notified || 0)} طالبًا في طابور الإرسال.`,
+      teacher ? teacherMainMenu() : adminMainMenu()
+    );
   }
 
   // -------- تسجيل اسم الطالب --------
@@ -3519,19 +3545,25 @@ async function openEndAttendanceAndNotify(sessionId, byWhom) {
 bot.action(/slot_yes:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
   const teacher = await effectiveTeacher(ctx);
   if (!isAdmin(ctx) && (!teacher || !await access.teacherObject(teacher.id,'slot',Number(ctx.match[1])))) return ctx.answerCbQuery('غير مصرح.');
-  const saved=await studies.recordSlotDecision(Number(ctx.match[1]), ctx.match[2], 'confirmed', ctx.from.id);
+  const slotId=Number(ctx.match[1]),date=ctx.match[2];
+  const saved=await studies.recordSlotDecision(slotId, date, 'confirmed', ctx.from.id, null);
   if(!saved)return ctx.answerCbQuery('الموعد قديم أو بدأت جلسته بالفعل.');
+  userState.delete(ctx.from.id);
+  const notice=await scheduler.queueSlotDecisionNotice(slotId,date,'confirmed');
   await ctx.answerCbQuery('تم التأكيد ✅');
-  return ctx.editMessageText('✅ تم تأكيد المباحثة. ستُفتح في وقتها ويصل التنبيه للطلبة تلقائيًا.');
+  return ctx.editMessageText(`✅ تم تأكيد المباحثة. يبدأ الموعد في وقته، وحُفظ إشعار ${Number(notice?.notified||0)} طالبًا للإرسال.`);
 });
 
 bot.action(/slot_no:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
   const teacher = await effectiveTeacher(ctx);
   if (!isAdmin(ctx) && (!teacher || !await access.teacherObject(teacher.id,'slot',Number(ctx.match[1])))) return ctx.answerCbQuery('غير مصرح.');
-  const saved=await studies.recordSlotDecision(Number(ctx.match[1]), ctx.match[2], 'postponed', ctx.from.id);
+  const slotId=Number(ctx.match[1]),date=ctx.match[2];
+  // نسجل التأجيل فورًا حتى لا تفتح الجلسة أثناء كتابة السبب.
+  const saved=await studies.recordSlotDecision(slotId, date, 'postponed', ctx.from.id, null);
   if(!saved)return ctx.answerCbQuery('الموعد قديم أو بدأت جلسته بالفعل.');
-  await ctx.answerCbQuery('تم التأجيل');
-  return ctx.editMessageText('🕓 تم تأجيل مباحثة اليوم. لن يصل أي تنبيه للطلبة، ولن تُحتسب جلسة اليوم.');
+  userState.set(ctx.from.id,{action:'teacher_slot_postpone_reason',slotId,date});
+  await ctx.answerCbQuery('تم اختيار التأجيل');
+  return ctx.editMessageText('🕓 أُوقف موعد مباحثة اليوم حتى لا تبدأ الجلسة.\nأرسل الآن سبب التأجيل برسالة نصية (مثال: ظرف طارئ)، وبعد حفظه سيصل إشعار للطلبة.');
 });
 
 bot.action(/mub_attend:(\d+)/, async (ctx) => {
@@ -3540,7 +3572,10 @@ bot.action(/mub_attend:(\d+)/, async (ctx) => {
   const sessionId = Number(ctx.match[1]);
   const session = await studies.getSessionById(sessionId);
   if (!session) return ctx.answerCbQuery('الجلسة غير موجودة.');
-  if (session.is_closed || new Date(session.closes_at) < new Date()) {
+  if (!(await studies.isStartAttendanceOpen(sessionId))) {
+    if (!session.is_closed && new Date(session.closes_at) > new Date()) {
+      return ctx.answerCbQuery('لم يبدأ تسجيل حضور البداية بعد.');
+    }
     return ctx.answerCbQuery('انتهى وقت تسجيل حضور بداية المباحثة.');
   }
   const member = await studies.isStudentInGroup(student.id, session.group_id);
@@ -3589,7 +3624,7 @@ bot.action(/mub_finish:(\d+)/, async (ctx) => {
   const result = await openEndAttendanceAndNotify(sessionId, 'الأستاذ');
   if (!result) return ctx.editMessageText('حضور النهاية مفتوح مسبقًا أو الجلسة غير موجودة.');
   return ctx.editMessageText(
-    `✅ أُنهيت المباحثة وفُتح حضور النهاية لمدة ${studies.END_ATTENDANCE_MINUTES} دقائق. حُفظت إشعارات ${result.notified} طالبًا في طابور الإرسال.`
+    `✅ أُنهيت المباحثة وفُتح حضور النهاية حتى نهاية ساعة الموعد الأصلية. حُفظت إشعارات ${result.notified} طالبًا في طابور الإرسال.`
   );
 });
 

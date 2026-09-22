@@ -8,6 +8,11 @@ const {startOrResumeAttempt,submitAnswer,finalizeAttempt,overrideStudentGrade}=r
 // الامتحان يفتح ليلًا في الساعة المحددة من اليوم المختار ويستمر عدد الساعات المُدخَل.
 const SCHEDULE_TZ = process.env.SCHEDULE_TIMEZONE || 'Asia/Baghdad';
 const EXAM_START_HOUR = Number(process.env.EXAM_START_HOUR || 22);
+// لا يظهر حضور البداية فور بدء المباحثة؛ يفتح بعد عشر دقائق من الموعد الأصلي.
+const START_ATTENDANCE_DELAY_MINUTES = Number(process.env.START_ATTENDANCE_DELAY_MINUTES || 10);
+if (!Number.isInteger(START_ATTENDANCE_DELAY_MINUTES) || START_ATTENDANCE_DELAY_MINUTES < 1 || START_ATTENDANCE_DELAY_MINUTES > 30) {
+  throw new Error('START_ATTENDANCE_DELAY_MINUTES must be an integer from 1 to 30');
+}
 
 const GRADE_WEIGHTS = {
   examsTotal: 15, // 3 امتحانات شهرية × 5
@@ -99,7 +104,7 @@ async function initStudiesSchema() {
     END $mub$;
 
     -- إدارة الحضور الثاني على مستوى الجلسة:
-    -- end_opened_at لحظة فتح حضور النهاية، end_closes_at إغلاقه (بعد 10 دقائق)، end_prompt_sent هل نُبِّه الأستاذ.
+    -- end_opened_at لحظة فتح حضور النهاية، end_closes_at نهاية ساعة الموعد الأصلية، end_prompt_sent حقل تاريخي للتوافق.
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_opened_at TIMESTAMP;
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_closes_at TIMESTAMP;
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_prompt_sent BOOLEAN NOT NULL DEFAULT false;
@@ -235,6 +240,7 @@ async function initStudiesSchema() {
       session_id INTEGER REFERENCES mubahatha_sessions(id) ON DELETE SET NULL,
       UNIQUE(slot_id, scheduled_date)
     );
+    ALTER TABLE slot_decisions ADD COLUMN IF NOT EXISTS reason TEXT;
 
     CREATE INDEX IF NOT EXISTS idx_slots_group ON schedule_slots(group_id);
     CREATE INDEX IF NOT EXISTS idx_slots_season ON schedule_slots(stage_season_id);
@@ -496,38 +502,53 @@ const markSessionAttendance = (sessionId, studentId, phase = 'start', markedBy =
          AND pm.stage_season_id=ss.id AND pm.mode='mubahatha'
        WHERE s.id=$1 AND participation_enabled(g.subject_id,g.stage_season_id) AND s.opened_at <= now() AND m.assigned_at <= s.opened_at
          AND pm.joined_mubahatha_at <= s.opened_at
-         AND (($3='start' AND s.is_closed=false AND s.closes_at > now())
-           OR ($3='end' AND s.end_opened_at <= now() AND s.end_closes_at > now()
-             AND EXISTS(SELECT 1 FROM mubahatha_attendance start_mark WHERE start_mark.session_id=s.id AND start_mark.student_id=st.id AND start_mark.phase='start')))
+         AND (($3='start'
+               AND s.opened_at + make_interval(mins => $5::int) <= now()
+               AND s.closes_at > now())
+           OR ($3='end' AND s.end_opened_at <= now() AND s.end_closes_at > now()))
        ON CONFLICT (session_id, student_id, phase) DO NOTHING RETURNING *`,
-      [sessionId, studentId, phase, markedBy]
+      [sessionId, studentId, phase, markedBy, START_ATTENDANCE_DELAY_MINUTES]
     )
     .then((r) => r.rows[0]);
 
-// يفتح حضور النهاية للجلسة ويحدد إغلاقه بعد المدة (10 دقائق افتراضيًا)، مرة واحدة.
+// عند عدم إنهاء الأستاذ للمباحثة يفتح حضور النهاية تلقائيًا قبل نهاية الساعة
+// بعشر دقائق افتراضيًا. وإذا أنهى الأستاذ يدويًا بعد فتح الحضور الأول، يفتح
+// الحضور الثاني فورًا. في الحالتين يبقى الحضور الثاني متاحًا إلى نهاية الساعة
+// الأصلية فقط (مثال 16:00 -> متاح حتى 16:59:59، ويغلق عند 17:00).
 const END_ATTENDANCE_MINUTES = Number(process.env.END_ATTENDANCE_MINUTES || 10);
-if (!Number.isInteger(END_ATTENDANCE_MINUTES) || END_ATTENDANCE_MINUTES < 1 || END_ATTENDANCE_MINUTES > 60) {
-  throw new Error('END_ATTENDANCE_MINUTES must be an integer from 1 to 60');
+if (!Number.isInteger(END_ATTENDANCE_MINUTES) || END_ATTENDANCE_MINUTES < 1 || END_ATTENDANCE_MINUTES > 60 - START_ATTENDANCE_DELAY_MINUTES) {
+  throw new Error(`END_ATTENDANCE_MINUTES must be an integer from 1 to ${60 - START_ATTENDANCE_DELAY_MINUTES}`);
 }
 
 async function openEndAttendance(sessionId, automatic = false) {
   const r = await pool.query(
     `UPDATE mubahatha_sessions
      SET end_opened_at = now(),
-         end_closes_at = CASE WHEN $3 OR closes_at<=now() THEN closes_at + make_interval(mins => $2::int)
-                             ELSE now() + make_interval(mins => $2::int) END,
+         end_closes_at = closes_at,
          is_closed = true
      WHERE id=$1 AND end_opened_at IS NULL AND is_closed=false
-       AND opened_at <= now()
-       AND closes_at + make_interval(mins => $2::int) > now()
-       AND (NOT $3 OR closes_at <= now())
+       AND start_notifications_queued=true
+       AND opened_at + make_interval(mins => $4::int) <= now()
+       AND closes_at > now()
+       AND (NOT $3 OR closes_at - make_interval(mins => $2::int) <= now())
        AND EXISTS (SELECT 1 FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id
          WHERE g.id=mubahatha_sessions.group_id AND g.is_active=true AND ss.is_active=true)
      RETURNING *`,
-    [sessionId, END_ATTENDANCE_MINUTES, automatic]
+    [sessionId, END_ATTENDANCE_MINUTES, automatic, START_ATTENDANCE_DELAY_MINUTES]
   );
   return r.rows[0]; // null إن كان مفتوحًا مسبقًا
 }
+
+const isStartAttendanceOpen = (sessionId) =>
+  pool
+    .query(
+      `SELECT 1 FROM mubahatha_sessions
+       WHERE id=$1
+         AND opened_at + make_interval(mins => $2::int) <= now()
+         AND closes_at > now()`,
+      [sessionId, START_ATTENDANCE_DELAY_MINUTES]
+    )
+    .then((r) => Boolean(r.rows[0]));
 
 // هل حضور النهاية مفتوح الآن لهذه الجلسة؟
 const isEndAttendanceOpen = (sessionId) =>
@@ -560,7 +581,7 @@ const getSessionsNeedingEndPrompt = (leadMinutes = 10) =>
 const markEndPromptSent = (sessionId) =>
   pool.query('UPDATE mubahatha_sessions SET end_prompt_sent=true WHERE id=$1', [sessionId]);
 
-// الجلسات التي بلغت وقت انتهائها ولم يفتح الأستاذ حضورها الثاني — يُفتح تلقائيًا.
+// الجلسات التي دخلت آخر عشر دقائق ولم يفتح الأستاذ حضورها الثاني — يُفتح تلقائيًا.
 const getSessionsNeedingAutoEnd = () =>
   pool
     .query(
@@ -570,10 +591,21 @@ const getSessionsNeedingAutoEnd = () =>
        JOIN mubahatha_groups g ON g.id=s.group_id
        JOIN subjects sub ON sub.id=g.subject_id
        JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
-       WHERE s.end_opened_at IS NULL AND s.is_closed=false AND g.is_active=true
-         AND s.closes_at <= now()
-         AND s.closes_at + make_interval(mins => $1::int) > now()`,
+       WHERE s.end_opened_at IS NULL AND s.is_closed=false AND s.start_notifications_queued=true AND g.is_active=true
+         AND s.closes_at - make_interval(mins => $1::int) <= now()
+         AND s.closes_at > now()`,
       [END_ATTENDANCE_MINUTES]
+    )
+    .then((r) => r.rows);
+
+// إذا كان المجدول متوقفًا أثناء نافذة 16:50–17:00 ثم عاد بعد الإغلاق،
+// لا نمدد الحضور خارج الساعة الأصلية: نغلق الجلسة المنتهية فقط حتى لا تبقى معلقة.
+const closeExpiredSessionsWithoutEnd = () =>
+  pool
+    .query(
+      `UPDATE mubahatha_sessions s SET is_closed=true
+       WHERE s.is_closed=false AND s.end_opened_at IS NULL AND s.closes_at <= now()
+       RETURNING s.id`
     )
     .then((r) => r.rows);
 
@@ -1391,12 +1423,14 @@ const getSlotsNeedingPrompt = (leadMinutes = 5) =>
     .query(
       `WITH loc AS (SELECT (now() AT TIME ZONE $1) AS ln)
        SELECT s.*, sub.name AS subject_name, discussion_group_label(g.id) AS group_title, g.group_number,
+              sg.name AS stage_name,
               t.telegram_id AS teacher_telegram_id, t.full_name AS teacher_name,
               loc.ln::date AS scheduled_date
        FROM schedule_slots s
        JOIN subjects sub ON sub.id=s.subject_id
        JOIN mubahatha_groups g ON g.id=s.group_id
        JOIN stage_seasons ss ON ss.id=s.stage_season_id AND ss.is_active=true
+       JOIN stages sg ON sg.id=ss.stage_id
        LEFT JOIN teachers t ON t.id=s.teacher_id AND t.is_active=true
        CROSS JOIN loc
        WHERE s.is_active=true AND participation_enabled(s.subject_id,s.stage_season_id)
@@ -1421,20 +1455,33 @@ const recordSlotPrompt = (slotId, scheduledDate) =>
     )
     .then((r) => r.rows[0]);
 
-const recordSlotDecision = (slotId, scheduledDate, decision, decidedBy) =>
+const recordSlotDecision = (slotId, scheduledDate, decision, decidedBy, reason = null) =>
   pool
     .query(
-      `INSERT INTO slot_decisions(slot_id, scheduled_date, decision, decided_at, decided_by)
-       SELECT sl.id,$2::date,$3,now(),$4 FROM schedule_slots sl
+      `INSERT INTO slot_decisions(slot_id, scheduled_date, decision, decided_at, decided_by, reason)
+       SELECT sl.id,$2::date,$3,now(),$4,$6 FROM schedule_slots sl
        JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
        WHERE sl.id=$1 AND sl.is_active=true AND participation_enabled(sl.subject_id,sl.stage_season_id) AND $2::date=(now() AT TIME ZONE $5)::date
          AND EXTRACT(DOW FROM $2::date)::int=sl.day_of_week
          AND (now() AT TIME ZONE $5) < $2::date+make_time(sl.hour,sl.minute,0)+make_interval(hours=>sl.duration_hours)
        ON CONFLICT (slot_id, scheduled_date)
-       DO UPDATE SET decision=$3, decided_at=now(), decided_by=$4
+       DO UPDATE SET decision=$3, decided_at=now(), decided_by=$4, reason=$6
        WHERE slot_decisions.session_id IS NULL
        RETURNING *`,
-      [slotId, scheduledDate, decision, decidedBy, SCHEDULE_TZ]
+      [slotId, scheduledDate, decision, decidedBy, SCHEDULE_TZ, reason]
+    )
+    .then((r) => r.rows[0]);
+
+const setSlotDecisionReason = (slotId, scheduledDate, decidedBy, reason) =>
+  pool
+    .query(
+      `UPDATE slot_decisions d SET reason=$4,decided_at=now(),decided_by=$3
+       FROM schedule_slots sl JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
+       WHERE d.slot_id=sl.id AND d.slot_id=$1 AND d.scheduled_date=$2::date
+         AND d.decision='postponed' AND d.session_id IS NULL
+         AND participation_enabled(sl.subject_id,sl.stage_season_id)
+       RETURNING d.*`,
+      [slotId, scheduledDate, decidedBy, reason]
     )
     .then((r) => r.rows[0]);
 
@@ -1461,12 +1508,11 @@ const getSlotsReadyToStart = () =>
        CROSS JOIN dates
        LEFT JOIN slot_decisions d ON d.slot_id=s.id AND d.scheduled_date=dates.day
        WHERE s.is_active=true AND participation_enabled(s.subject_id,s.stage_season_id) AND d.session_id IS NULL
-         AND COALESCE(d.decision,'confirmed') <> 'postponed'
-         AND (NOT $2::boolean OR d.decision='confirmed')
+         AND d.decision='confirmed'
          AND EXTRACT(DOW FROM dates.day)::int=s.day_of_week
          AND loc.ln >= (dates.day + make_time(s.hour, s.minute, 0))
          AND loc.ln < (dates.day + make_time(s.hour, s.minute, 0)+make_interval(hours=>s.duration_hours))`,
-      [SCHEDULE_TZ, process.env.SCHEDULE_REQUIRE_CONFIRMATION === 'true']
+      [SCHEDULE_TZ]
     )
     .then((r) => r.rows);
 
@@ -1482,10 +1528,9 @@ async function startSessionFromSlot(slot) {
       `SELECT d.id FROM slot_decisions d JOIN schedule_slots sl ON sl.id=d.slot_id
        JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
        WHERE participation_enabled(sl.subject_id,sl.stage_season_id) AND d.slot_id=$1 AND d.scheduled_date=$2 AND d.session_id IS NULL AND sl.is_active=true
-         AND COALESCE(d.decision,'confirmed') <> 'postponed'
-         AND (NOT $3::boolean OR d.decision='confirmed')
-         AND $4::timestamp > now() FOR UPDATE OF d`,
-      [slot.id, slot.scheduled_date, process.env.SCHEDULE_REQUIRE_CONFIRMATION === 'true', slot.scheduled_end]
+         AND d.decision='confirmed'
+         AND $3::timestamp > now() FOR UPDATE OF d`,
+      [slot.id, slot.scheduled_date, slot.scheduled_end]
     );
     if (!claim.rows[0]) {
       await client.query('ROLLBACK');
@@ -1750,6 +1795,7 @@ module.exports = {
   getSlotsNeedingPrompt,
   recordSlotPrompt,
   recordSlotDecision,
+  setSlotDecisionReason,
   getSlotDecision,
   getSlotsReadyToStart,
   startSessionFromSlot,
@@ -1781,10 +1827,13 @@ module.exports = {
   getOpenSessionForGroup,
   markSessionAttendance,
   openEndAttendance,
+  isStartAttendanceOpen,
   isEndAttendanceOpen,
   getSessionsNeedingEndPrompt,
   markEndPromptSent,
   getSessionsNeedingAutoEnd,
+  closeExpiredSessionsWithoutEnd,
+  START_ATTENDANCE_DELAY_MINUTES,
   END_ATTENDANCE_MINUTES,
   createExam,
   addExamQuestion,

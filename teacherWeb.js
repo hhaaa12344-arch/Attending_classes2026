@@ -97,6 +97,7 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
     totals.todayDiscussions=today.length;
     const activeSessions=(await db.pool.query(`
       SELECT ms.id,ms.title,ms.opened_at,ms.closes_at,ms.end_opened_at,ms.end_closes_at,ms.is_closed,
+             ms.opened_at+make_interval(mins=>$2::int) AS start_attendance_opens_at,
              sub.name AS subject_name,discussion_group_label(g.id) AS group_title,g.subject_id,g.stage_season_id
       FROM mubahatha_sessions ms
       JOIN mubahatha_groups g ON g.id=ms.group_id
@@ -104,7 +105,7 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
       JOIN teaching_assignments ta ON ta.subject_id=g.subject_id AND ta.stage_season_id=g.stage_season_id AND ta.teacher_id=$1
       WHERE g.stage_season_id IN (SELECT id FROM stage_seasons WHERE is_active=true)
         AND (ms.is_closed=false OR (ms.end_closes_at IS NOT NULL AND ms.end_closes_at>now()))
-      ORDER BY ms.opened_at DESC LIMIT 8`,[actor.teacherId])).rows;
+      ORDER BY ms.opened_at DESC LIMIT 8`,[actor.teacherId,studies.START_ATTENDANCE_DELAY_MINUTES])).rows;
     return {teacher:{id:actor.teacherId,full_name:actor.teacherName},totals,today,activeSessions,subjects};
   }
 
