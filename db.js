@@ -105,17 +105,6 @@ async function initSchema() {
       last_notified_at TIMESTAMPTZ
     );
 
-    -- جدول نشر الدروس المخطط: مستقل عن اكتشاف منشورات القناة عبر الهاشتاك.
-    CREATE TABLE IF NOT EXISTS lesson_schedule_entries (
-      id SERIAL PRIMARY KEY,
-      stage_season_id INTEGER NOT NULL REFERENCES stage_seasons(id) ON DELETE CASCADE,
-      subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
-      lesson_date DATE NOT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT now(),
-      UNIQUE(stage_season_id, subject_id, lesson_date)
-    );
-    CREATE INDEX IF NOT EXISTS idx_lesson_schedule_stage_season_date
-      ON lesson_schedule_entries(stage_season_id, lesson_date);
   `);
 
   // ترقية آمنة لقواعد بيانات أُنشئت بنسخة سابقة من هذا البوت (قبل إضافة هذه الأعمدة)
@@ -150,6 +139,18 @@ async function initSchema() {
       is_active BOOLEAN NOT NULL DEFAULT true,
       UNIQUE(stage_id, season_id)
     );
+
+    -- يُنشأ بعد stage_seasons الذي يعتمد عليه، بما يشمل التشغيل لأول مرة.
+    CREATE TABLE IF NOT EXISTS lesson_schedule_entries (
+      id SERIAL PRIMARY KEY,
+      stage_season_id INTEGER NOT NULL REFERENCES stage_seasons(id) ON DELETE CASCADE,
+      subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+      lesson_date DATE NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT now(),
+      UNIQUE(stage_season_id, subject_id, lesson_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_lesson_schedule_stage_season_date
+      ON lesson_schedule_entries(stage_season_id, lesson_date);
 
     CREATE TABLE IF NOT EXISTS enrollments (
       id SERIAL PRIMARY KEY,
@@ -1530,6 +1531,8 @@ const getLessonBySource = (chatId, messageId) =>
     )
     .then((r) => r.rows[0]);
 
+// الدرس المفتوح متاح للمسجلين حاليًا، ولو انضموا أو انتقلوا بعد تفعيله.
+// لا نغيّر تاريخ الالتحاق؛ يبقى أساسًا لحساب الغياب عن الدروس السابقة.
 const getActiveLessonsForStudent = (stageId, studentId) =>
   pool
     .query(
@@ -1543,9 +1546,11 @@ const getActiveLessonsForStudent = (stageId, studentId) =>
        JOIN subjects s ON s.id = l.subject_id
        JOIN enrollments e
          ON e.stage_season_id=l.stage_season_id AND e.student_id=$2 AND e.status='active'
-       WHERE s.stage_id = $1 AND l.active_until > now()
-         AND l.activated_at >= e.started_at
-         AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
+       JOIN students st ON st.id=e.student_id AND st.is_active=true AND st.stage_id=s.stage_id
+       JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true AND ss.stage_id=s.stage_id
+       JOIN stages sg ON sg.id=ss.stage_id AND sg.is_active=true
+       WHERE s.stage_id = $1 AND l.active_until > now() AND l.activated_at <= now()
+         AND e.started_at <= now() AND (e.ended_at IS NULL OR e.ended_at > now())
          AND NOT EXISTS(
            SELECT 1 FROM attendance a WHERE a.lesson_id=l.id AND a.student_id=$2
          )
@@ -1595,11 +1600,12 @@ const markAttendance = (studentId, lessonId) =>
        FROM lessons l
        JOIN enrollments e
          ON e.stage_season_id=l.stage_season_id AND e.student_id=$1 AND e.status='active'
-       JOIN students st ON st.id=e.student_id AND st.is_active=true
        JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true
+       JOIN subjects sub ON sub.id=l.subject_id AND sub.stage_id=ss.stage_id
+       JOIN students st ON st.id=e.student_id AND st.is_active=true AND st.stage_id=ss.stage_id
+       JOIN stages sg ON sg.id=ss.stage_id AND sg.is_active=true
        WHERE l.id=$2 AND l.active_until > now() AND l.activated_at <= now()
-         AND l.activated_at >= e.started_at
-         AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
+         AND e.started_at <= now() AND (e.ended_at IS NULL OR e.ended_at > now())
        ON CONFLICT (student_id, lesson_id) DO NOTHING RETURNING *`,
       [studentId, lessonId]
     )
@@ -1646,10 +1652,12 @@ const markAllPresentForLesson = (lessonId) =>
        SELECT e.student_id, l.id
        FROM lessons l
        JOIN enrollments e ON e.stage_season_id=l.stage_season_id AND e.status='active'
-       JOIN students st ON st.id=e.student_id AND st.is_active=true
-       WHERE l.id=$1
-         AND l.activated_at >= e.started_at
-         AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
+       JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true
+       JOIN subjects sub ON sub.id=l.subject_id AND sub.stage_id=ss.stage_id
+       JOIN students st ON st.id=e.student_id AND st.is_active=true AND st.stage_id=ss.stage_id
+       JOIN stages sg ON sg.id=ss.stage_id AND sg.is_active=true
+       WHERE l.id=$1 AND l.activated_at <= now()
+         AND e.started_at <= now() AND (e.ended_at IS NULL OR e.ended_at > now())
        ON CONFLICT (student_id, lesson_id) DO NOTHING RETURNING *`,
       [lessonId]
     )
@@ -1660,9 +1668,13 @@ const canStudentAttendLesson = (studentId, lessonId) =>
     .query(
       `SELECT 1 FROM lessons l
        JOIN enrollments e ON e.stage_season_id=l.stage_season_id
+       JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true
+       JOIN subjects sub ON sub.id=l.subject_id AND sub.stage_id=ss.stage_id
+       JOIN students st ON st.id=e.student_id AND st.is_active=true AND st.stage_id=ss.stage_id
+       JOIN stages sg ON sg.id=ss.stage_id AND sg.is_active=true
        WHERE l.id=$2 AND e.student_id=$1 AND e.status='active'
-         AND l.activated_at >= e.started_at
-         AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
+         AND l.activated_at <= now()
+         AND e.started_at <= now() AND (e.ended_at IS NULL OR e.ended_at > now())
        LIMIT 1`,
       [studentId, lessonId]
     )
@@ -2331,7 +2343,8 @@ const getStageSeasonReport = (stageSeasonId, timeZone = 'Asia/Baghdad') =>
        JOIN ranked r ON r.id=e.stage_season_id
        JOIN subjects sub ON sub.stage_id=r.stage_id
        LEFT JOIN lessons l ON l.subject_id=sub.id AND l.stage_season_id=r.id
-              AND l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
+              AND ((l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at))
+                OR EXISTS (SELECT 1 FROM attendance saved WHERE saved.lesson_id=l.id AND saved.student_id=st.id))
        LEFT JOIN attendance a ON a.lesson_id = l.id AND a.student_id = st.id
        WHERE r.id=$1
        GROUP BY st.id, st.full_name, r.id, r.stage_id, r.stage_name_snapshot, r.current_stage_name,
@@ -2381,7 +2394,8 @@ const getStudentSeasonReport = (studentId, stageSeasonId = null, timeZone = 'Asi
        JOIN ranked r ON r.id=e.stage_season_id
        JOIN subjects sub ON sub.stage_id=r.stage_id
        LEFT JOIN lessons l ON l.subject_id=sub.id AND l.stage_season_id=r.id
-              AND l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
+              AND ((l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at))
+                OR EXISTS (SELECT 1 FROM attendance saved WHERE saved.lesson_id=l.id AND saved.student_id=st.id))
        LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=st.id
        WHERE st.id=$1 ${stageSeasonId ? 'AND r.id=$2' : ''}
        GROUP BY st.id, st.full_name, r.id, r.stage_id, r.stage_name_snapshot, r.current_stage_name,
