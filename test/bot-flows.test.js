@@ -136,3 +136,17 @@ test('bot: administrator and assigned teacher search one student, open their pro
   await send(80000,'',`contact:select:teacher:${outsider.id}:${subject.id}`);
   assert.ok(messages.some(m=>m.method==='answerCallbackQuery'&&m.show_alert));
 });
+
+test('bot: student screens identify the student and report upload explains its weekly cadence',async()=>{
+  const heading=`👤 الطالب: ${student.full_name}`;
+  for(const button of ['📋 المتغيرات','📖 المباحثات والتقارير','📄 إرسال تقرير','🌴 طلب إجازة','📝 الامتحانات الشهرية','📊 تقرير الحضور']){
+    await send(student.telegram_id,button);
+    assert.ok(messages.some(m=>m.method==='sendMessage'&&m.text?.includes(heading)),`${button} shows the student name`);
+  }
+  await send(student.telegram_id,'📄 إرسال تقرير');
+  assert.ok(messages.some(m=>m.text?.includes('مرة واحدة أسبوعيًا، وليس يوميًا')));
+  const mode=await studies.setParticipationMode(student.id,subject.id,ss,'report');
+  assert.ok(mode);
+  await send(student.telegram_id,'',`rep_send:${subject.id}:${ss}`);
+  assert.ok(messages.some(m=>m.text?.includes(heading)&&m.text.includes('مرة واحدة أسبوعيًا، وليس يوميًا')));
+});
