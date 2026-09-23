@@ -24,6 +24,8 @@
   const timeText=(h,m)=>`${String(n(h)).padStart(2,'0')}:${String(n(m)).padStart(2,'0')}`;
   const dateTime=(v)=>{if(!v)return '—';try{return new Intl.DateTimeFormat('ar-IQ',{dateStyle:'medium',timeStyle:'short',timeZone:'Asia/Baghdad'}).format(new Date(v));}catch{return '—';}};
   const todayIso=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  const contactRequestKey=()=>`teacher-web:${window.crypto?.randomUUID?.()||`${Date.now()}:${Math.random().toString(36).slice(2)}`}`;
+  const contactStatuses={pending:'بانتظار الإرسال',sending:'قيد الإرسال',sent:'أُرسلت',failed:'تعذّر الإرسال',expired:'انتهت المهلة',archived:'سجل إرسال مؤرشف'};
 
   function notify(message){
     toast.textContent=message;toast.classList.remove('hidden');
@@ -162,6 +164,43 @@
 
   function openSheet(title,kicker=''){sheetTitle.textContent=title;sheetKicker.textContent=kicker;sheetBody.innerHTML=empty('جاري التحميل…');sheet.classList.remove('hidden');backdrop.classList.remove('hidden');document.body.style.overflow='hidden';}
   function closeSheet(){sheet.classList.add('hidden');backdrop.classList.add('hidden');document.body.style.overflow='';}
+
+  async function openContactSearch(subjectId=null,q='',page=0){
+    const subjects=state.subjects;if(!subjects.length)return notify('لا توجد مواد مسندة إليك.');
+    subjectId=subjectId||n(subjects[0].subject_id);
+    openSheet('التواصل مع طالب معين','اختر مادة ثم ابحث عن اسم الطالب');
+    try{
+      const result=await api(`/api/teacher/student-contact?${new URLSearchParams({subjectId,q,page})}`);
+      sheetBody.innerHTML=`<label class="field-label">المادة<select id="contactSubject" class="select-control">${subjects.map(s=>`<option value="${n(s.subject_id)}" ${n(s.subject_id)===subjectId?'selected':''}>${esc(s.subject_name)} — ${esc(s.stage_name)}</option>`).join('')}</select></label>
+        <form id="contactSearch"><label class="field-label">اسم الطالب<input name="q" class="select-control" maxlength="150" value="${esc(q)}" placeholder="الاسم أو جزء منه"></label><button class="primary-button" type="submit">بحث</button></form>
+        <p class="form-hint">${result.total} طالب · الصفحة ${page+1}</p>
+        ${result.rows.length?result.rows.map(st=>`<button class="list-card contact-student-button" type="button" data-contact-student="${n(st.id)}" data-name="${esc(st.full_name)}" data-telegram="${esc(st.telegram_id||'')}">${esc(st.full_name)}</button>`).join(''):empty('لا يوجد طالب مطابق في هذه المادة.')}
+        <div class="card-actions">${page>0?'<button type="button" data-contact-page="'+(page-1)+'">السابق</button>':''}${(page+1)*20<result.total?'<button type="button" data-contact-page="'+(page+1)+'">التالي</button>':''}</div>`;
+      $('#contactSubject',sheetBody).addEventListener('change',e=>openContactSearch(n(e.target.value),'',0));
+      $('#contactSearch',sheetBody).addEventListener('submit',e=>{e.preventDefault();openContactSearch(n($('#contactSubject',sheetBody).value),new FormData(e.target).get('q').trim(),0);});
+      $$('[data-contact-student]',sheetBody).forEach(b=>b.addEventListener('click',()=>openContactStudent(n(b.dataset.contactStudent),subjectId,b.dataset.name,b.dataset.telegram)));
+      $$('[data-contact-page]',sheetBody).forEach(b=>b.addEventListener('click',()=>openContactSearch(subjectId,q,n(b.dataset.contactPage))));
+    }catch(err){sheetBody.innerHTML=empty(err.message);}
+  }
+
+  async function openContactStudent(studentId,subjectId,name,telegramId='',reportId=null){
+    openSheet(`التواصل مع ${name}`,'رسالة خاصة لطالب في مادتك');
+    try{
+      const history=await api(`/api/teacher/student-contact/${studentId}?subjectId=${subjectId}`);
+      sheetBody.innerHTML=`${telegramId?`<a class="secondary-button" href="tg://user?id=${encodeURIComponent(telegramId)}">فتح حساب الطالب في تيليغرام</a>`:'<p class="form-hint">لا يوجد رابط حساب متاح. يمكنك إرسال رسالة عبر البوت.</p>'}
+        ${reportId?`<p class="form-hint">رد على التقرير #${reportId}</p>`:''}
+        <form id="contactSend"><label class="field-label">رسالتك<textarea name="message" class="text-area" rows="5" maxlength="3000" required></textarea></label><button class="primary-button" type="submit">إرسال عبر البوت</button></form>
+        <h3>آخر الرسائل</h3>${history.length?history.map(m=>`<article class="list-card"><small>${esc(dateTime(m.created_at))} · ${esc(contactStatuses[m.delivery_status]||m.delivery_status)}</small><p>${esc(m.message_text)}</p></article>`).join(''):empty('لا توجد رسائل سابقة لهذا الطالب في هذه المادة.')}`;
+      $('#contactSend',sheetBody).addEventListener('submit',async e=>{
+        e.preventDefault();const button=$('button[type="submit"]',e.target);button.disabled=true;
+        try{
+          const message=new FormData(e.target).get('message');
+          await api('/api/teacher/student-contact',{method:'POST',body:JSON.stringify({studentId,subjectId,message,contextKind:reportId?'report':null,contextId:reportId||null,requestKey:e.target.dataset.requestKey||(e.target.dataset.requestKey=contactRequestKey())})});
+          notify('حُفظت الرسالة للإرسال عبر البوت.');await openContactStudent(studentId,subjectId,name,telegramId,reportId);
+        }catch(err){notify(err.message);button.disabled=false;}
+      });
+    }catch(err){sheetBody.innerHTML=empty(err.message);}
+  }
 
   async function openAttendance(sub){
     openSheet(`حضور مباحثات ${sub.subject_name}`,sub.stage_name);
@@ -309,6 +348,7 @@
           <h4>تقرير ${esc(r.group_title_snapshot||'الطالب')} ${r.score==null?'<span class="report-pending">بانتظار التقييم</span>':'<span class="report-done">تم التقييم</span>'}</h4>
           <p>${r.note?esc(r.note):r.file_kind?`تقرير محفوظ كـ ${esc(r.file_kind)} في البوت.`:'تقرير محفوظ في النظام.'}<br>تاريخ الإرسال: ${esc(dateTime(r.submitted_at))}</p>
           <div class="score-row"><label><span class="field-label">الدرجة من 15</span><input class="score-input" type="number" min="0" max="15" step="0.25" value="${r.score==null?'':esc(r.score)}" inputmode="decimal"></label><button class="primary-button score-save" type="button">حفظ التقييم</button></div>
+          <button class="secondary-button report-contact" type="button">💬 الرد على هذا التقرير</button>
         </article>`).join('');
       $$('.report-item',sheetBody).forEach(item=>$('.score-save',item).addEventListener('click',async()=>{
         const input=$('.score-input',item);const score=Number(input.value);if(!Number.isFinite(score)||score<0||score>15){notify('الدرجة يجب أن تكون بين 0 و15.');return;}
@@ -322,6 +362,7 @@
         }
         catch(err){btn.textContent='حفظ التقييم';notify(err.message);}finally{btn.disabled=false;}
       }));
+      $$('.report-item',sheetBody).forEach(item=>$('.report-contact',item).addEventListener('click',()=>openContactStudent(studentId,subjectId,name,'',n(item.dataset.reportId))));
     }catch(err){sheetBody.innerHTML=empty(err.message);}
   }
 
@@ -354,6 +395,7 @@
   $('#closeBtn').addEventListener('click',()=>{try{tg?.close();}catch(_){}});
   $$('[data-tool="exams"]').forEach(b=>b.addEventListener('click',()=>{const s=state.subjects[0];if(!s)return notify('لا توجد مواد مسندة إليك.');openExams(s);}));
   $$('[data-tool="attendance"]').forEach(b=>b.addEventListener('click',()=>{const s=state.subjects[0];if(!s)return notify('لا توجد مواد مسندة إليك.');openAttendance(s);}));
+  $$('[data-tool="contact"]').forEach(b=>b.addEventListener('click',()=>openContactSearch()));
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!sheet.classList.contains('hidden'))closeSheet();});
 
   init();
