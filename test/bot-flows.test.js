@@ -93,3 +93,46 @@ test('bot: backup menu is private/admin-only, works during an input step, and pr
   await send(42,'↩️ رجوع');
   assert.ok(messages.some(m=>m.reply_markup?.keyboard?.flat().some(b=>(b.text||b)==='💾 النسخ الاحتياطية')));
 });
+
+test('bot: reopened monthly exam accepts an answer after the original deadline only for its student',async()=>{
+  const e=(await db.pool.query(`INSERT INTO exams(subject_id,stage_season_id,exam_number,opens_at,closes_at,available_hours,status)
+    VALUES($1,$2,1,now()-interval '3 days',now()-interval '2 days',24,'published') RETURNING *`,[subject.id,ss])).rows[0];
+  const qs=[];for(let i=1;i<=2;i++)qs.push((await db.pool.query(`INSERT INTO exam_questions(exam_id,position,question_type,prompt,correct_answer)
+    VALUES($1,$2,'tf','سؤال اختبار فتح خاص','صح') RETURNING *`,[e.id,i])).rows[0]);
+  await require('../adminOverrides').createAdminOverrides(db.pool).reopenExam(e.id,{studentId:student.id,subjectId:subject.id,
+    opensAt:new Date(Date.now()-60000).toISOString(),closesAt:new Date(Date.now()+3600000).toISOString()},42);
+  await send(90000,'',`stex_start:${e.id}`);
+  const attempt=(await db.pool.query('SELECT * FROM exam_attempts WHERE exam_id=$1 AND student_id=$2',[e.id,student.id])).rows[0];assert.ok(attempt);
+  await send(90000,'',`stex_ans:${attempt.id}:${qs[0].id}:0`);
+  assert.equal((await db.pool.query('SELECT * FROM exam_answers WHERE attempt_id=$1',[attempt.id])).rowCount,1);
+  assert.equal((await studies.getAttemptById(attempt.id)).submitted_at,null);
+  assert.ok(messages.some(m=>m.text?.includes('السؤال 2')));
+  const outsider=await db.createStudent(91000,'طالب آخر لن يفتح الامتحان',stage.id);await db.pool.query('UPDATE students SET official_confirmed_at=now() WHERE id=$1',[outsider.id]);
+  await send(91000,'',`stex_start:${e.id}`);assert.ok(messages.some(m=>m.text?.includes('مغلق')));
+  await send(91000,'',`stex_ans:${attempt.id}:${qs[1].id}:0`);assert.ok(messages.some(m=>m.text?.includes('غير مصرح')));
+  assert.equal((await db.pool.query('SELECT * FROM exam_answers WHERE attempt_id=$1',[attempt.id])).rowCount,1);
+  await db.pool.query("UPDATE exam_student_windows SET opens_at=now()-interval '1 hour',closes_at=now()-interval '1 second' WHERE exam_id=$1",[e.id]);
+  await send(90000,'',`stex_ans:${attempt.id}:${qs[1].id}:0`);
+  assert.ok(messages.some(m=>m.text?.includes('انتهت مهلة الامتحان')));
+  assert.equal((await db.pool.query('SELECT * FROM exam_answers WHERE attempt_id=$1',[attempt.id])).rowCount,1);
+});
+test('bot: administrator and assigned teacher search one student, open their profile and queue private messages',async()=>{
+  await send(42,'💬 التواصل مع طالب معين');assert.ok(messages.some(m=>m.text?.includes('اسم الطالب')));
+  await send(42,'طالب حقيقي');assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data===`contact:select:admin:${student.id}:0`)));
+  await send(42,'',`contact:select:admin:${student.id}:0`);
+  assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.url===`tg://user?id=${student.telegram_id}`)));
+  await send(42,'',`contact:compose:admin:${student.id}:0:0`);await send(42,'رسالة الإدارة الخاصة');
+  const adminMessage=(await db.pool.query("SELECT * FROM student_contact_messages WHERE student_id=$1 AND actor_role='admin' ORDER BY id DESC LIMIT 1",[student.id])).rows[0];
+  assert.equal(adminMessage.message_text,'رسالة الإدارة الخاصة');
+  const teacher=(await db.pool.query("INSERT INTO teachers(full_name,telegram_id) VALUES('أستاذ المادة',80000) RETURNING *")).rows[0];
+  await db.pool.query('INSERT INTO teaching_assignments(teacher_id,subject_id,stage_season_id) VALUES($1,$2,$3)',[teacher.id,subject.id,ss]);
+  await send(80000,'💬 التواصل مع طالب معين');assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data===`contact:subject:${subject.id}:${ss}`)));
+  await send(80000,'',`contact:subject:${subject.id}:${ss}`);await send(80000,'طالب حقيقي');
+  assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data===`contact:select:teacher:${student.id}:${subject.id}`)));
+  await send(80000,'',`contact:select:teacher:${student.id}:${subject.id}`);
+  await send(80000,'',`contact:compose:teacher:${student.id}:${subject.id}:0`);await send(80000,'رسالة الأستاذ الخاصة');
+  assert.equal((await db.pool.query("SELECT message_text FROM student_contact_messages WHERE student_id=$1 AND actor_role='teacher' ORDER BY id DESC LIMIT 1",[student.id])).rows[0].message_text,'رسالة الأستاذ الخاصة');
+  const outsider=await db.createStudent(92000,'طالب خارج مادة الأستاذ', (await db.addStage('مرحلة خارجية')).id);
+  await send(80000,'',`contact:select:teacher:${outsider.id}:${subject.id}`);
+  assert.ok(messages.some(m=>m.method==='answerCallbackQuery'&&m.show_alert));
+});
