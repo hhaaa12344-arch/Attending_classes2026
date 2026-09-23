@@ -234,7 +234,7 @@ function createAdminData(db, studies) {
       const isLesson=kind==='lessons';
       const time=isLesson?'a.listened_at':'a.marked_at';
       const r=await pool.query(isLesson?`SELECT a.id,st.id AS student_id,st.full_name,sg.name AS stage_name,se.name AS season_name,
-        sub.name AS subject_name,NULL::text AS group_title,l.id AS item_id,'درس' AS phase,
+        sub.name AS subject_name,NULL::text AS group_title,l.id AS item_id,CASE WHEN a.marking_kind='admin_late' THEN 'حضور إداري متأخر' ELSE 'درس' END AS phase,
         to_char((${time} AT TIME ZONE 'UTC') AT TIME ZONE $3,'YYYY-MM-DD') AS date,
         to_char((${time} AT TIME ZONE 'UTC') AT TIME ZONE $3,'HH24:MI:SS') AS time,
         to_char(${time},'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS utc

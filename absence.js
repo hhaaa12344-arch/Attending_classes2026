@@ -24,7 +24,7 @@ async function processCompletedDays(pool,timeZone) {
           AND earlier.day>=((e.started_at AT TIME ZONE 'UTC') AT TIME ZONE $1)::date AND earlier.deadline>now())
     ), totals AS (
       SELECT p.student_id,p.stage_season_id,p.day,COUNT(l.id)::int AS lesson_count,
-        COUNT(a.id) FILTER(WHERE a.listened_at<=l.active_until)::int AS attended,
+        COUNT(a.id) FILTER(WHERE a.listened_at<=l.active_until OR a.marking_kind='admin_late')::int AS attended,
         EXISTS(SELECT 1 FROM student_leaves sl WHERE sl.student_id=p.student_id
           AND (sl.stage_season_id=p.stage_season_id OR sl.stage_season_id IS NULL)
           AND sl.status IN ('approved','ended') AND p.day BETWEEN sl.start_date AND sl.end_date) AS excused
@@ -55,4 +55,35 @@ async function processCompletedDays(pool,timeZone) {
     await c.query('COMMIT');return inserted.rows;
   }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }
-module.exports={processCompletedDays};
+// Called inside the admin transaction under the same advisory lock as the scheduler.
+async function refreshAdministrativeAttendance(c,studentIds,seasonId,timeZone) {
+  await c.query(`WITH counts AS (
+    SELECT d.id,COUNT(a.id) FILTER (WHERE a.listened_at<=l.active_until OR a.marking_kind='admin_late')::int AS attended
+    FROM student_attendance_days d JOIN enrollments en ON en.student_id=d.student_id AND en.stage_season_id=d.stage_season_id
+    JOIN lessons l ON l.stage_season_id=d.stage_season_id
+      AND ((l.activated_at AT TIME ZONE 'UTC') AT TIME ZONE $3)::date=d.attendance_date
+      AND l.activated_at>=en.started_at AND (en.ended_at IS NULL OR l.activated_at<=en.ended_at)
+    LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=d.student_id
+    WHERE d.student_id=ANY($1::int[]) AND d.stage_season_id=$2 GROUP BY d.id
+  ) UPDATE student_attendance_days d SET attended_on_time_count=counts.attended,
+    missed_lesson_count=GREATEST(0,d.lesson_count-counts.attended),is_full_absence=(NOT d.is_excused_leave AND counts.attended=0)
+    FROM counts WHERE d.id=counts.id`,[studentIds,seasonId,timeZone]);
+  await c.query(`WITH ordered AS (
+    SELECT d.*,SUM(CASE WHEN NOT d.is_full_absence AND NOT d.is_excused_leave THEN 1 ELSE 0 END)
+      OVER(PARTITION BY d.student_id,d.stage_season_id ORDER BY d.attendance_date) AS break_group
+    FROM student_attendance_days d WHERE student_id=ANY($1::int[]) AND stage_season_id=$2
+  ), streaks AS (
+    SELECT id,CASE WHEN is_full_absence THEN COUNT(*) FILTER(WHERE is_full_absence)
+      OVER(PARTITION BY student_id,stage_season_id,break_group ORDER BY attendance_date) ELSE 0 END::int AS streak FROM ordered
+  ) UPDATE student_attendance_days d SET absence_streak=s.streak FROM streaks s WHERE s.id=d.id`,[studentIds,seasonId]);
+  // Withdraw pending snapshots; the existing scheduler can queue corrected notices.
+  const withdrawn=await c.query(`DELETE FROM notification_outbox o WHERE o.status='pending' AND (
+    (o.delivery_mark->>'kind'='student_absence' AND (o.delivery_mark->>'id')::bigint IN
+      (SELECT id FROM student_attendance_days WHERE student_id=ANY($1::int[]) AND stage_season_id=$2))
+    OR (o.delivery_mark->>'kind'='admin_absence' AND EXISTS(SELECT 1 FROM jsonb_array_elements_text(o.delivery_mark->'ids') item(id)
+      JOIN student_attendance_days d ON d.id=item.id::bigint WHERE d.student_id=ANY($1::int[]) AND d.stage_season_id=$2)))
+    RETURNING delivery_mark`,[studentIds,seasonId]);
+  const resetIds=withdrawn.rows.flatMap(r=>r.delivery_mark?.kind==='admin_absence'?r.delivery_mark.ids:[]);
+  if(resetIds.length)await c.query('UPDATE student_attendance_days SET admin_alert_queued_at=NULL WHERE id=ANY($1::bigint[]) AND admin_alert_sent_at IS NULL',[resetIds]);
+}
+module.exports={processCompletedDays,refreshAdministrativeAttendance};

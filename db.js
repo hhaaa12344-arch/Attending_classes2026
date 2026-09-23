@@ -139,6 +139,10 @@ async function initSchema() {
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_chat_id BIGINT;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_message_id BIGINT;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS reminder_sent BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE attendance ADD COLUMN IF NOT EXISTS marking_kind TEXT NOT NULL DEFAULT 'student'
+      CHECK (marking_kind IN ('student','admin_late'));
+    ALTER TABLE attendance ADD COLUMN IF NOT EXISTS marked_by BIGINT;
+    ALTER TABLE attendance ADD COLUMN IF NOT EXISTS admin_note TEXT;
     ALTER TABLE channels ADD COLUMN IF NOT EXISTS public_link TEXT;
   `);
 
@@ -1364,7 +1368,7 @@ const getSubjectAttendanceForTeacher = (subjectId, stageSeasonId) =>
       `SELECT st.id AS student_id, st.full_name,
               COUNT(l.id) AS total_lessons,
               -- يُحتسب الحضور المؤشَّر ضمن مهلة الدرس فقط، كما في تقريري الطالب والأدمن
-              COUNT(a.id) FILTER (WHERE a.listened_at <= l.active_until) AS attended_lessons
+              COUNT(a.id) FILTER (WHERE (a.listened_at <= l.active_until OR a.marking_kind='admin_late')) AS attended_lessons
        FROM enrollments e
        JOIN students st ON st.id=e.student_id
        LEFT JOIN lessons l ON l.subject_id=$1 AND l.stage_season_id=$2
@@ -2469,12 +2473,12 @@ const getStageSeasonReport = (stageSeasonId, timeZone = 'Asia/Baghdad') =>
               r.season_name, r.season_number, r.recency_rank, r.is_active, r.started_at, r.ended_at,
               sub.id AS subject_id, sub.name AS subject_name,
               COUNT(l.id) AS total_lessons,
-              COUNT(a.id) FILTER (WHERE a.listened_at <= l.active_until) AS attended_lessons,
+              COUNT(a.id) FILTER (WHERE (a.listened_at <= l.active_until OR a.marking_kind='admin_late')) AS attended_lessons,
               COALESCE(
                 STRING_AGG(
                   TO_CHAR(timezone($2, a.listened_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI'),
                   ' | ' ORDER BY a.listened_at
-                ) FILTER (WHERE a.listened_at <= l.active_until),
+                ) FILTER (WHERE (a.listened_at <= l.active_until OR a.marking_kind='admin_late')),
                 ''
               ) AS attendance_dates,
               COALESCE((
@@ -2520,12 +2524,12 @@ const getStudentSeasonReport = (studentId, stageSeasonId = null, timeZone = 'Asi
               e.status AS enrollment_status,
               sub.id AS subject_id, sub.name AS subject_name,
               COUNT(l.id) AS total_lessons,
-              COUNT(a.id) FILTER (WHERE a.listened_at <= l.active_until) AS attended_lessons,
+              COUNT(a.id) FILTER (WHERE (a.listened_at <= l.active_until OR a.marking_kind='admin_late')) AS attended_lessons,
               COALESCE(
                 STRING_AGG(
                   TO_CHAR(timezone(${timeZoneParam}, a.listened_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI'),
                   ' | ' ORDER BY a.listened_at
-                ) FILTER (WHERE a.listened_at <= l.active_until),
+                ) FILTER (WHERE (a.listened_at <= l.active_until OR a.marking_kind='admin_late')),
                 ''
               ) AS attendance_dates,
               COALESCE((

@@ -6,6 +6,7 @@ const {validateTeacherInitData}=require('./teacherAuth');
 const {positiveInt,appError,validScore}=require('./integrity');
 
 function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
+  const studentContact=require('./studentContact').createStudentContact(db.pool);
   const sessions=createSessions({ttlMs:30*60*1000,max:2000});
   const authLimits=new Map();
 
@@ -155,6 +156,8 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
 
     if(req.method==='GET'){
       if(route==='/dashboard')result=await dashboard(actor);
+      else if(route==='/student-contact')result=await studentContact.search({actorId:actor.id,role:'teacher',subjectId:q.subjectId,q:q.q||'',page:q.page||0});
+      else if(/^\/student-contact\/\d+$/.test(route))result=await studentContact.history({actorId:actor.id,role:'teacher',studentId:positiveInt(route.split('/')[2]),subjectId:q.subjectId});
       else if(route==='/subjects')result=await teacherSubjects(actor.teacherId);
       else if(route==='/attendance'){
         const {subjectId,seasonId}=await requireOwnedSubject(actor,q.subjectId,q.seasonId);
@@ -191,7 +194,8 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
 
     if(req.method==='POST'){
       const body=await readJson(req);let m;
-      if((m=/^\/sessions\/(\d+)\/end$/.exec(route))){
+      if(route==='/student-contact')result=await studentContact.send({...body,actorId:actor.id,role:'teacher'});
+      else if((m=/^\/sessions\/(\d+)\/end$/.exec(route))){
         const sessionId=positiveInt(m[1]);
         const allowed=(await db.pool.query(`
           SELECT 1 FROM mubahatha_sessions ms

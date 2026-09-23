@@ -219,6 +219,7 @@ const STUDENT_MENU_BUTTONS = new Set([
 // زر تعبئة مرئي كمساحة فارغة لرفع زر لوحة الأستاذ عن حافة شاشة الهاتف.
 const TEACHER_MENU_SPACER = '\u3164';
 const TEACHER_MENU_BUTTONS = new Set([
+  '💬 التواصل مع طالب معين',
   '🔗 روابط المعهد',
   '🚪 الخروج من المعاينة',
   '📚 موادي', '📊 حضور موادي', '👥 المجموعات',
@@ -228,6 +229,7 @@ const TEACHER_MENU_BUTTONS = new Set([
 ]);
 
 const ADMIN_MENU_BUTTONS = new Set([
+  '💬 التواصل مع طالب معين',
   GUIDE_ADMIN_BUTTON,
   BACKUP_BUTTON,
   '⚙️ إدارة روابط المعهد',
@@ -391,6 +393,7 @@ function teacherMainMenu() {
     [replyButton('✏️ تحرير الدرجات'), replyButton('📄 تقارير الطلبة')],
     [replyButton('🔗 روابط المجموعات')],
     [replyButton('🔗 روابط المعهد')],
+    [replyButton('💬 التواصل مع طالب معين')],
     [replyButton('🖥️ فتح لوحة الأستاذ')],
     [replyButton(TEACHER_MENU_SPACER)],
   ]).resize();
@@ -402,6 +405,7 @@ function adminMainMenu() {
     ['🟢 تفعيل درس يدويًا', '📊 تقرير الحضور'],
     ['🛠️ إدارة الدروس المفعّلة'],
     ['🎓 إدارة الطلبة', '🔗 ربط قناة بمرحلة'],
+    ['💬 التواصل مع طالب معين'],
     ['📡 القنوات المرتبطة', '🏷️ المواد والهاشتاغات'],
     ['🩺 تشخيص مشاكل القنوات'],
     ['⚙️ إدارة المراحل', '🗓️ بدء موسم جديد'],
@@ -422,6 +426,7 @@ function adminMainMenu() {
 
 function studentActionsKeyboard(studentId, isActive = true) {
   const rows = [
+    [callbackButton('💬 التواصل مع هذا الطالب', `contact:select:admin:${studentId}:0`)],
     [callbackButton('✏️ تعديل الاسم', `stu_edit_name:${studentId}`)],
     [callbackButton('🔁 تغيير المرحلة', `stu_edit_stage:${studentId}`)],
     [callbackButton('📊 تقرير كل المواسم', `stu_report:${studentId}`)],
@@ -1302,6 +1307,27 @@ bot.on('text', async (ctx, next) => {
 
   const state = userState.get(ctx.from.id);
   if (!state) return next();
+  if(state.action==='contact_search'){
+    const q=String(ctx.message.text||'').trim();
+    if(!q||q.length>150)return ctx.reply('أرسل الاسم أو جزءًا منه، حتى 150 حرفًا.');
+    userState.set(ctx.from.id,{...state,action:'contact_results',q});
+    return showContactStudents(ctx,state.role,state.subjectId||0,q,0);
+  }
+  if(state.action==='contact_compose'){
+    const message=String(ctx.message.text||'').trim();
+    if(!message||message.length>3000)return ctx.reply('أرسل رسالة نصية من 1 إلى 3000 حرف، أو اضغط «❌ إلغاء العملية».');
+    if(isInPreview(ctx))return ctx.reply('اخرج من وضع المعاينة أولًا.');
+    const role=isAdmin(ctx)?'admin':await db.getTeacherByTelegramId(ctx.from.id)?'teacher':null;
+    if(role!==state.role)return ctx.reply('انتهت صلاحية هذه الخطوة. ابدأ البحث من جديد.');
+    try{
+      const saved=await require('./studentContact').createStudentContact(db.pool).send({
+        actorId:ctx.from.id,role,studentId:state.studentId,subjectId:state.subjectId||null,
+        message,contextKind:state.contextKind||(state.reportId?'report':null),contextId:state.contextId||state.reportId||null,
+        requestKey:`contact:${ctx.from.id}:${ctx.message.message_id}`});
+      userState.delete(ctx.from.id);
+      return ctx.reply(`حُفظت رسالتك للطالب للإرسال عبر البوت ✅\nرقم الرسالة: ${saved.id}`,role==='admin'?adminMainMenu():teacherMainMenu());
+    }catch(err){return ctx.reply(`تعذر حفظ الرسالة: ${err.message}`);}
+  }
   if (state.action === 'awaiting_onboarding_ack') {
     return ctx.reply('اضغط زر «ابدأ التسجيل» أسفل الدليل، أو «لديّ كود تفعيل / نقل حساب». لفتح الدليل مجددًا أرسل /guide.');
   }
@@ -2214,6 +2240,7 @@ async function openLeaveRequests(ctx) {
           callbackButton('✅ موافقة', `leave_approve:${leave.id}`),
           callbackButton('❌ رفض', `leave_reject:${leave.id}`),
         ],
+        [callbackButton('💬 الرد على الطالب',`contact:leave:${leave.id}`)],
       ])
     );
   }
@@ -2221,6 +2248,74 @@ async function openLeaveRequests(ctx) {
 }
 
 bot.hears('🌴 طلبات الإجازة', openLeaveRequests);
+
+const studentContact = require('./studentContact').createStudentContact(db.pool);
+async function showContactStudents(ctx, role, subjectId, query, page) {
+  try {
+    const result = await studentContact.search({actorId:ctx.from.id,role,subjectId:subjectId||null,q:query,page});
+    const rows=result.rows.map(st=>[callbackButton(limitButtonText(`${st.full_name} — ${st.stage_name||st.subject_name||''}`,52),`contact:select:${role}:${st.id}:${subjectId||0}`)]);
+    const nav=[];
+    if(page>0)nav.push(callbackButton('السابق',`contact:page:${role}:${subjectId||0}:${page-1}`));
+    if((page+1)*20<result.total)nav.push(callbackButton('التالي',`contact:page:${role}:${subjectId||0}:${page+1}`));
+    if(nav.length)rows.push(nav);
+    return ctx.reply(`نتائج البحث عن «${query}»: ${result.total} طالب. اختر الطالب للتواصل:`,rows.length?Markup.inlineKeyboard(rows):undefined);
+  } catch(err) { return ctx.reply(`تعذر البحث: ${err.message}`); }
+}
+bot.hears('💬 التواصل مع طالب معين',async ctx=>{
+  if(isInPreview(ctx))return ctx.reply('اخرج من وضع المعاينة أولًا.');
+  if(isAdmin(ctx)){
+    userState.set(ctx.from.id,{action:'contact_search',role:'admin',subjectId:0});
+    return ctx.reply('أرسل اسم الطالب أو جزءًا منه للبحث.');
+  }
+  return pickTeacherSubject(ctx,'contact:subject','اختر مادة الطالب أولًا:');
+});
+bot.action(/^contact:subject:(\d+):(\d+)$/,async ctx=>{
+  const subjectId=Number(ctx.match[1]),seasonId=Number(ctx.match[2]);
+  if(isInPreview(ctx)||!await teacherOwnsSubject(ctx,subjectId,seasonId))return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();
+  userState.set(ctx.from.id,{action:'contact_search',role:'teacher',subjectId});
+  return ctx.reply('أرسل اسم الطالب أو جزءًا منه للبحث في هذه المادة.');
+});
+bot.action(/^contact:page:(admin|teacher):(\d+):(\d+)$/,async ctx=>{
+  const role=ctx.match[1],subjectId=Number(ctx.match[2]),page=Number(ctx.match[3]);
+  const state=userState.get(ctx.from.id);
+  if(isInPreview(ctx)||!state?.q||state.role!==role||Number(state.subjectId||0)!==subjectId||
+    (role==='admin'?!isAdmin(ctx):!await effectiveTeacher(ctx)))return ctx.answerCbQuery('ابدأ البحث من جديد.');
+  await ctx.answerCbQuery();return showContactStudents(ctx,role,subjectId,state.q,page);
+});
+bot.action(/^contact:select:(admin|teacher):(\d+):(\d+)(?::(\d+))?$/,async ctx=>{
+  const role=ctx.match[1],studentId=Number(ctx.match[2]),subjectId=Number(ctx.match[3]),reportId=Number(ctx.match[4]||0);
+  if(isInPreview(ctx)||role==='admin'&&!isAdmin(ctx)||role==='teacher'&&!await effectiveTeacher(ctx))return ctx.answerCbQuery('غير مصرح.');
+  try {
+    // The selected row is checked again, because old Telegram buttons can outlive enrollment changes.
+    const st=(await db.pool.query('SELECT id,full_name,telegram_id FROM students WHERE id=$1',[studentId])).rows[0];
+    if(!st)throw Error('الطالب غير موجود.');
+    await studentContact.history({actorId:ctx.from.id,role,studentId,subjectId:subjectId||null});
+    if(reportId&&role==='teacher'){
+      const ok=await db.pool.query('SELECT 1 FROM student_reports WHERE id=$1 AND student_id=$2 AND subject_id=$3',[reportId,studentId,subjectId]);
+      if(!ok.rowCount)throw Error('التقرير لا يخص هذا الطالب.');
+    }
+    await ctx.answerCbQuery();
+    const rows=[[callbackButton('✉️ أرسل رسالة عبر البوت',`contact:compose:${role}:${studentId}:${subjectId}:${reportId}`)]];
+    if(st.telegram_id)rows.unshift([Markup.button.url('فتح حساب الطالب في تيليغرام',`tg://user?id=${st.telegram_id}`)]);
+    return ctx.reply(`الطالب: ${st.full_name}\nيمكنك فتح حسابه أو إرسال رسالة خاصة عبر البوت. قد تمنع خصوصية تيليغرام فتح المحادثة المباشرة.`,Markup.inlineKeyboard(rows));
+  } catch(err) { return ctx.answerCbQuery(err.message,{show_alert:true}); }
+});
+bot.action(/^contact:compose:(admin|teacher):(\d+):(\d+):(\d+)$/,async ctx=>{
+  const role=ctx.match[1],studentId=Number(ctx.match[2]),subjectId=Number(ctx.match[3]),reportId=Number(ctx.match[4]);
+  if(isInPreview(ctx)||role==='admin'&&!isAdmin(ctx)||role==='teacher'&&!await effectiveTeacher(ctx))return ctx.answerCbQuery('غير مصرح.');
+  try{await studentContact.history({actorId:ctx.from.id,role,studentId,subjectId:subjectId||null});}
+  catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
+  userState.set(ctx.from.id,{action:'contact_compose',role,studentId,subjectId,reportId});
+  await ctx.answerCbQuery();return ctx.reply('اكتب الرسالة التي تريد إرسالها لهذا الطالب (حتى 3000 حرف).');
+});
+bot.action(/^contact:leave:(\d+)$/,async ctx=>{
+  if(!isAdmin(ctx)||isInPreview(ctx))return ctx.answerCbQuery('غير مصرح.');
+  const leave=await db.getLeaveById(Number(ctx.match[1]));
+  if(!leave)return ctx.answerCbQuery('طلب الإجازة غير موجود.');
+  userState.set(ctx.from.id,{action:'contact_compose',role:'admin',studentId:leave.student_id,subjectId:0,contextKind:'leave',contextId:leave.id});
+  await ctx.answerCbQuery();return ctx.reply(`اكتب ردك على طلب إجازة ${leave.full_name}:`);
+});
 
 async function decideLeaveAction(ctx, leaveId, approve) {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
@@ -4414,8 +4509,9 @@ bot.action(/stex_ans:(\d+):(\d+):(\d+)/, async (ctx) => {
 
   // يُفحص وقت الإغلاق عند كل إجابة، فلا تُقبل إجابة بعد انتهاء مهلة الامتحان
   const examNow = await studies.getExamById(attempt.exam_id);
-  if (!examNow || new Date() > new Date(examNow.closes_at)) {
-    await studies.finalizeAttempt(attemptId);
+  if (!examNow || !await studies.isExamAvailable(attempt.exam_id,student.id)) {
+    const expiredResult=await studies.finalizeAttempt(attemptId,{onlyIfClosed:true});
+    if(!expiredResult)return ctx.answerCbQuery('الامتحان غير متاح الآن؛ راجع نافذة الفتح الخاصة بك ثم أعد المحاولة.',{show_alert:true});
     await ctx.answerCbQuery('انتهت مهلة الامتحان.', { show_alert: true });
     const done = await studies.getAttemptById(attemptId);
     return ctx.reply(
@@ -4437,7 +4533,8 @@ bot.action(/stex_ans:(\d+):(\d+):(\d+)/, async (ctx) => {
   const answer = options[index];
   if (answer === undefined) return ctx.answerCbQuery('خيار غير صالح.');
 
-  await studies.submitAnswer(attemptId, questionId, answer);
+  try {await studies.submitAnswer(attemptId, questionId, answer);}
+  catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
   await ctx.answerCbQuery('سُجّلت إجابتك');
   await ctx.editMessageText(`السؤال ${question.position}: ${question.prompt}\n\nإجابتك: ${answer} ✔️`);
   return sendNextExamQuestion(ctx, attemptId, attempt.exam_id);
@@ -5330,6 +5427,7 @@ bot.action(/^sr_stu:(\d+):(\d+):(\d+)(?::(\d+):(\d+))?$/, async (ctx) => {
         `sr_item:${r.id}:${studentId}:${subjectId}:${ssId}`
       ),
     ]);
+  rows.push([callbackButton('💬 الرد على أحدث تقرير',isAdmin(ctx)?`contact:select:admin:${studentId}:0`:`contact:select:teacher:${studentId}:${subjectId}:${reports[0].id}`)]);
   const nav=[];
   if(page>0)nav.push(callbackButton('تقارير سابقة',`sr_stu:${studentId}:${subjectId}:${ssId}:${groupId}:${page-1}`));
   if((page+1)*10<Number(reports[0].total_count))nav.push(callbackButton('تقارير تالية',`sr_stu:${studentId}:${subjectId}:${ssId}:${groupId}:${page+1}`));

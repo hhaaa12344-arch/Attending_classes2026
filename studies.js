@@ -1,8 +1,9 @@
 // studies.js — نظام المباحثات والامتحانات: المباحثات والتقارير والامتحانات والدرجات.
 // وحدة مستقلة تشارك مجمع الاتصالات نفسه مع db.js (لا استيراد دائري: هذه تستورد db، وdb لا تستوردها).
 const { pool } = require('./db');
+const {examWindowSql,enrollmentSql}=require('./examAccess');
 const { appError, positiveInt, pageOptions, validScore } = require('./integrity');
-const {startOrResumeAttempt,submitAnswer,finalizeAttempt,overrideStudentGrade}=require('./academicTransactions').createAcademicTransactions(pool);
+const {startOrResumeAttempt,submitAnswer,finalizeAttempt,isExamAvailable,overrideStudentGrade}=require('./academicTransactions').createAcademicTransactions(pool);
 
 // توزيع الدرجات في الموسم (قابل للتغيير من مكان واحد)
 // الامتحان يفتح ليلًا في الساعة المحددة من اليوم المختار ويستمر عدد الساعات المُدخَل.
@@ -808,8 +809,10 @@ const getOpenExamsForStudent = (studentId) =>
        JOIN subjects sub ON sub.id=e.subject_id
        JOIN enrollments en ON en.stage_season_id=e.stage_season_id
             AND en.student_id=$1 AND en.status='active'
+       JOIN stage_seasons ss ON ss.id=e.stage_season_id
+       JOIN students st ON st.id=en.student_id
        LEFT JOIN exam_attempts a ON a.exam_id=e.id AND a.student_id=$1
-       WHERE e.status='published' AND now() BETWEEN e.opens_at AND e.closes_at
+       WHERE e.status='published' AND ${enrollmentSql} AND ${examWindowSql('e','$1')}
          AND a.submitted_at IS NULL
        ORDER BY e.closes_at`,
       [studentId]
@@ -1844,6 +1847,7 @@ module.exports = {
   getExamById,
   listExamsForSubject,
   getOpenExamsForStudent,
+  isExamAvailable,
   startOrResumeAttempt,
   getNextUnansweredQuestion,
   submitAnswer,

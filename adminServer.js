@@ -16,6 +16,8 @@ async function readJson(req) {
   catch{throw appError('بيانات غير صالحة.');}
 }
 function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,origin}) {
+  const overrides=require('./adminOverrides').createAdminOverrides(db.pool);
+  const studentContact=require('./studentContact').createStudentContact(db.pool);
   const sessions=createSessions();const authLimits=new Map();let active=0;
   const teacherWeb=require('./teacherWeb').createTeacherWeb({db,studies,scheduler,botToken,origin,readJson});
   const json=(res,code,value)=>{res.writeHead(code,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
@@ -64,10 +66,14 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           res.setHeader('Content-Disposition',`attachment; filename="lesson-attendance-${positiveInt(q.stageId)}.md"`);
           res.end(content);return;
         }
+        else if(/^\/lessons\/\d+\/admin-options$/.test(route))result=await overrides.options('lesson',positiveInt(route.split('/')[2]),q);
+        else if(/^\/exams\/\d+\/admin-options$/.test(route))result=await overrides.options('exam',positiveInt(route.split('/')[2]),q);
         else if(route==='/lesson-management')result=await adminData.managedItems('lessons',q);
         else if(route==='/session-management')result=await adminData.managedItems('sessions',q);
         else if(route==='/lesson-attendance')result=await adminData.lessonAttendance(q);
         else if(route==='/students')result=await adminData.students(q);
+        else if(route==='/student-contact')result=await studentContact.search({actorId:actor.id,role:'admin',q:q.q||'',page:q.page||0});
+        else if(/^\/student-contact\/\d+$/.test(route))result=await studentContact.history({actorId:actor.id,role:'admin',studentId:positiveInt(route.split('/')[2])});
         else if(/^\/students\/\d+$/.test(route))result=await adminData.student(positiveInt(route.split('/')[2]));
         else if(route==='/leaves')result=await adminData.leaves(q);
         else if(route==='/reports')result=await adminData.reports(q);
@@ -77,7 +83,9 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(/^\/exams\/\d+$/.test(route)){
           const id=positiveInt(route.split('/')[2]);const exam=await studies.getExamById(id);
           if(!exam)throw appError('الامتحان غير موجود.','NOT_FOUND',404);
-          result={...exam,questions:await studies.listExamQuestions(id)};
+          const studentWindows=(await db.pool.query(`SELECT w.*,st.full_name FROM exam_student_windows w
+            JOIN students st ON st.id=w.student_id WHERE w.exam_id=$1 ORDER BY w.updated_at DESC`,[id])).rows;
+          result={...exam,questions:await studies.listExamQuestions(id),studentWindows};
         }
         else if(route==='/exams')result=(await db.pool.query(`SELECT e.*,sub.name AS subject_name FROM exams e JOIN subjects sub ON sub.id=e.subject_id
           WHERE e.stage_season_id=$1 ORDER BY sub.name,e.exam_number`,[positiveInt(q.seasonId)])).rows;
@@ -123,7 +131,8 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else throw appError('الصفحة غير موجودة.','NOT_FOUND',404);
       } else if(req.method==='POST'||req.method==='PATCH') {
         const body=await readJson(req);let m;
-        if((m=/^\/students\/(\d+)$/.exec(route))&&req.method==='PATCH')result=await adminData.updateStudent(positiveInt(m[1]),body,actor.id);
+        if(route==='/student-contact'&&req.method==='POST')result=await studentContact.send({...body,actorId:actor.id,role:'admin'});
+        else if((m=/^\/students\/(\d+)$/.exec(route))&&req.method==='PATCH')result=await adminData.updateStudent(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/stage-seasons\/(\d+)\/participation-settings$/.exec(route))&&req.method==='PATCH')result=await adminData.saveParticipationSettings(positiveInt(m[1]),body,actor.id);
         else if(route==='/teachers'&&req.method==='POST'){
           if(typeof body.fullName!=='string'||body.fullName.trim().length<3||body.fullName.length>200)throw appError('اسم الأستاذ غير صالح.');
@@ -255,6 +264,9 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if((m=/^\/sessions\/(\d+)\/(reopen|mark-all|cancel)$/.exec(route))&&req.method==='POST'){
           result=await adminData.manageSession(positiveInt(m[1]),m[2],actor.id);
         }
+        else if((m=/^\/lessons\/(\d+)\/subject$/.exec(route))&&req.method==='PATCH')result=await overrides.correctSubject(positiveInt(m[1]),body,actor.id);
+        else if((m=/^\/lessons\/(\d+)\/late-attendance$/.exec(route))&&req.method==='POST')result=await overrides.lateAttendance(positiveInt(m[1]),body,actor.id);
+        else if((m=/^\/exams\/(\d+)\/student-window$/.exec(route))&&req.method==='POST')result=await overrides.reopenExam(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/lessons\/(\d+)\/reopen$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]);
           const reopened=await db.reopenLesson(id);

@@ -23,6 +23,17 @@ async function initIntegritySchema(pool) {
       entity_type TEXT NOT NULL, entity_id INTEGER NOT NULL,
       before_data JSONB, after_data JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    CREATE TABLE IF NOT EXISTS exam_student_windows (
+      exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      opens_at TIMESTAMPTZ NOT NULL,
+      closes_at TIMESTAMPTZ NOT NULL,
+      note TEXT CHECK (length(note) <= 500),
+      created_by BIGINT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (exam_id,student_id),
+      CHECK (closes_at > opens_at)
+    );
     CREATE TABLE IF NOT EXISTS notification_outbox (
       id BIGSERIAL PRIMARY KEY, dedupe_key TEXT NOT NULL UNIQUE,
       chat_id BIGINT NOT NULL, method TEXT NOT NULL DEFAULT 'sendMessage',
@@ -32,6 +43,21 @@ async function initIntegritySchema(pool) {
       lease_until TIMESTAMPTZ, expires_at TIMESTAMPTZ,
       last_error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), sent_at TIMESTAMPTZ
     );
+    CREATE TABLE IF NOT EXISTS student_contact_messages (
+      id BIGSERIAL PRIMARY KEY,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      actor_id BIGINT NOT NULL,
+      actor_role TEXT NOT NULL CHECK (actor_role IN ('admin','teacher')),
+      teacher_id INTEGER REFERENCES teachers(id) ON DELETE SET NULL,
+      subject_id INTEGER REFERENCES subjects(id) ON DELETE SET NULL,
+      context_kind TEXT CHECK (context_kind IN ('leave','report')),
+      context_id INTEGER,
+      message_text TEXT NOT NULL CHECK (char_length(message_text) BETWEEN 1 AND 3000),
+      request_key TEXT NOT NULL UNIQUE,
+      outbox_id BIGINT REFERENCES notification_outbox(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_student_contact_messages_student ON student_contact_messages(student_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_outbox_due ON notification_outbox(available_at, priority, id)
       WHERE status IN ('pending','sending');
     ALTER TABLE notification_outbox ADD COLUMN IF NOT EXISTS delivery_mark JSONB;
