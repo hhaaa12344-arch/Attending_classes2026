@@ -625,6 +625,12 @@ async function replyStudentScreen(ctx, student, text, extra = undefined, options
   return trackStudentUiMessage(student, message, messageKind);
 }
 
+function withStudentName(student, text) {
+  return `👤 الطالب: ${student.full_name}\n\n${text}`;
+}
+
+const REPORT_WEEKLY_REMINDER = '🗓️ تذكير: أرسل تقرير كل مادة مرة واحدة أسبوعيًا، وليس يوميًا.';
+
 function formatStudentSeasonActivity(activity) {
   if (!activity) return '📋 لا يوجد موسم دراسي نشط في حسابك حاليًا.';
   const leaves = activity.leaves || [];
@@ -959,8 +965,8 @@ async function sendStudentReportMessages(ctx, studentId, stageSeasonId = null, o
   const rows = await db.getStudentSeasonReport(studentId, stageSeasonId, ATTENDANCE_TIME_ZONE);
   const student = options.cleanUi === false ? null : options.student || (await db.getStudentById(studentId));
   if (student) await beginStudentScreen(ctx, student);
-  for (const text of formatStudentReport(rows)) {
-    const message = await ctx.reply(text);
+  for (const [index, text] of formatStudentReport(rows).entries()) {
+    const message = await ctx.reply(index === 0 && student ? withStudentName(student, text) : text);
     if (student&&!isInPreview(ctx)) await trackStudentUiMessage(student, message);
   }
   return rows;
@@ -2096,7 +2102,7 @@ async function openMyReport(ctx) {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   const seasons = await db.listStudentSeasons(student.id);
-  if (seasons.length === 0) return replyStudentScreen(ctx, student, 'لا توجد بيانات دراسية مسجلة حتى الآن.');
+  if (seasons.length === 0) return replyStudentScreen(ctx, student, withStudentName(student, 'لا توجد بيانات دراسية مسجلة حتى الآن.'));
   if (seasons.length === 1) {
     await sendStudentReportMessages(ctx, student.id, seasons[0].id, { student });
     return undefined;
@@ -2107,7 +2113,7 @@ async function openMyReport(ctx) {
       `my_report_season:${season.id}`
     ),
   ]);
-  return replyStudentScreen(ctx, student, 'اختر الموسم الذي تريد عرض تقريره:', Markup.inlineKeyboard(rows));
+  return replyStudentScreen(ctx, student, withStudentName(student, 'اختر الموسم الذي تريد عرض تقريره:'), Markup.inlineKeyboard(rows));
 }
 
 bot.hears(['📊 تقرير الحضور','📊 تقريري'], openMyReport);
@@ -2123,7 +2129,7 @@ bot.action(/my_report_season:(\d+)/, async (ctx) => {
   }
   await ctx.answerCbQuery();
   const rows = await sendStudentReportMessages(ctx, student.id, seasonId, { student });
-  if (rows.length === 0) return replyStudentScreen(ctx, student, 'لا توجد بيانات لهذا الموسم.');
+  if (rows.length === 0) return replyStudentScreen(ctx, student, withStudentName(student, 'لا توجد بيانات لهذا الموسم.'));
   return undefined;
 });
 
@@ -2134,7 +2140,7 @@ async function openStudentSeasonActivity(ctx) {
     student.id,
     currentDateInTimeZone(ATTENDANCE_TIME_ZONE)
   );
-  return replyStudentScreen(ctx, student, formatStudentSeasonActivity(activity), studentMainMenu(await effectiveStudent(ctx)));
+  return replyStudentScreen(ctx, student, withStudentName(student, formatStudentSeasonActivity(activity)), studentMainMenu(await effectiveStudent(ctx)));
 }
 
 bot.hears(STUDENT_ACTIVITY_BUTTON, openStudentSeasonActivity);
@@ -2148,7 +2154,7 @@ bot.hears(LEGACY_STUDENT_ACTIVITY_BUTTON_2, openStudentSeasonActivity);
 async function openLeaveRequest(ctx) {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
-  if (!student.is_active) return ctx.reply('حسابك مؤرشف حاليًا.');
+  if (!student.is_active) return ctx.reply(withStudentName(student, 'حسابك مؤرشف حاليًا.'));
 
   const today = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
   const [active, pending, usage] = await Promise.all([
@@ -2160,7 +2166,7 @@ async function openLeaveRequest(ctx) {
     return replyStudentScreen(
       ctx,
       student,
-      'لا يوجد موسم دراسي نشط في حسابك حاليًا، لذلك لا يمكن تقديم طلب إجازة.',
+      withStudentName(student, 'لا يوجد موسم دراسي نشط في حسابك حاليًا، لذلك لا يمكن تقديم طلب إجازة.'),
       studentMainMenu(await effectiveStudent(ctx))
     );
   }
@@ -2168,9 +2174,9 @@ async function openLeaveRequest(ctx) {
     return replyStudentScreen(
       ctx,
       student,
-      `لديك إجازة معتمدة من ${active.start_date.toISOString().slice(0, 10)} ` +
+      withStudentName(student, `لديك إجازة معتمدة من ${active.start_date.toISOString().slice(0, 10)} ` +
         `إلى ${active.end_date.toISOString().slice(0, 10)}.\n` +
-        `الرصيد المتبقي في الموسم: ${usage.remainingDays} من ${usage.maxDays} أيام.`,
+        `الرصيد المتبقي في الموسم: ${usage.remainingDays} من ${usage.maxDays} أيام.`),
       Markup.inlineKeyboard([[callbackButton('إلغاء الإجازة والعودة للدروس', `leave_cancel:${active.id}`, 'danger')]])
     );
   }
@@ -2178,9 +2184,9 @@ async function openLeaveRequest(ctx) {
     return replyStudentScreen(
       ctx,
       student,
-      `لديك طلب إجازة قيد المراجعة من ${pending.start_date.toISOString().slice(0, 10)} ` +
+      withStudentName(student, `لديك طلب إجازة قيد المراجعة من ${pending.start_date.toISOString().slice(0, 10)} ` +
         `إلى ${pending.end_date.toISOString().slice(0, 10)}.\n` +
-        `الرصيد المتبقي بعد احتساب الطلب المعلّق: ${usage.remainingDays} من ${usage.maxDays} أيام.`,
+        `الرصيد المتبقي بعد احتساب الطلب المعلّق: ${usage.remainingDays} من ${usage.maxDays} أيام.`),
       Markup.inlineKeyboard([[callbackButton('سحب الطلب', `leave_cancel:${pending.id}`, 'danger')]])
     );
   }
@@ -2188,7 +2194,7 @@ async function openLeaveRequest(ctx) {
     return replyStudentScreen(
       ctx,
       student,
-      `استنفدت رصيد الإجازات للموسم الحالي (${usage.maxDays} أيام)، ولا يمكن تقديم طلب جديد حتى الموسم القادم.`,
+      withStudentName(student, `استنفدت رصيد الإجازات للموسم الحالي (${usage.maxDays} أيام)، ولا يمكن تقديم طلب جديد حتى الموسم القادم.`),
       studentMainMenu(await effectiveStudent(ctx))
     );
   }
@@ -2196,10 +2202,10 @@ async function openLeaveRequest(ctx) {
   return replyStudentScreen(
     ctx,
     student,
-    'طلب إجازة 🌴\nأرسل عدد أيام الإجازة المطلوبة، مثال: 1 أو ١.\n' +
+    withStudentName(student, 'طلب إجازة 🌴\nأرسل عدد أيام الإجازة المطلوبة، مثال: 1 أو ١.\n' +
       `المتبقي لك في هذا الموسم: ${usage.remainingDays} من ${usage.maxDays} أيام.\n` +
       'ستبدأ الإجازة تلقائيًا من اليوم بعد موافقة الأدمن.\n' +
-      `للرجوع اضغط «${BACK_BUTTON}».`,
+      `للرجوع اضغط «${BACK_BUTTON}».`),
     studentMainMenu(await effectiveStudent(ctx))
   );
 }
@@ -4420,7 +4426,7 @@ bot.hears('🗓️ جدولي', async (ctx) => {
 bot.hears('📝 الامتحانات الشهرية', async (ctx) => {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
-  if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
+  if (!stageSupportsStudies(student)) return replyStudentScreen(ctx, student, withStudentName(student, 'مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.'));
 
   const open = await studies.getOpenExamsForStudent(student.id);
   const done = await studies.getStudentExamResults(student.id);
@@ -4442,8 +4448,9 @@ bot.hears('📝 الامتحانات الشهرية', async (ctx) => {
     ),
   ]);
 
-  return ctx.reply(
-    `📝 الامتحانات الشهرية\n\nالمتاحة الآن: ${open.length}\n\nدرجاتك السابقة:\n${doneLines}`,
+  return replyStudentScreen(
+    ctx, student,
+    withStudentName(student, `📝 الامتحانات الشهرية\n\nالمتاحة الآن: ${open.length}\n\nدرجاتك السابقة:\n${doneLines}`),
     rows.length ? Markup.inlineKeyboard(rows) : undefined
   );
 });
@@ -4826,15 +4833,16 @@ function modeLabel(row) {
 async function showMyParticipation(ctx) {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
-  if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
+  if (!stageSupportsStudies(student)) return replyStudentScreen(ctx, student, withStudentName(student, 'مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.'));
   const subjects = await studies.listStudentSubjects(student.id);
   if (subjects.length === 0) {
-    return ctx.reply('لا توجد مواد مشمولة بالمباحثات والتقارير في موسمك الحالي. تبقى دروسك متاحة من «دروس اليوم».');
+    return replyStudentScreen(ctx, student, withStudentName(student, 'لا توجد مواد مشمولة بالمباحثات والتقارير في موسمك الحالي. تبقى دروسك متاحة من «دروس اليوم».'));
   }
   const lines = subjects.map((s) => `• ${s.subject_name}: ${modeLabel(s)}`);
-  return ctx.reply(
-    `📖 المباحثات والتقارير في ${subjects[0].stage_name}:\n${lines.join('\n')}\n\n` +
-      'اختر المادة لفتح المباحثات أو إرسال التقارير:',
+  return replyStudentScreen(
+    ctx, student,
+    withStudentName(student, `📖 المباحثات والتقارير في ${subjects[0].stage_name}:\n${lines.join('\n')}\n\n` +
+      `اختر المادة لفتح المباحثات أو إرسال التقارير:\n\n${REPORT_WEEKLY_REMINDER}`),
     Markup.inlineKeyboard(
       subjects.map((s) => [
         callbackButton(
@@ -4876,7 +4884,7 @@ bot.action(/pm_subj:(\d+):(\d+)/, async (ctx) => {
     row.mode === 'report'
       ? '\n\nملاحظة: التحويل إلى المباحثات لا يحاسبك على الجلسات التي سبقت تحويلك، وتبقى درجة تقاريرك محسوبة لك.'
       : '';
-  return ctx.reply(`📘 ${row.subject_name}\nنمطك الحالي: ${modeLabel(row)}${note}`, Markup.inlineKeyboard(rows));
+  return replyStudentScreen(ctx, student, withStudentName(student, `📘 ${row.subject_name}\nنمطك الحالي: ${modeLabel(row)}${note}`), Markup.inlineKeyboard(rows));
 });
 
 bot.action(/pm_set:(\d+):(\d+):(mubahatha|report)/, async (ctx) => {
@@ -4974,16 +4982,16 @@ bot.action(/pm_switchok:(\d+):(\d+)/, async (ctx) => {
 bot.hears('📄 إرسال تقرير', async (ctx) => {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
-  if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
+  if (!stageSupportsStudies(student)) return replyStudentScreen(ctx, student, withStudentName(student, 'مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.'));
   const subjects = await studies.listStudentSubjects(student.id);
   const reportSubjects = subjects.filter((s) => s.mode === 'report');
   if (reportSubjects.length === 0) {
-    return ctx.reply(
-      'لست في نظام التقارير في أي مادة.\nاختر نظام التقارير من «📖 المباحثات والتقارير» أولًا.'
+    return replyStudentScreen(
+      ctx, student, withStudentName(student, `لست في نظام التقارير في أي مادة.\nاختر نظام التقارير من «📖 المباحثات والتقارير» أولًا.\n\n${REPORT_WEEKLY_REMINDER}`)
     );
   }
-  return ctx.reply(
-    'اختر المادة التي تريد إرسال تقريرها:',
+  return replyStudentScreen(
+    ctx, student, withStudentName(student, `اختر المادة التي تريد إرسال تقريرها:\n\n${REPORT_WEEKLY_REMINDER}`),
     Markup.inlineKeyboard(
       reportSubjects.map((s) => [
         callbackButton(
@@ -5014,9 +5022,9 @@ bot.action(/rep_send:(\d+):(\d+)/, async (ctx) => {
     subjectName: row.subject_name,
   });
   await ctx.answerCbQuery();
-  return ctx.reply(
-    `📄 أرسل الآن تقرير مادة «${row.subject_name}»:\n` +
-      'يمكنك إرسال ملف (PDF أو Word) أو صورة أو نص مكتوب.\nللإلغاء أرسل /start.'
+  return replyStudentScreen(
+    ctx, student, withStudentName(student, `📄 أرسل الآن تقرير مادة «${row.subject_name}»:\n` +
+      `يمكنك إرسال ملف (PDF أو Word) أو صورة أو نص مكتوب.\n\n${REPORT_WEEKLY_REMINDER}\nللإلغاء أرسل /start.`)
   );
 });
 
