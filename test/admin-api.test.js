@@ -28,7 +28,7 @@ test.after(async()=>{if(server){server.closeAllConnections();await new Promise(r
 test('admin HTTP: public shell contains no records; every data endpoint requires verified admin',async()=>{
   const shell=await fetch(base+'/admin/');assert.equal(shell.status,200);assert.match(shell.headers.get('content-security-policy'),/default-src 'none'/);
   const html=await shell.text();assert.match(html,/dir="rtl"/);assert.ok(!html.includes(student.full_name));
-  for(const route of ['/lesson-attendance?stageId=1','/stages','/students','/leaves','/reports?seasonId=1','/attendance.csv?seasonId=1','/attendance.md?seasonId=1'])assert.equal((await request(route,null,'GET',null)).status,401);
+  for(const route of ['/lesson-attendance?stageId=1','/stages','/students','/leaves','/reports?seasonId=1','/attendance.csv?seasonId=1','/attendance.md?seasonId=1','/schedule-batch-import'])assert.equal((await request(route,null,'GET',null)).status,401);
   assert.equal((await request('/auth',{initData:signed(43)},'POST',null)).status,403);
   assert.equal((await request('/auth',{initData:signed().replace('42','45')},'POST',null)).status,401);
   const auth=await request('/auth',{initData:signed()},'POST',null);assert.equal(auth.status,200);token=(await auth.json()).token;

@@ -30,6 +30,7 @@ async function setup({authorized=true}={}){
     else if(u.pathname.endsWith('/exams'))data=[{id:1,subject_name:'الفقه',title:'الشهري الأول',status:'draft'}];
     else if(u.pathname.endsWith('/exams/1'))data={id:1,title:'الشهري الأول',subject_name:'الفقه',status:'draft',questions:[{id:3,prompt:'سؤال <script>bad()</script>',question_type:'tf',correct_answer:'صح'}]};
     else if(u.pathname.endsWith('/exams/1/delete'))data={deleted:true};
+    else if(u.pathname.endsWith('/schedule-batch-import'))data={completed:true,available:false,teacherAvailability:[]};
     else if(u.pathname.endsWith('/schedule')){
       if(options.method==='POST'){
         const b=JSON.parse(options.body);
