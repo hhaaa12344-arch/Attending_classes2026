@@ -13,6 +13,10 @@ test.before(async()=>{
   app.bot.botInfo={id:12345,is_bot:true,username:'AttendanceTestBot',first_name:'test'};
 });
 test.after(async()=>{Telegram.prototype.callApi=original;if(db)await db.pool.end();});
+test('student lesson schedule advances from Thursday and Friday to the immediate Saturday',()=>{
+  assert.deepEqual(app.studentScheduleWindow('2026-09-24'),{startDate:'2026-09-26',endDate:'2026-09-30',label:'الأسبوع القادم'});
+  assert.deepEqual(app.studentScheduleWindow('2026-09-25'),{startDate:'2026-09-26',endDate:'2026-09-30',label:'الأسبوع القادم'});
+});
 async function send(id,text,data){messages.length=0;const from={id,is_bot:false,first_name:'test'};const message={message_id:messageId++,date:Math.floor(Date.now()/1000),from,chat:{id,type:'private'},text,...(text&&text.startsWith('/')?{entities:[{offset:0,length:text.split(/\s/)[0].length,type:'bot_command'}]}:{})};
   await app.bot.handleUpdate(data?{update_id:messageId,callback_query:{id:'cb'+messageId,from,data,message}}:{update_id:messageId,message});return messages;
 }
@@ -149,4 +153,20 @@ test('bot: student screens identify the student and report upload explains its w
   assert.ok(mode);
   await send(student.telegram_id,'',`rep_send:${subject.id}:${ss}`);
   assert.ok(messages.some(m=>m.text?.includes(heading)&&m.text.includes('مرة واحدة أسبوعيًا، وليس يوميًا')));
+});
+test('bot: teacher can edit a question and delete an untouched exam',async()=>{
+  const teacher=(await db.getTeacherByTelegramId(80000));
+  const exam=await studies.createExam(subject.id,ss,teacher.id,{examNumber:2,title:'موضوع أول',dateIso:'2030-01-01',hours:24});
+  const question=await studies.addExamQuestion(exam.id,{type:'tf',prompt:'سؤال قديم',correct:'صح'});
+  await send(80000,'',`ex_view:${exam.id}`);
+  assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data===`ex_edit_question:${exam.id}`)));
+  await send(80000,'',`ex_edit_question:${exam.id}`);
+  await send(80000,'',`ex_edit_question_pick:${question.id}`);
+  await send(80000,'سؤال جديد واضح');
+  await send(80000,'',`ex_edit_tfans:${question.id}:خطأ`);
+  assert.equal((await studies.getQuestionById(question.id)).correct_answer,'خطأ');
+  await send(80000,'',`ex_edit_title:${exam.id}`);await send(80000,'موضوع جديد');
+  assert.equal((await studies.getExamById(exam.id)).title,'موضوع جديد');
+  await send(80000,'',`ex_delete:${exam.id}`);await send(80000,'',`ex_delete_confirm:${exam.id}`);
+  assert.equal(await studies.getExamById(exam.id),undefined);
 });

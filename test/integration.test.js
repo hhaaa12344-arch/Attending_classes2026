@@ -29,7 +29,8 @@ test('stages and stage detail exist before any search; empty stages remain visib
 });
 test('atomic attendance: first opens after ten minutes, duplicate presses insert once, both phases complete attendance',async()=>{
   const session=await studies.openSession(group.id,teacher.id,'جلسة اختبار',1);
-  await db.pool.query("UPDATE group_memberships SET assigned_at=now()-interval '1 hour' WHERE student_id=$1 AND group_id=$2; UPDATE participation_modes SET joined_mubahatha_at=now()-interval '1 hour' WHERE student_id=$1 AND subject_id=$3 AND stage_season_id=$4",[student.id,group.id,subject.id,ss]);
+  await db.pool.query("UPDATE group_memberships SET assigned_at=now()-interval '1 hour' WHERE student_id=$1 AND group_id=$2",[student.id,group.id]);
+  await db.pool.query("UPDATE participation_modes SET joined_mubahatha_at=now()-interval '1 hour' WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3",[student.id,subject.id,ss]);
   assert.equal(await studies.markSessionAttendance(session.id,student.id,'start'),undefined,'first attendance is closed before +10 minutes');
   await db.pool.query(`UPDATE mubahatha_sessions SET opened_at=now()-interval '10 minutes',
     closes_at=now()+interval '50 minutes',start_notifications_queued=true WHERE id=$1`,[session.id]);
@@ -49,7 +50,8 @@ test('wrong group, archived student and expired window cannot insert attendance'
   assert.equal(await studies.openEndAttendance(own.id),undefined,'attendance is never extended beyond the original hour');
   const noStart=await db.createStudent(90103,'طالب نهاية بلا بداية',stage.id);
   await studies.setParticipationMode(noStart.id,subject.id,ss,'mubahatha');await studies.assignStudentToGroup(noStart.id,subject.id,ss);
-  await db.pool.query("UPDATE group_memberships SET assigned_at=now()-interval '1 hour' WHERE student_id=$1; UPDATE participation_modes SET joined_mubahatha_at=now()-interval '1 hour' WHERE student_id=$1",[noStart.id]);
+  await db.pool.query("UPDATE group_memberships SET assigned_at=now()-interval '1 hour' WHERE student_id=$1",[noStart.id]);
+  await db.pool.query("UPDATE participation_modes SET joined_mubahatha_at=now()-interval '1 hour' WHERE student_id=$1",[noStart.id]);
   const active=await studies.openSession(group.id,teacher.id,'نهاية مستقلة',1);
   await db.pool.query(`UPDATE mubahatha_sessions SET opened_at=now()-interval '20 minutes',
     closes_at=now()+interval '40 minutes',start_notifications_queued=true WHERE id=$1`,[active.id]);
@@ -177,6 +179,9 @@ test('exam creation, concurrent starts, cross-exam answers, resumption and final
   assert.equal(answers.filter(Boolean).length,1);
   assert.equal((await studies.startOrResumeAttempt(exam.id,student.id)).id,a.id);
   await assert.rejects(()=>studies.postponeExam(exam.id,'2030-01-02',1),{code:'ALREADY_TAKEN'});
+  await assert.rejects(()=>studies.updateExam(exam.id,{title:'موضوع جديد',dateIso:'2030-01-02',hours:2}),{code:'ALREADY_TAKEN'});
+  await assert.rejects(()=>studies.updateExamQuestion(qs[0].id,{type:'tf',prompt:'سؤال معدل',correct:'خطأ'}),{code:'ALREADY_TAKEN'});
+  await assert.rejects(()=>studies.deleteExam(exam.id),{code:'ALREADY_TAKEN'});
   const other=await studies.createExam(subject.id,ss,teacher.id,{examNumber:2,dateIso:'2030-01-01',hours:2});
   const otherQ=await studies.addExamQuestion(other.id,{type:'tf',prompt:'سؤال لامتحان آخر',correct:'صح'});
   await assert.rejects(()=>studies.submitAnswer(a.id,otherQ.id,'صح'));
@@ -188,7 +193,7 @@ test('exam creation, concurrent starts, cross-exam answers, resumption and final
 });
 test('daily notification fanout is durable and deduplicated across simultaneous lesson posts',async()=>{
   const {queueDailyLessons}=require('../dailyNotifications');
-  const options={stageId:stage.id,onDate:new Date().toISOString().slice(0,10),text:'دروس اليوم',extra:{}};
+  const options={stageId:stage.id,onDate:new Date().toISOString().slice(0,10),text:'دروس اليوم',extra:{},expiresAt:new Date(Date.now()+86400000)};
   await Promise.all([queueDailyLessons(db.pool,options),queueDailyLessons(db.pool,options)]);
   const rows=(await db.pool.query("SELECT chat_id,COUNT(*) AS n FROM notification_outbox WHERE dedupe_key LIKE 'daily:%' GROUP BY chat_id")).rows;
   assert.ok(rows.length>=1000);assert.ok(rows.every(r=>Number(r.n)===1));
@@ -248,4 +253,18 @@ test('outbox restart recovery, expiry and delivery markers are durable',async()=
   const worker=createOutboxWorker(db.pool,queue);await worker.tick();await worker.tick();worker.stop();
   assert.deepEqual(sent,['recovery']);
   const row=(await db.pool.query("SELECT status FROM notification_outbox WHERE dedupe_key='test:expired'")).rows[0];assert.equal(row.status,'expired');
+});
+test('sent attendance reminder is deleted after its attendance window',async()=>{
+  const {enqueueNotification,createOutboxWorker}=require('../outbox');
+  const key='lesson-reminder:test-expiry';
+  await enqueueNotification(db.pool,{key,chatId:123,text:'تذكير الحضور',expiresAt:new Date(Date.now()+60000)});
+  const queue={sendMessage:async()=>({message_id:456}),sendDocument:async()=>{},sendPhoto:async()=>{}};
+  const removed=[];
+  const worker=createOutboxWorker(db.pool,queue,async(chatId,messageId)=>removed.push([chatId,messageId]));
+  await worker.tick();worker.stop();
+  await db.pool.query("UPDATE notification_outbox SET expires_at=now()-interval '1 second' WHERE dedupe_key=$1",[key]);
+  const cleanup=createOutboxWorker(db.pool,queue,async(chatId,messageId)=>removed.push([chatId,messageId]));
+  await cleanup.tick();cleanup.stop();
+  assert.deepEqual(removed,[[123,456]]);
+  assert.ok((await db.pool.query('SELECT deleted_at FROM notification_outbox WHERE dedupe_key=$1',[key])).rows[0].deleted_at);
 });
