@@ -3,18 +3,15 @@ const $=selector=>document.querySelector(selector);
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const date=value=>value?new Date(value).toLocaleDateString('ar-IQ',{timeZone:'Asia/Baghdad'}):'—';
 const stamp=value=>value?new Date(value).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad'}):'—';
-const baghdadIso=value=>{const d=new Date(value);return Number.isNaN(d.getTime())?'':new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(d);};
 const labels={pending:'بانتظار القرار',approved:'معتمدة',rejected:'مرفوضة',ended:'منتهية',cancelled:'ملغاة',sent:'أُرسلت',sending:'قيد الإرسال',failed:'تعذّر إرسالها',expired:'انتهت المهلة',draft:'مسودة',published:'منشور'};
-const actionLabels={participation_settings:'إعدادات المباحثات والتقارير',update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',update_group:'تعديل مجموعة',assign_teacher:'إسناد أستاذ',unassign_teacher:'إلغاء إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',set_lesson_schedule:'إضافة موعد نشر في جدول الدروس',remove_lesson_schedule:'إزالة موعد نشر من جدول الدروس',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',remove_question:'حذف سؤال',create_teacher:'إضافة أستاذ',update_teacher:'تعديل أستاذ',toggle_teacher:'تفعيل/إيقاف أستاذ',regenerate_code:'توليد كود ربط',reopen_lesson:'إعادة فتح درس',mark_all_present:'تحضير جميع الطلبة',cancel_lesson:'إلغاء تفعيل درس',unlink_channel:'فكّ ربط قناة',reopen_session:'إعادة فتح مباحثة','mark-all_session':'تحضير طلبة مباحثة',cancel_session:'حذف مباحثة'};
+const actionLabels={participation_settings:'إعدادات المباحثات والتقارير',update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',update_group:'تعديل مجموعة',assign_teacher:'إسناد أستاذ',unassign_teacher:'إلغاء إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',set_lesson_schedule:'إضافة موعد نشر في جدول الدروس',remove_lesson_schedule:'إزالة موعد نشر من جدول الدروس',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',exam_cancel:'إلغاء امتحان وإشعار الطلبة',remove_question:'حذف سؤال',create_teacher:'إضافة أستاذ',update_teacher:'تعديل أستاذ',toggle_teacher:'تفعيل/إيقاف أستاذ',regenerate_code:'توليد كود ربط',reopen_lesson:'إعادة فتح درس',mark_all_present:'تحضير جميع الطلبة',cancel_lesson:'إلغاء تفعيل درس',unlink_channel:'فكّ ربط قناة',reopen_session:'إعادة فتح مباحثة','mark-all_session':'تحضير طلبة مباحثة',cancel_session:'حذف مباحثة'};
 const entityLabels={student:'طالب',stage:'مرحلة',subject:'مادة',group:'مجموعة',leave:'إجازة',report:'تقرير',session:'مباحثة',slot:'موعد',exam:'امتحان',question:'سؤال',teacher:'أستاذ',assignment:'إسناد',lesson_schedule:'جدول الدروس',lesson:'درس',channel:'قناة'};
 const DAY_NAMES=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
 let token='',stages=[],teachers=[],seasons=[],currentSeasonId='',currentStage=null,currentStudent=null,currentExam=null,currentTeacher=null,matrixStageId=null,matrixDay=new Date().getDay(),matrixEligible=[],tab='students',page=0,view='home',sequence=0,dialogSequence=0,busy=false;
 let lessonScheduleStageId=null,lessonScheduleData=null;
 let adminSelection=null;
-Object.assign(actionLabels,{correct_lesson_subject:'تصحيح مادة الدرس',late_lesson_attendance:'حضور إداري متأخر',remove_lesson_attendance:'حذف حضور طالب من درس',reopen_student_exam:'فتح امتحان لطالب واحد'});
+Object.assign(actionLabels,{correct_lesson_subject:'تصحيح مادة الدرس',late_lesson_attendance:'حضور إداري متأخر',reopen_student_exam:'فتح امتحان لطالب واحد'});
 Object.assign(actionLabels,{contact_student_admin:'رسالة إدارية لطالب',contact_student_teacher:'رسالة أستاذ لطالب'});
-Object.assign(actionLabels,{one_time_preliminary_22_group_1_to_2:'نقل 13 طالبًا من المجموعة 1 إلى 2'});
-Object.assign(actionLabels,{one_time_schedule_import_2026_09_24:'إدخال جداول المباحثات دفعة واحدة'});
 let contactQuery='',contactPage=0,contactStudent=null;
 const contactRequestKey=prefix=>prefix+':'+(globalThis.crypto?.randomUUID?.()||`${Date.now()}:${Math.random().toString(36).slice(2)}`);
 const contactStatuses={pending:'بانتظار الإرسال',sending:'قيد الإرسال',sent:'أُرسلت',failed:'تعذّر الإرسال',expired:'انتهت المهلة',archived:'سجل إرسال مؤرشف'};
@@ -24,9 +21,17 @@ function notify(text,error=false){const n=$('#detail').open?$('#dialog-notice'):
 function clearNotice(){$('#notice').hidden=true;$('#dialog-notice').hidden=true;}
 function setNav(action){document.querySelectorAll('.nav').forEach(b=>b.classList.toggle('active',b.dataset.action===action));}
 async function api(route,body,method='GET'){
-  const response=await fetch('/api/admin'+route,{method,headers:{...(token?{Authorization:'Bearer '+token}:{}),...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
-  if(!response.ok){let data;try{data=await response.json();}catch{}throw Error(data?.error||'تعذر الاتصال. حاول مرة أخرى.');}
-  return response.json();
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),20000);
+  try{
+    const response=await fetch('/api/admin'+route,{method,signal:controller.signal,headers:{...(token?{Authorization:'Bearer '+token}:{}),...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
+    if(!response.ok){let data;try{data=await response.json();}catch{}throw Error(data?.error||'تعذر الاتصال. حاول مرة أخرى.');}
+    return await response.json();
+  }catch(error){
+    if(controller.signal.aborted)throw Error('تأخر رد الخادم. تحقق من نتيجة العملية قبل إعادة الحفظ، ثم حاول مجددًا.');
+    if(error instanceof TypeError)throw Error('تعذر الاتصال بالخادم. تحقق من الشبكة ثم حاول مجددًا.');
+    throw error;
+  }finally{clearTimeout(timeout);}
 }
 const empty=(title,text='')=>`<div class="empty"><h2>${esc(title)}</h2><p>${esc(text)}</p></div>`;
 const button=(title,action,extra='',className='')=>`<button type="button" class="${className}" data-action="${action}" ${extra}>${esc(title)}</button>`;
@@ -74,14 +79,13 @@ async function renderStage(){
   if(!currentStage)return;view='stage';const n=++sequence,s=currentStage,ro=Boolean(s.is_historical);$('#breadcrumb').textContent='المعهد / '+s.name;
   let body='';const query=new URLSearchParams({stageId:s.id,page,...filters});if(!filters.groupId)query.delete('groupId');if(!filters.mode)query.delete('mode');if(s.is_historical){query.set('seasonId',s.stage_season_id);query.set('status','all');}
   if(tab==='students'){
-    const [data,oneTime]=await Promise.all([api('/students?'+query),!ro&&s.name==='المرحلة التمهيدية الدورة 22'?api('/one-time-cohort-move'):Promise.resolve(null)]);
-    body=(oneTime?.available?`<section class="detail-section"><h2>تصحيح توزيع المجموعة 1</h2><p>المحجوزون حاليًا: ${esc(oneTime.sourceCount)}. اختر بنفسك 13 طالبًا تحققت من عدم انضمامهم إلى مجموعات تليجرام. قاعدة البيانات لا تسجل العضوية الفعلية في تليجرام.</p>${button('نقل 13 طالبًا إلى المجموعة 2 لمرة واحدة','one-time-cohort-move','','primary')}</section>`:'')+
-    `<form id="search" class="toolbar"><label>اسم الطالب<input name="q" value="${esc(filters.q)}" placeholder="بحث داخل المرحلة" maxlength="150"></label><label class="compact">الحالة<select name="status">${Object.entries({active:'نشطون',archived:'مؤرشفون',all:'الجميع'}).map(([v,t])=>`<option value="${v}" ${filters.status===v?'selected':''}>${t}</option>`).join('')}</select></label><label class="compact">${s.discussion_grouping===false?'مباحثة المادة':'مجموعة المباحثة'}<select name="groupId">${groupOptions(s.groups,filters.groupId)}</select></label><label class="compact">وضع المشاركة<select name="mode">${[['','الكل'],['mubahatha','مباحثة'],['report','تقارير']].map(([v,t])=>`<option value="${v}" ${filters.mode===v?'selected':''}>${t}</option>`).join('')}</select></label><button class="primary" type="submit">عرض</button></form>`+
+    const data=await api('/students?'+query);
+    body=`<form id="search" class="toolbar"><label>اسم الطالب<input name="q" value="${esc(filters.q)}" placeholder="بحث داخل المرحلة" maxlength="150"></label><label class="compact">الحالة<select name="status">${Object.entries({active:'نشطون',archived:'مؤرشفون',all:'الجميع'}).map(([v,t])=>`<option value="${v}" ${filters.status===v?'selected':''}>${t}</option>`).join('')}</select></label><label class="compact">${s.discussion_grouping===false?'مباحثة المادة':'مجموعة المباحثة'}<select name="groupId">${groupOptions(s.groups,filters.groupId)}</select></label><label class="compact">وضع المشاركة<select name="mode">${[['','الكل'],['mubahatha','مباحثة'],['report','تقارير']].map(([v,t])=>`<option value="${v}" ${filters.mode===v?'selected':''}>${t}</option>`).join('')}</select></label><button class="primary" type="submit">عرض</button></form>`+
     table(['الطالب','تنظيم المباحثات','المواد ووضع المشاركة','الحالة','ملف الطالب'],data.rows.map(st=>[esc(st.full_name),s.discussion_grouping===false?'المرحلة كاملة':esc(cohortLabel(st.groups)),st.groups.map(g=>`<div>${esc(g.subject)}: ${esc(g.group)}${g.group_number?' · رقم '+esc(g.group_number):''} ${modeTag(g.mode)}</div>`).join('')||'<span class="subtle">لم يُوزّع بعد</span>',`<span class="tag ${st.is_active?'ok':''}">${st.is_active?'نشط':'مؤرشف'}</span>`,button(ro?'عرض':'عرض وتعديل','student',`data-id="${st.id}"`)]))+pager(data.total);
   }else if(tab==='attendance'){body=await attendanceContent(s.id);
   }else if(tab==='subjects'){
     body=(ro?'':`<div class="toolbar">${button('إضافة مادة','new-subject','','primary')}${s.stage_type!=='lessons_only'?(s.discussion_grouping!==false?button('إضافة مجموعة','new-group'):'')+button('إسناد أستاذ لمادة','new-assignment'):''}</div>`)+
-      (!ro&&s.stage_type!=='lessons_only'?participationForm(s):'')+s.subjects.map(sub=>`<section class="detail-section"><h2>${esc(sub.name)}</h2><p class="subtle">الأستاذ: ${esc(sub.teacher_name||'لم يُسنَد')} · الهاشتاغ: #${esc(sub.hashtag)}</p><p>${sub.participation_enabled===false?'غير مشمولة بالمباحثات والتقارير · سجلاتها السابقة محفوظة<br>':''}${modeTag('mubahatha')} ${sub.mubahatha_count} طالب · ${modeTag('report')} ${sub.report_count} طالب · ${modeTag(null)} ${sub.undecided_count} طالب</p>`+table([s.discussion_grouping===false?'مباحثة المادة':'المجموعة',s.discussion_grouping===false?'عدد الطلبة':'الأعضاء / المحجوز / السعة','رابط المجموعة','الحالة',...(ro?[]:['الإجراء'])],s.groups.filter(g=>g.subject_id===sub.id).map(g=>[esc(g.title),s.discussion_grouping===false?esc(g.member_count):`${esc(g.member_count)} / ${esc(g.reserved_count)} / ${esc(g.capacity)}`,g.invite_link&&/^https:\/\/t\.me\//.test(g.invite_link)?`<a href="${esc(g.invite_link)}" target="_blank" rel="noopener noreferrer">فتح المجموعة</a>`:'لم يُضف',g.is_active?'<span class="tag ok">نشطة</span>':'<span class="tag danger">معطّلة</span>',...(ro?[]:[button('تعديل','edit-group',`data-id="${g.id}"`)])]))+'</section>').join('');
+      (!ro&&s.stage_type!=='lessons_only'?participationForm(s):'')+s.subjects.map(sub=>`<section class="detail-section"><h2>${esc(sub.name)}</h2><p class="subtle">الأستاذ: ${esc(sub.teacher_name||'لم يُسنَد')} · الهاشتاغ: #${esc(sub.hashtag)}</p><p>${sub.participation_enabled===false?'غير مشمولة بالمباحثات والتقارير · سجلاتها السابقة محفوظة<br>':''}${modeTag('mubahatha')} ${sub.mubahatha_count} طالب · ${modeTag('report')} ${sub.report_count} طالب · ${modeTag(null)} ${sub.undecided_count} طالب</p>`+table([s.discussion_grouping===false?'مباحثة المادة':'المجموعة',s.discussion_grouping===false?'عدد الطلبة':'الطلبة / السعة','رابط المجموعة','الحالة',...(ro?[]:['الإجراء'])],s.groups.filter(g=>g.subject_id===sub.id).map(g=>[esc(g.title),s.discussion_grouping===false?esc(g.member_count):`${g.member_count} / ${g.capacity}`,g.invite_link&&/^https:\/\/t\.me\//.test(g.invite_link)?`<a href="${esc(g.invite_link)}" target="_blank" rel="noopener noreferrer">فتح المجموعة</a>`:'لم يُضف',g.is_active?'<span class="tag ok">نشطة</span>':'<span class="tag danger">معطّلة</span>',...(ro?[]:[button('تعديل','edit-group',`data-id="${g.id}"`)])]))+'</section>').join('');
     if(!s.subjects.length)body+=empty('لا توجد مواد في المرحلة');
   }else if(tab==='leaves')body=await leavesContent(s.id,ro);
   else if(tab==='reports'){
@@ -163,19 +167,12 @@ async function loadScheduleMatrix(){view='schedule-matrix';currentStage=null;set
   await renderScheduleMatrix();
 }
 let matrixDetail=null;
-const scheduleFreeTable=items=>table(['الأستاذ','مواعيد مشغولة','الأوقات المتبقية من السبت إلى الأربعاء (7 و8 مساءً)'],items.map(t=>[
-  esc(t.teacherName),esc(t.used),t.free.map(x=>`${DAY_NAMES[x.dayOfWeek]} ${x.hour===19?'7':'8'} مساءً`).join('، ')||'لا يوجد وقت متبقٍ'
-]));
 async function renderScheduleMatrix(){
-  const n=++sequence;const [s,importState]=await Promise.all([api('/stages/'+matrixStageId),api('/schedule-batch-import')]);
-  const slots=await api('/schedule?seasonId='+s.stage_season_id);if(n!==sequence)return;
+  const n=++sequence;const s=await api('/stages/'+matrixStageId);const slots=await api('/schedule?seasonId='+s.stage_season_id);if(n!==sequence)return;
   const dayTabs=DAY_NAMES.map((d,i)=>button(d,'matrix-day',`data-day="${i}"`,String(i)===String(matrixDay)?'active':'')).join('');
   const daySlots=slots.filter(sl=>Number(sl.day_of_week)===Number(matrixDay));
   const hours=Array.from({length:8},(_,i)=>i+16);matrixDetail=s;
-  let body=(importState.completed?`<section class="detail-section"><h2>الأوقات المتبقية للأساتذة</h2><p>بحسب المواعيد النشطة الحالية، ضمن الأيام والساعات المحددة في الإكسل. تحقق من جدول المجموعة عند إضافة مادة جديدة.</p>${scheduleFreeTable(importState.teacherAvailability)}</section>`:
-    importState.available?`<section class="detail-section"><h2>إدخال جدول الإكسل لمرة واحدة</h2><p>${esc(importState.sourceRows)} مادة في الإكسل، ${esc(importState.groups)} مجموعة، ${esc(importState.appointments)} موعدًا أسبوعيًا. يلزم إضافة ${esc(importState.assignmentsToAdd)} إسناد أستاذ كما ورد في الملف؛ تبقى الإسنادات السابقة محفوظة.</p>${button('إدخال جميع مواعيد المباحثات دفعة واحدة','schedule-batch-import','','primary')}</section>`:
-      `<section class="detail-section"><h2>يلزم مراجعة جدول الإكسل قبل الإدخال</h2><p>${esc((importState.errors||[]).join(' '))}</p></section>`)+
-    `<form id="matrix-stage" class="toolbar"><label>المرحلة<select name="stageId">${matrixEligible.map(e=>`<option value="${e.id}" ${String(e.id)===String(matrixStageId)?'selected':''}>${esc(e.name)}</option>`).join('')}</select></label></form>`+
+  let body=`<form id="matrix-stage" class="toolbar"><label>المرحلة<select name="stageId">${matrixEligible.map(e=>`<option value="${e.id}" ${String(e.id)===String(matrixStageId)?'selected':''}>${esc(e.name)}</option>`).join('')}</select></label></form>`+
     `<div class="tabs" role="navigation" aria-label="أيام الأسبوع">${dayTabs}</div>`;
   if(!s.groups.length)body+=empty('لا توجد مجموعات في هذه المرحلة');
   else body+=`<div class="matrix-wrap"><table class="matrix"><thead><tr><th scope="col">المجموعة</th>${hours.map(h=>`<th scope="col">${String(h).padStart(2,'0')}:00</th>`).join('')}</tr></thead><tbody>${
@@ -214,14 +211,14 @@ async function newForm(kind){
 }
 async function showExam(id){
   const n=++dialogSequence;const exam=await api('/exams/'+id);if(n!==dialogSequence)return;currentExam=exam;
-  const editable=Number(exam.attempt_count||0)===0&&!currentStage?.is_historical;
   dialog(exam.title||'الامتحان الشهري '+exam.exam_number,`<p>${esc(exam.subject_name)} · ${esc(labels[exam.status])}</p><p>يفتح: ${stamp(exam.opens_at)} · يغلق: ${stamp(exam.closes_at)}</p>`+
-    (editable?`<form id="update-exam" class="detail-section"><h3>تعديل الامتحان</h3><label>الموضوع<input name="title" value="${esc(exam.title)}" minlength="3" maxlength="150" required></label><label>التاريخ<input name="dateIso" type="date" value="${baghdadIso(exam.opens_at)}" required></label><label>مدة الإتاحة بالساعات<input name="hours" type="number" min="1" max="720" value="${Number(exam.available_hours)}" required></label><div class="form-actions"><button class="primary">حفظ التعديل</button>${button('حذف الامتحان','delete-exam',`data-id="${exam.id}"`,'danger')}</div></form>`:'<p class="subtle">بدأ أحد الطلبة الامتحان أو أُرشف الموسم؛ لا يمكن تعديل الامتحان أو حذفه.</p>')+
     (exam.status==='published'&&!currentStage?.is_historical&&new Date(exam.closes_at)<=new Date()?`<div class="form-actions">${button('إعادة فتح لطالب محدد','exam-student-window',`data-id="${exam.id}"`,'primary')}</div>`:'')+
     ((exam.studentWindows||[]).length?'<h3>نوافذ الفتح الخاصة بالطلبة — بتوقيت بغداد</h3>'+table(['الطالب','بداية الفتح','نهاية الفتح','الملاحظة','المسؤول'],exam.studentWindows.map(w=>[esc(w.full_name),stamp(w.opens_at),stamp(w.closes_at),esc(w.note||'—'),esc(w.created_by)])):'')+
-    table(['السؤال','الخيارات','الصحيح','الإجراء'],exam.questions.map(q=>[esc(q.prompt),esc((q.options||['صح','خطأ']).join(' / ')),esc(q.correct_answer),editable?button('تعديل','edit-question',`data-id="${q.id}"`)+button('حذف','remove-question',`data-id="${q.id}"`):'محمي بعد بدء المحاولات']))+
-    (editable?`<form id="exam-question" class="detail-section"><h3>إضافة سؤال</h3><label>النوع<select name="type"><option value="tf">صح أو خطأ</option><option value="mcq">اختيار من متعدد</option></select></label><label>نص السؤال<textarea name="prompt" maxlength="3000" required></textarea></label><label>الخيارات: كل خيار في سطر (للاختيار المتعدد فقط)<textarea name="options"></textarea></label><label>الإجابة الصحيحة بالنص المطابق للخيار<input name="correct" maxlength="300" required placeholder="صح أو خطأ أو نص أحد الخيارات"></label><div class="form-actions"><button class="primary">إضافة السؤال</button></div></form>${exam.status==='draft'?`<div class="form-actions">${button('نشر الامتحان وإشعار الطلبة','publish-exam','','primary')}</div>`:''}`:'')+
-    `<form id="postpone-exam" class="detail-section"><h3>تغيير الموعد</h3><p class="subtle">متاح فقط قبل بدء أي طالب محاولة. تُحفظ الإجابات السابقة.</p><label>التاريخ الجديد<input name="dateIso" type="date" required></label><div class="form-actions"><button>حفظ الموعد</button></div></form>`);
+    table(['السؤال','الخيارات','الصحيح','الإجراء'],exam.questions.map(q=>[esc(q.prompt),esc((q.options||['صح','خطأ']).join(' / ')),esc(q.correct_answer),exam.status==='draft'?button('حذف السؤال','remove-question',`data-id="${q.id}"`):'محمي بعد النشر']))+
+    (exam.status==='draft'?`<form id="exam-question" class="detail-section"><h3>إضافة سؤال</h3><label>النوع<select name="type"><option value="tf">صح أو خطأ</option><option value="mcq">اختيار من متعدد</option></select></label><label>نص السؤال<textarea name="prompt" maxlength="3000" required></textarea></label><label>الخيارات: كل خيار في سطر (للاختيار المتعدد فقط)<textarea name="options"></textarea></label><label>الإجابة الصحيحة بالنص المطابق للخيار<input name="correct" maxlength="300" required placeholder="صح أو خطأ أو نص أحد الخيارات"></label><div class="form-actions"><button class="primary">إضافة السؤال</button></div></form><div class="form-actions">${button('نشر الامتحان وإشعار الطلبة','publish-exam','','primary')}</div>`:'')+
+    (exam.status==='cancelled'?`<p class="subtle">أُلغي هذا الامتحان، ولا يظهر للطلبة.${exam.cancellation_reason?' السبب: '+esc(exam.cancellation_reason):''}</p>`:
+      `<form id="postpone-exam" class="detail-section"><h3>تغيير الموعد</h3><p class="subtle">متاح فقط قبل بدء أي طالب محاولة. تُحفظ الإجابات السابقة.</p><label>التاريخ الجديد<input name="dateIso" type="date" required></label><div class="form-actions"><button>حفظ الموعد</button></div></form>`+
+      `<form id="cancel-exam" class="detail-section"><h3>إلغاء الامتحان وإشعار الطلبة</h3><p class="subtle">متاح قبل بدء أي طالب محاولة. يبقى سجل الامتحان محفوظًا.</p><label>سبب الإلغاء (اختياري)<input name="reason" maxlength="500"></label><div class="form-actions"><button>إلغاء الامتحان وإشعار الطلبة</button></div></form>`));
 }
 
 function isoDateLabel(iso){return new Date(`${iso}T00:00:00Z`).toLocaleDateString('ar-IQ',{timeZone:'UTC',day:'numeric',month:'numeric',year:'numeric'});}
@@ -278,28 +275,11 @@ async function lessonManagementContent(stageId){
   if(data.total&&mgtPage>0&&!data.rows.length){mgtPage--;return lessonManagementContent(stageId);}
   const ro=!data.season.is_active;
   return managementSummary(data,'درسًا')+subjectSelector(data,'lesson-mgt',mgtSubjectId)+
-    table(['رقم الدرس في المادة','المادة','النشر الأصلي','نهاية التسجيل','الحضور','الإجراءات'],data.rows.map(l=>[`${l.item_number}<div class="subtle">المعرف #${l.id}</div>`,`${esc(l.subject_name)}<div class="subtle">${esc(lessonSource(l.source_type))}</div>`,stamp(l.activated_at),`${stamp(l.active_until)}<div>${l.is_active?'مفتوح':'انتهت المهلة'}</div>`,`${l.attended_count} / ${l.enrolled_count}`,
-      button('حذف حضور طالب','lesson-attendance-remove',`data-id="${l.id}"`)+(ro?'':(l.can_reopen?button('إعادة فتح للوقت المتبقي','lesson-reopen',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`):'<span class="subtle">مضت مهلة إعادة الفتح</span>')+
+    table(['رقم الدرس في المادة','المادة','النشر الأصلي','نهاية التسجيل','الحضور',...(ro?[]:['الإجراءات'])],data.rows.map(l=>[`${l.item_number}<div class="subtle">المعرف #${l.id}</div>`,`${esc(l.subject_name)}<div class="subtle">${esc(lessonSource(l.source_type))}</div>`,stamp(l.activated_at),`${stamp(l.active_until)}<div>${l.is_active?'مفتوح':'انتهت المهلة'}</div>`,`${l.attended_count} / ${l.enrolled_count}`,
+      ...(ro?[]:[(l.can_reopen?button('إعادة فتح للوقت المتبقي','lesson-reopen',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`):'<span class="subtle">مضت مهلة إعادة الفتح</span>')+
       button('تصحيح المادة','lesson-correct',`data-id="${l.id}"`)+
       (!l.is_active?button('حضور إداري متأخر لطلبة محددين','lesson-late',`data-id="${l.id}"`):'')+
-      button('تحضير الجميع','lesson-markall',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`)+button('حذف الدرس','lesson-cancel',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`,'danger'))]))+managementPager(data,'lessons');
-}
-let removeAttendanceState=null;
-async function removeAttendanceDialog(id,page=0,q=''){
-  const n=++dialogSequence;
-  const data=await api('/lessons/'+id+'/attendance?'+new URLSearchParams({page,q}));
-  if(n!==dialogSequence)return;
-  removeAttendanceState={id:Number(id),page:data.page,q};
-  dialog('حذف حضور طالب من درس',`<p>${esc(data.lesson.subject_name)} · الدرس #${data.lesson.id} · نشر ${stamp(data.lesson.activated_at)}</p>
-    <p>اختر الطالب الذي سُجِّل حضوره بالخطأ. يُحذف حضور هذا الدرس فقط ويُعاد حساب حالة الغياب.</p>
-    <form id="remove-attendance-search" class="toolbar"><label>بحث باسم الطالب<input name="q" maxlength="150" value="${esc(q)}"></label><button>بحث</button></form>
-    ${table(['الطالب','الحضور المسجل','الإجراء'],data.rows.map(st=>[
-      `${esc(st.full_name)} <span class="subtle">#${st.student_id}</span>`,
-      `${st.marking_kind==='admin_late'?'حضور إداري متأخر':'حضور مسجل'} · ${stamp(st.listened_at)}`,
-      button('حذف هذا الحضور','remove-lesson-attendance',`data-id="${id}" data-student="${st.student_id}" data-name="${esc(st.full_name)}"`,'danger')]))}
-    <div class="pagination"><span>${data.total} حضورًا · الصفحة ${data.page+1}</span><div>
-      ${data.page?button('السابق','remove-attendance-page',`data-page="${data.page-1}"`):''}
-      ${(data.page+1)*data.size<data.total?button('التالي','remove-attendance-page',`data-page="${data.page+1}"`):''}</div></div>`);
+      button('تحضير الجميع','lesson-markall',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`)+button('حذف الدرس','lesson-cancel',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`,'danger')])]))+managementPager(data,'lessons');
 }
 async function correctLessonDialog(id){
   const n=++dialogSequence,data=await api('/lessons/'+id+'/admin-options');if(n!==dialogSequence)return;
@@ -416,26 +396,10 @@ document.addEventListener('click',async event=>{
     else if(a==='exam')await showExam(target.dataset.id);
     else if(a==='lesson-correct')await correctLessonDialog(target.dataset.id);
     else if(a==='lesson-late')await studentOverrideDialog('lesson',target.dataset.id);
-    else if(a==='lesson-attendance-remove')await removeAttendanceDialog(target.dataset.id);
-    else if(a==='remove-attendance-page'&&removeAttendanceState)
-      await removeAttendanceDialog(removeAttendanceState.id,Number(target.dataset.page),removeAttendanceState.q);
-    else if(a==='remove-lesson-attendance'){
-      if(!confirm(`حذف حضور الطالب «${target.dataset.name}» من الدرس #${target.dataset.id} فقط؟`))return;
-      busy=true;
-      await api('/lessons/'+target.dataset.id+'/attendance/'+target.dataset.student+'/remove',{},'POST');
-      await loadLessonManagement();
-      await removeAttendanceDialog(target.dataset.id,removeAttendanceState?.page||0,removeAttendanceState?.q||'');
-      notify('حُذف حضور الطالب من هذا الدرس وأُعيد حساب الغياب.');
-    }
     else if(a==='exam-student-window')await studentOverrideDialog('exam',target.dataset.id);
     else if(a==='override-prev'||a==='override-next')await loadOverrideStudents(adminSelection.page+(a==='override-next'?1:-1));
     else if(a==='remove-slot'){if(!confirm('إيقاف هذا الموعد الأسبوعي؟ تبقى سجلاته السابقة محفوظة.'))return;busy=true;await api('/schedule/'+target.dataset.id+'/remove',{},'POST');await refresh();}
-    else if(a==='remove-question'){if(!confirm('حذف هذا السؤال؟'))return;busy=true;await api('/questions/'+target.dataset.id+'/remove',{},'POST');await showExam(currentExam.id);}
-    else if(a==='edit-question'){
-      const q=currentExam?.questions.find(item=>String(item.id)===target.dataset.id);if(!q)return;
-      dialog('تعديل سؤال',`<form id="update-question" data-id="${q.id}"><label>النوع<select name="type"><option value="tf" ${q.question_type==='tf'?'selected':''}>صح أو خطأ</option><option value="mcq" ${q.question_type==='mcq'?'selected':''}>اختيار متعدد</option></select></label><label>نص السؤال<textarea name="prompt" maxlength="3000" required>${esc(q.prompt)}</textarea></label><label>الخيارات: كل خيار في سطر للاختيار المتعدد<textarea name="options">${esc((q.options||[]).join('\n'))}</textarea></label><label>الإجابة الصحيحة<input name="correct" value="${esc(q.correct_answer)}" maxlength="300" required></label><div class="form-actions"><button class="primary">حفظ السؤال</button></div></form>`);
-    }
-    else if(a==='delete-exam'){if(!confirm('حذف الامتحان وأسئلته؟'))return;busy=true;await api('/exams/'+target.dataset.id+'/delete',{},'POST');$('#detail').close();await refresh();notify('حُذف الامتحان.');}
+    else if(a==='remove-question'){if(!confirm('حذف السؤال من المسودة؟'))return;busy=true;await api('/questions/'+target.dataset.id+'/remove',{},'POST');await showExam(currentExam.id);}
     else if(a==='publish-exam'){if(!confirm('نشر الامتحان وإرسال إشعارات للطلبة؟ تصبح أسئلته محمية من التعديل.'))return;busy=true;await api('/exams/'+currentExam.id+'/publish',{},'POST');await showExam(currentExam.id);notify('نُشر الامتحان وحُفظت إشعارات الطلبة للإرسال.');}
     else if(a==='leave'){
       if(!confirm(target.dataset.approve==='true'?'الموافقة على طلب الإجازة؟':'رفض طلب الإجازة؟'))return;
@@ -522,13 +486,6 @@ document.addEventListener('click',async event=>{
       }catch(e){notify(e.message,true);}finally{busy=false;}
     }
     else if(a==='stats')await loadStats();
-    else if(a==='schedule-batch-import'){
-      const state=await api('/schedule-batch-import');
-      if(!state.available)throw Error(state.completed?'استُخدم زر إدخال الجدول سابقًا.':(state.errors||[]).join(' '));
-      dialog('إدخال جداول المباحثات لمرة واحدة',`<p>سيُضاف ${esc(state.appointments)} موعدًا أسبوعيًا لجميع ${esc(state.groups)} مجموعة في الملف. جلستا كل مجموعة في يومين مختلفين، من السبت إلى الأربعاء الساعة 7 أو 8 مساءً بتوقيت بغداد.</p><p>سيُضاف ${esc(state.assignmentsToAdd)} إسناد أستاذ غير موجود في القاعدة. الإسنادات السابقة تبقى محفوظة.</p><h3>مطابقة مواد الإكسل مع قاعدة البيانات</h3>${table(['السطر','المادة في الإكسل','المادة في القاعدة','الأستاذ'],state.mapping.map(x=>[esc(x.workbookRow),esc(x.workbookSubject),`${esc(x.stageName)} · ${esc(x.subjectName)}`,esc(x.teacherName)]))}${state.otherAssignments.length?`<h3>مواد لها إسناد سابق لأستاذ آخر</h3>${table(['سطر الإكسل','المادة','الأستاذ المسند سابقًا'],state.otherAssignments.map(x=>[esc(x.workbookRow),esc(x.subject),esc(x.teacherName)]))}`:''}<h3>الوقت المتبقي لكل أستاذ بعد الإدخال</h3>${scheduleFreeTable(state.plannedAvailability)}<div class="form-actions">${button('تأكيد إدخال جميع المواعيد','schedule-batch-import-confirm','','primary')}</div>`);
-    }else if(a==='schedule-batch-import-confirm'){
-      busy=true;const done=await api('/schedule-batch-import',{},'POST');$('#detail').close();await renderScheduleMatrix();notify(`أُدخل ${done.appointments} موعدًا، وأضيف ${done.addedAssignments} إسناد أستاذ. اختفى زر الإدخال لمرة واحدة.`);
-    }
     else if(a==='watchlist')await loadWatchlist();
     else if(a==='teacher-performance')await showTeacherPerformance(target.dataset.id);
     else if(a==='matrix-day'){matrixDay=Number(target.dataset.day);await renderScheduleMatrix();}
@@ -551,11 +508,7 @@ document.addEventListener('click',async event=>{
       notify('أُلغي إسناد المادة.');
     }else if(a==='edit-group'){
       const g=currentStage?.groups.find(x=>String(x.id)===target.dataset.id);if(!g)return;
-      dialog('تعديل '+g.title,`<p>${currentStage.discussion_grouping===false?`الأعضاء في هذه المادة: ${esc(g.member_count)}`:`الأعضاء في هذه المادة: ${esc(g.member_count)} · المقاعد المحجوزة لرقم المجموعة عبر المواد: ${esc(g.reserved_count)} من ${esc(g.capacity)}`}</p><form id="edit-group" data-id="${g.id}"><div class="form-grid"><label>السعة<input name="capacity" type="number" min="1" max="10000" value="${g.capacity}" required></label><label>رابط المجموعة<input name="inviteLink" type="url" value="${esc(g.invite_link||'')}" placeholder="https://t.me/..."></label></div><div class="form-actions"><button class="primary">حفظ</button>${button(g.is_active?'تعطيل المجموعة':'تفعيل المجموعة','toggle-group',`data-id="${g.id}" data-active="${!g.is_active}"`,g.is_active?'danger':'')}</div></form>`);
-    }else if(a==='one-time-cohort-move'){
-      const move=await api('/one-time-cohort-move');
-      if(!move.available)throw Error(move.completed?'استُخدم زر النقل سابقًا.':'لم تعد شروط النقل متاحة.');
-      dialog('نقل 13 طالبًا من المجموعة 1 إلى 2',`<p>هذه قائمة حجوزات النظام، ولا تؤكد العضوية الفعلية في تليجرام. اختر فقط من تحققت بنفسك من عدم انضمامهم إلى مجموعات رقم 1. سيُوحّد الرقم 2 في جميع مواد الطلاب المختارين.</p><form id="one-time-cohort-move"><p id="one-time-move-count">المحدد: 0 من 13</p>${table(['اختيار','الطالب','مواد مسجلة في النظام'],move.students.map(st=>[`<input type="checkbox" name="studentId" value="${esc(st.id)}">`,esc(st.full_name),`${esc(st.subject_count)} · ${esc(st.subjects)}`]))}<div class="form-actions"><button class="primary" type="submit">نقل المحددين لمرة واحدة</button></div></form>`);
+      dialog('تعديل '+g.title,`<form id="edit-group" data-id="${g.id}"><div class="form-grid"><label>السعة<input name="capacity" type="number" min="1" max="10000" value="${g.capacity}" required></label><label>رابط المجموعة<input name="inviteLink" type="url" value="${esc(g.invite_link||'')}" placeholder="https://t.me/..."></label></div><div class="form-actions"><button class="primary">حفظ</button>${button(g.is_active?'تعطيل المجموعة':'تفعيل المجموعة','toggle-group',`data-id="${g.id}" data-active="${!g.is_active}"`,g.is_active?'danger':'')}</div></form>`);
     }else if(a==='toggle-group'){
       const active=target.dataset.active==='true';if(!confirm(active?'إعادة تفعيل المجموعة؟':'تعطيل المجموعة؟ يبقى سجلها محفوظًا.'))return;
       busy=true;await api('/groups/'+target.dataset.id,{active},'PATCH');$('#detail').close();await refresh();notify('حُفظت حالة المجموعة.');
@@ -563,10 +516,6 @@ document.addEventListener('click',async event=>{
   }catch(e){notify(e.message,true);}finally{busy=false;}
 });
 document.addEventListener('change',async event=>{
-  if(event.target.name==='studentId'&&event.target.closest('#one-time-cohort-move')){
-    const count=document.querySelectorAll('#one-time-cohort-move input[name="studentId"]:checked').length;
-    $('#one-time-move-count').textContent=`المحدد: ${count} من 13`;return;
-  }
   if(event.target.name==='override-student'&&adminSelection){
     const id=Number(event.target.value);
     if(adminSelection.kind==='exam')adminSelection.selected.clear();
@@ -574,25 +523,25 @@ document.addEventListener('change',async event=>{
     else adminSelection.selected.delete(id);
     updateOverrideSelected();return;
   }
-  const selected=event.target.value;
-  clearNotice();
-  try{
-    if(event.target.name==='stageId'&&event.target.closest('#attendance-stage')){attendanceStageId=selected;page=0;await attendanceHome();}
-    else if(event.target.name==='stageId'&&event.target.closest('#matrix-stage')){matrixStageId=selected;await renderScheduleMatrix();}
-    else if(event.target.id==='lesson-schedule-stage'){lessonScheduleStageId=selected;await renderLessonSchedule(stages.filter(s=>s.stage_season_id));}
-    else if(event.target.name==='stageId'&&event.target.closest('#lesson-mgt-stage')){mgtStageId=selected;mgtSubjectId='';mgtPage=0;await loadLessonManagement();}
-    else if(event.target.id==='lesson-mgt-subject'){mgtSubjectId=selected;mgtPage=0;await loadLessonManagement();}
-    else if(event.target.id==='session-mgt-subject'){sessionSubjectId=selected;sessionPage=0;await renderStage();}
-    else if(event.target.id==='season-select'){currentSeasonId=selected;mgtSubjectId='';mgtPage=0;sessionSubjectId='';sessionPage=0;if(view==='lesson-management')await loadLessonManagement();else if(view==='stage'&&currentStage)await openStage(currentStage.id);else if(view==='lesson-attendance'){page=0;await attendanceHome();}else await home();}
-  }catch(e){notify(e.message,true);}
+  if(event.target.name==='stageId'&&event.target.closest('#attendance-stage')){if(busy)return;busy=true;clearNotice();try{attendanceStageId=event.target.value;page=0;await attendanceHome();}catch(e){notify(e.message,true);}finally{busy=false;}
+  }else if(event.target.name==='stageId'&&event.target.closest('#matrix-stage')){if(busy)return;busy=true;clearNotice();
+    try{matrixStageId=event.target.value;await renderScheduleMatrix();}catch(e){notify(e.message,true);}finally{busy=false;}
+  }else if(event.target.id==='lesson-schedule-stage'){if(busy)return;busy=true;clearNotice();
+    try{lessonScheduleStageId=event.target.value;await renderLessonSchedule(stages.filter(s=>s.stage_season_id));}catch(e){notify(e.message,true);}finally{busy=false;}
+  }else if(event.target.name==='stageId'&&event.target.closest('#lesson-mgt-stage')){if(busy)return;busy=true;clearNotice();
+    try{mgtStageId=event.target.value;mgtSubjectId='';mgtPage=0;await loadLessonManagement();}catch(e){notify(e.message,true);}finally{busy=false;}
+  }else if(['lesson-mgt-subject','session-mgt-subject'].includes(event.target.id)){if(busy)return;busy=true;clearNotice();
+    try{if(event.target.id==='lesson-mgt-subject'){mgtSubjectId=event.target.value;mgtPage=0;await loadLessonManagement();}else{sessionSubjectId=event.target.value;sessionPage=0;await renderStage();}}catch(e){notify(e.message,true);}finally{busy=false;}
+  }else if(event.target.id==='season-select'){if(busy)return;busy=true;clearNotice();
+    try{currentSeasonId=event.target.value;mgtSubjectId='';mgtPage=0;sessionSubjectId='';sessionPage=0;if(view==='lesson-management')await loadLessonManagement();else if(view==='stage'&&currentStage)await openStage(currentStage.id);else if(view==='lesson-attendance'){page=0;await attendanceHome();}else await home();}catch(e){notify(e.message,true);}finally{busy=false;}
+  }
 });
 document.addEventListener('submit',async event=>{
   const form=event.target;event.preventDefault();if(busy)return;clearNotice();const body=Object.fromEntries(new FormData(form));
   busy=true;const submit=form.querySelector('button[type="submit"],button:not([data-action])');if(submit)submit.disabled=true;
+  const pendingText='جارٍ تنفيذ العملية…',pendingTimer=setTimeout(()=>notify(pendingText),300);
   try{
     if(form.id==='contact-search'){contactQuery=String(body.q||'').trim();contactPage=0;await loadStudentContact();}
-    else if(form.id==='remove-attendance-search'&&removeAttendanceState)
-      await removeAttendanceDialog(removeAttendanceState.id,0,String(body.q||'').trim());
     else if(form.id==='contact-send'){
       if(!contactStudent)throw Error('اختر الطالب أولًا.');
       const saved=await api('/student-contact',{studentId:contactStudent.id,message:body.message,contextKind:contactStudent.contextKind,contextId:contactStudent.contextId,requestKey:form.dataset.requestKey||(form.dataset.requestKey=contactRequestKey('admin-web'))},'POST');
@@ -629,17 +578,10 @@ document.addEventListener('submit',async event=>{
     else if(form.id==='matrix-slot'){await api('/schedule',body,'POST');$('#detail').close();await renderScheduleMatrix();notify('حُفظ موعد المباحثة.');}
     else if(form.id==='edit-student'){await api('/students/'+currentStudent.id,{...body,expectedName:currentStudent.full_name},'PATCH');$('#detail').close();await refresh();notify('حُفظ اسم الطالب.');}
     else if(form.id==='move-group'){if(!confirm('توحيد رقم المجموعة المختارة في جميع مواد الطالب لهذا الموسم؟ سيُرفض النقل كله إذا غابت مجموعة مطابقة أو امتلأت. تبقى التقارير السابقة محفوظة.'))return;await api('/students/'+currentStudent.id+'/group',body,'POST');$('#detail').close();await refresh();notify('وُحّد رقم المجموعة في مواد الطالب.');}
-    else if(form.id==='one-time-cohort-move'){
-      const studentIds=[...form.querySelectorAll('input[name="studentId"]:checked')].map(el=>Number(el.value));
-      if(studentIds.length!==13)throw Error('اختر 13 طالبًا بالضبط.');
-      if(!confirm('تأكيد نقل هؤلاء الطلاب الثلاثة عشر من المجموعة 1 إلى المجموعة 2 في جميع موادهم؟ سيختفي هذا الزر بعد النجاح.'))return;
-      const result=await api('/one-time-cohort-move',{studentIds},'POST');$('#detail').close();await refresh();notify(`نُقل ${result.moved} طالبًا إلى المجموعة 2. اختفى زر النقل لمرة واحدة.`);
-    }
     else if(form.id==='move-stage'){if(!confirm('نقل الطالب إلى المرحلة المختارة؟ يُحفظ حضوره السابق وتبدأ أهلية الدروس الجديدة من وقت النقل.'))return;await api('/students/'+currentStudent.id+'/stage',body,'POST');$('#detail').close();await refresh();notify('حُفظت المرحلة.');}
     else if(form.id==='exam-question'){body.options=body.type==='mcq'?body.options.split(/\r?\n/).map(s=>s.trim()).filter(Boolean):undefined;await api('/exams/'+currentExam.id+'/question',body,'POST');await showExam(currentExam.id);notify('أُضيف السؤال.');}
-    else if(form.id==='update-question'){body.options=body.type==='mcq'?body.options.split(/\r?\n/).map(s=>s.trim()).filter(Boolean):undefined;await api('/questions/'+form.dataset.id+'/update',body,'POST');await showExam(currentExam.id);notify('حُفظ السؤال.');}
-    else if(form.id==='update-exam'){await api('/exams/'+currentExam.id+'/update',body,'POST');await showExam(currentExam.id);notify('حُفظ الامتحان.');}
     else if(form.id==='postpone-exam'){if(!confirm('تغيير موعد الامتحان؟'))return;await api('/exams/'+currentExam.id+'/postpone',body,'POST');await showExam(currentExam.id);notify('حُفظ الموعد.');}
+    else if(form.id==='cancel-exam'){if(!confirm('إلغاء الامتحان وإشعار الطلبة؟ لا يمكن إلغاء امتحان بدأه طالب.'))return;const result=await api('/exams/'+currentExam.id+'/cancel',body,'POST');await showExam(currentExam.id);notify(`أُلغي الامتحان وحُفظ إشعار ${result.recipientCount} طالبًا للإرسال.`);}
     else if(form.id==='grade-report'){await api('/reports/'+form.dataset.id+'/score',body,'POST');$('#detail').close();await refresh();notify('حُفظ تقييم التقرير.');}
     else if(form.id==='edit-teacher'){await api('/teachers/'+form.dataset.id,body,'PATCH');$('#detail').close();await loadTeachers();notify('حُفظ اسم الأستاذ.');}
     else if(form.id==='edit-group'){await api('/groups/'+form.dataset.id,{capacity:body.capacity,inviteLink:body.inviteLink||null},'PATCH');$('#detail').close();await refresh();notify('حُفظت بيانات المجموعة.');}
@@ -649,7 +591,7 @@ document.addEventListener('submit',async event=>{
       await api(routes[kind],body,'POST');$('#detail').close();
       if(kind==='teacher'){await loadTeachers();notify('أُضيف الأستاذ بنجاح.');}else{await refresh();notify('أُضيف السجل بنجاح.');}
     }
-  }catch(e){notify(e.message,true);}finally{busy=false;if(submit)submit.disabled=false;}
+  }catch(e){notify(e.message,true);}finally{clearTimeout(pendingTimer);busy=false;if(submit)submit.disabled=false;for(const notice of [$('#notice'),$('#dialog-notice')])if(notice.textContent===pendingText)notice.hidden=true;}
 });
 (async()=>{
   const tg=window.Telegram?.WebApp;
