@@ -19,6 +19,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
   const overrides=require('./adminOverrides').createAdminOverrides(db.pool);
   const studentContact=require('./studentContact').createStudentContact(db.pool);
   const oneTimeCohortMove=require('./oneTimeCohortMove').createOneTimeCohortMove(db.pool);
+  const scheduleBatchImport=require('./scheduleBatchImport').createScheduleBatchImport(db.pool);
   const sessions=createSessions();const authLimits=new Map();let active=0;
   const teacherWeb=require('./teacherWeb').createTeacherWeb({db,studies,scheduler,botToken,origin,readJson});
   const json=(res,code,value)=>{res.writeHead(code,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
@@ -81,6 +82,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(route==='/reports')result=await adminData.reports(q);
         else if(route==='/sessions')result=await adminData.sessions(positiveInt(q.seasonId));
         else if(route==='/schedule')result=await studies.listStageSeasonSlots(positiveInt(q.seasonId));
+        else if(route==='/schedule-batch-import')result=await scheduleBatchImport.status();
         else if(route==='/lesson-schedule')result=await db.getLessonSchedule(positiveInt(q.stageSeasonId));
         else if(/^\/exams\/\d+$/.test(route)){
           const id=positiveInt(route.split('/')[2]);const exam=await studies.getExamById(id);
@@ -192,6 +194,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           result=await studies.addScheduleSlot(positiveInt(body.groupId),{dayOfWeek:body.dayOfWeek,hour:body.hour,minute:body.minute,teacherId:positiveInt(body.teacherId)});
           await audit(actor.id,'create_slot','slot',result.slot.id,null,result.slot);
         }
+        else if(route==='/schedule-batch-import'&&req.method==='POST')result=await scheduleBatchImport.execute(actor.id);
         else if((m=/^\/schedule\/(\d+)\/remove$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]);result={removed:await studies.removeScheduleSlot(id)};
           if(result.removed)await audit(actor.id,'remove_slot','slot',id,null,result);

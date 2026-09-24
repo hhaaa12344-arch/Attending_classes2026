@@ -1437,9 +1437,13 @@ async function addScheduleSlot(groupId, { dayOfWeek, hour, minute = 0, durationH
         AND sl.day_of_week*1440+sl.hour*60+sl.minute+shift.n<$3+60
         AND sl.day_of_week*1440+sl.hour*60+sl.minute+shift.n+sl.duration_hours*60>$3 LIMIT 1`,[ownerId,groupId,start])).rows[0];
     if(conflict)throw appError('يتداخل الموعد مع مباحثة أخرى للأستاذ أو المجموعة. اختر وقتًا آخر.','SCHEDULE_CONFLICT',409);
-    const conflicts=(await c.query(`SELECT sl.*,sub.name AS subject_name FROM schedule_slots sl JOIN subjects sub ON sub.id=sl.subject_id
+    const conflicts=(await c.query(`SELECT sl.*,sub.name AS subject_name,other.group_number AS other_group_number
+      FROM schedule_slots sl JOIN subjects sub ON sub.id=sl.subject_id
+      JOIN mubahatha_groups other ON other.id=sl.group_id
       WHERE sl.stage_season_id=$1 AND sl.is_active=true AND sl.subject_id<>$2 AND sl.day_of_week=$3
         AND sl.hour*60+sl.minute<$4+60 AND sl.hour*60+sl.minute+sl.duration_hours*60>$4`,[group.stage_season_id,group.subject_id,day,h*60+m])).rows;
+    if(conflicts.some(sl=>Number(sl.other_group_number)===Number(group.group_number)))
+      throw appError('يتداخل الموعد مع مادة أخرى للمجموعة نفسها. اختر وقتًا آخر.','SCHEDULE_CONFLICT',409);
     const slot=(await c.query(`INSERT INTO schedule_slots(group_id,subject_id,stage_season_id,teacher_id,day_of_week,hour,minute,duration_hours)
       VALUES($1,$2,$3,$4,$5,$6,$7,1) ON CONFLICT(group_id,day_of_week,hour,minute)
       DO UPDATE SET is_active=true,teacher_id=EXCLUDED.teacher_id,duration_hours=1 RETURNING *`,[groupId,group.subject_id,group.stage_season_id,ownerId,day,h,m])).rows[0];
