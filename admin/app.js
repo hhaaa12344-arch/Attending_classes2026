@@ -13,6 +13,7 @@ let lessonScheduleStageId=null,lessonScheduleData=null;
 let adminSelection=null;
 Object.assign(actionLabels,{correct_lesson_subject:'تصحيح مادة الدرس',late_lesson_attendance:'حضور إداري متأخر',remove_lesson_attendance:'حذف حضور طالب من درس',reopen_student_exam:'فتح امتحان لطالب واحد'});
 Object.assign(actionLabels,{contact_student_admin:'رسالة إدارية لطالب',contact_student_teacher:'رسالة أستاذ لطالب'});
+Object.assign(actionLabels,{one_time_preliminary_22_group_1_to_2:'نقل 13 طالبًا من المجموعة 1 إلى 2'});
 let contactQuery='',contactPage=0,contactStudent=null;
 const contactRequestKey=prefix=>prefix+':'+(globalThis.crypto?.randomUUID?.()||`${Date.now()}:${Math.random().toString(36).slice(2)}`);
 const contactStatuses={pending:'بانتظار الإرسال',sending:'قيد الإرسال',sent:'أُرسلت',failed:'تعذّر الإرسال',expired:'انتهت المهلة',archived:'سجل إرسال مؤرشف'};
@@ -72,8 +73,9 @@ async function renderStage(){
   if(!currentStage)return;view='stage';const n=++sequence,s=currentStage,ro=Boolean(s.is_historical);$('#breadcrumb').textContent='المعهد / '+s.name;
   let body='';const query=new URLSearchParams({stageId:s.id,page,...filters});if(!filters.groupId)query.delete('groupId');if(!filters.mode)query.delete('mode');if(s.is_historical){query.set('seasonId',s.stage_season_id);query.set('status','all');}
   if(tab==='students'){
-    const data=await api('/students?'+query);
-    body=`<form id="search" class="toolbar"><label>اسم الطالب<input name="q" value="${esc(filters.q)}" placeholder="بحث داخل المرحلة" maxlength="150"></label><label class="compact">الحالة<select name="status">${Object.entries({active:'نشطون',archived:'مؤرشفون',all:'الجميع'}).map(([v,t])=>`<option value="${v}" ${filters.status===v?'selected':''}>${t}</option>`).join('')}</select></label><label class="compact">${s.discussion_grouping===false?'مباحثة المادة':'مجموعة المباحثة'}<select name="groupId">${groupOptions(s.groups,filters.groupId)}</select></label><label class="compact">وضع المشاركة<select name="mode">${[['','الكل'],['mubahatha','مباحثة'],['report','تقارير']].map(([v,t])=>`<option value="${v}" ${filters.mode===v?'selected':''}>${t}</option>`).join('')}</select></label><button class="primary" type="submit">عرض</button></form>`+
+    const [data,oneTime]=await Promise.all([api('/students?'+query),!ro&&s.name==='المرحلة التمهيدية الدورة 22'?api('/one-time-cohort-move'):Promise.resolve(null)]);
+    body=(oneTime?.available?`<section class="detail-section"><h2>تصحيح توزيع المجموعة 1</h2><p>المحجوزون حاليًا: ${esc(oneTime.sourceCount)}. اختر بنفسك 13 طالبًا تحققت من عدم انضمامهم إلى مجموعات تليجرام. قاعدة البيانات لا تسجل العضوية الفعلية في تليجرام.</p>${button('نقل 13 طالبًا إلى المجموعة 2 لمرة واحدة','one-time-cohort-move','','primary')}</section>`:'')+
+    `<form id="search" class="toolbar"><label>اسم الطالب<input name="q" value="${esc(filters.q)}" placeholder="بحث داخل المرحلة" maxlength="150"></label><label class="compact">الحالة<select name="status">${Object.entries({active:'نشطون',archived:'مؤرشفون',all:'الجميع'}).map(([v,t])=>`<option value="${v}" ${filters.status===v?'selected':''}>${t}</option>`).join('')}</select></label><label class="compact">${s.discussion_grouping===false?'مباحثة المادة':'مجموعة المباحثة'}<select name="groupId">${groupOptions(s.groups,filters.groupId)}</select></label><label class="compact">وضع المشاركة<select name="mode">${[['','الكل'],['mubahatha','مباحثة'],['report','تقارير']].map(([v,t])=>`<option value="${v}" ${filters.mode===v?'selected':''}>${t}</option>`).join('')}</select></label><button class="primary" type="submit">عرض</button></form>`+
     table(['الطالب','تنظيم المباحثات','المواد ووضع المشاركة','الحالة','ملف الطالب'],data.rows.map(st=>[esc(st.full_name),s.discussion_grouping===false?'المرحلة كاملة':esc(cohortLabel(st.groups)),st.groups.map(g=>`<div>${esc(g.subject)}: ${esc(g.group)}${g.group_number?' · رقم '+esc(g.group_number):''} ${modeTag(g.mode)}</div>`).join('')||'<span class="subtle">لم يُوزّع بعد</span>',`<span class="tag ${st.is_active?'ok':''}">${st.is_active?'نشط':'مؤرشف'}</span>`,button(ro?'عرض':'عرض وتعديل','student',`data-id="${st.id}"`)]))+pager(data.total);
   }else if(tab==='attendance'){body=await attendanceContent(s.id);
   }else if(tab==='subjects'){
@@ -535,6 +537,10 @@ document.addEventListener('click',async event=>{
     }else if(a==='edit-group'){
       const g=currentStage?.groups.find(x=>String(x.id)===target.dataset.id);if(!g)return;
       dialog('تعديل '+g.title,`<p>${currentStage.discussion_grouping===false?`الأعضاء في هذه المادة: ${esc(g.member_count)}`:`الأعضاء في هذه المادة: ${esc(g.member_count)} · المقاعد المحجوزة لرقم المجموعة عبر المواد: ${esc(g.reserved_count)} من ${esc(g.capacity)}`}</p><form id="edit-group" data-id="${g.id}"><div class="form-grid"><label>السعة<input name="capacity" type="number" min="1" max="10000" value="${g.capacity}" required></label><label>رابط المجموعة<input name="inviteLink" type="url" value="${esc(g.invite_link||'')}" placeholder="https://t.me/..."></label></div><div class="form-actions"><button class="primary">حفظ</button>${button(g.is_active?'تعطيل المجموعة':'تفعيل المجموعة','toggle-group',`data-id="${g.id}" data-active="${!g.is_active}"`,g.is_active?'danger':'')}</div></form>`);
+    }else if(a==='one-time-cohort-move'){
+      const move=await api('/one-time-cohort-move');
+      if(!move.available)throw Error(move.completed?'استُخدم زر النقل سابقًا.':'لم تعد شروط النقل متاحة.');
+      dialog('نقل 13 طالبًا من المجموعة 1 إلى 2',`<p>هذه قائمة حجوزات النظام، ولا تؤكد العضوية الفعلية في تليجرام. اختر فقط من تحققت بنفسك من عدم انضمامهم إلى مجموعات رقم 1. سيُوحّد الرقم 2 في جميع مواد الطلاب المختارين.</p><form id="one-time-cohort-move"><p id="one-time-move-count">المحدد: 0 من 13</p>${table(['اختيار','الطالب','مواد مسجلة في النظام'],move.students.map(st=>[`<input type="checkbox" name="studentId" value="${esc(st.id)}">`,esc(st.full_name),`${esc(st.subject_count)} · ${esc(st.subjects)}`]))}<div class="form-actions"><button class="primary" type="submit">نقل المحددين لمرة واحدة</button></div></form>`);
     }else if(a==='toggle-group'){
       const active=target.dataset.active==='true';if(!confirm(active?'إعادة تفعيل المجموعة؟':'تعطيل المجموعة؟ يبقى سجلها محفوظًا.'))return;
       busy=true;await api('/groups/'+target.dataset.id,{active},'PATCH');$('#detail').close();await refresh();notify('حُفظت حالة المجموعة.');
@@ -542,6 +548,10 @@ document.addEventListener('click',async event=>{
   }catch(e){notify(e.message,true);}finally{busy=false;}
 });
 document.addEventListener('change',async event=>{
+  if(event.target.name==='studentId'&&event.target.closest('#one-time-cohort-move')){
+    const count=document.querySelectorAll('#one-time-cohort-move input[name="studentId"]:checked').length;
+    $('#one-time-move-count').textContent=`المحدد: ${count} من 13`;return;
+  }
   if(event.target.name==='override-student'&&adminSelection){
     const id=Number(event.target.value);
     if(adminSelection.kind==='exam')adminSelection.selected.clear();
@@ -604,6 +614,12 @@ document.addEventListener('submit',async event=>{
     else if(form.id==='matrix-slot'){await api('/schedule',body,'POST');$('#detail').close();await renderScheduleMatrix();notify('حُفظ موعد المباحثة.');}
     else if(form.id==='edit-student'){await api('/students/'+currentStudent.id,{...body,expectedName:currentStudent.full_name},'PATCH');$('#detail').close();await refresh();notify('حُفظ اسم الطالب.');}
     else if(form.id==='move-group'){if(!confirm('توحيد رقم المجموعة المختارة في جميع مواد الطالب لهذا الموسم؟ سيُرفض النقل كله إذا غابت مجموعة مطابقة أو امتلأت. تبقى التقارير السابقة محفوظة.'))return;await api('/students/'+currentStudent.id+'/group',body,'POST');$('#detail').close();await refresh();notify('وُحّد رقم المجموعة في مواد الطالب.');}
+    else if(form.id==='one-time-cohort-move'){
+      const studentIds=[...form.querySelectorAll('input[name="studentId"]:checked')].map(el=>Number(el.value));
+      if(studentIds.length!==13)throw Error('اختر 13 طالبًا بالضبط.');
+      if(!confirm('تأكيد نقل هؤلاء الطلاب الثلاثة عشر من المجموعة 1 إلى المجموعة 2 في جميع موادهم؟ سيختفي هذا الزر بعد النجاح.'))return;
+      const result=await api('/one-time-cohort-move',{studentIds},'POST');$('#detail').close();await refresh();notify(`نُقل ${result.moved} طالبًا إلى المجموعة 2. اختفى زر النقل لمرة واحدة.`);
+    }
     else if(form.id==='move-stage'){if(!confirm('نقل الطالب إلى المرحلة المختارة؟ يُحفظ حضوره السابق وتبدأ أهلية الدروس الجديدة من وقت النقل.'))return;await api('/students/'+currentStudent.id+'/stage',body,'POST');$('#detail').close();await refresh();notify('حُفظت المرحلة.');}
     else if(form.id==='exam-question'){body.options=body.type==='mcq'?body.options.split(/\r?\n/).map(s=>s.trim()).filter(Boolean):undefined;await api('/exams/'+currentExam.id+'/question',body,'POST');await showExam(currentExam.id);notify('أُضيف السؤال.');}
     else if(form.id==='update-question'){body.options=body.type==='mcq'?body.options.split(/\r?\n/).map(s=>s.trim()).filter(Boolean):undefined;await api('/questions/'+form.dataset.id+'/update',body,'POST');await showExam(currentExam.id);notify('حُفظ السؤال.');}
