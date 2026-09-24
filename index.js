@@ -66,7 +66,7 @@ bot.use(require('./updateGate').createUpdateGate());
 // طابور إرسال عام ينظّم معدّل الرسائل ويعالج 429؛ يُستعمل للبث الجماعي.
 const { createTelegramQueue, PRIORITY } = require('./telegramQueue');
 const tgQueue = createTelegramQueue(bot.telegram);
-const outboxWorker = require('./outbox').createOutboxWorker(db.pool,tgQueue);
+const outboxWorker = require('./outbox').createOutboxWorker(db.pool,tgQueue,bot.telegram.deleteMessage.bind(bot.telegram));
 // Both background sends and replies share the same rate limiter.
 for(const method of ['sendMessage','sendDocument','sendPhoto']) bot.telegram[method]=tgQueue[method];
 bot.use((ctx,next)=>{
@@ -449,13 +449,14 @@ async function sendToStageStudents(stageId, text, extra = undefined, options = {
     excludeStudentIds = new Set(),
     skipOnLeave = false,
     dailyLessonNotificationDate = null,
+    dailyLessonExpiresAt = null,
   } = options;
   const today = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
 
   // استعلام واحد يُرجع المستحقين، بدل استعلامَي إجازة/حجز لكل طالب على حدة.
   let recipients;
   if (dailyLessonNotificationDate) {
-    return require('./dailyNotifications').queueDailyLessons(db.pool,{stageId,onDate:dailyLessonNotificationDate,text,extra,excluded:[...excludeStudentIds]});
+    return require('./dailyNotifications').queueDailyLessons(db.pool,{stageId,onDate:dailyLessonNotificationDate,text,extra,excluded:[...excludeStudentIds],expiresAt:dailyLessonExpiresAt});
   } else if (skipOnLeave) {
     recipients = await db.getEligibleStudentsForStage(stageId, today);
   } else {
@@ -1556,6 +1557,29 @@ bot.on('text', async (ctx, next) => {
   }
 
   // -------- الأستاذ: موضوع الامتحان قبل تحديد ساعات الإتاحة --------
+  if(state.action==='teacher_exam_edit_title'){
+    const exam=await studies.getExamById(state.examId);
+    if(!exam||!await teacherOwnsSubject(ctx,exam.subject_id,exam.stage_season_id))return ctx.reply('غير مصرح.');
+    const dateIso=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(exam.opens_at));
+    try{await studies.updateExam(exam.id,{title:ctx.message.text.trim(),dateIso,hours:exam.available_hours});userState.delete(ctx.from.id);return renderExam(ctx,exam.id);}
+    catch(err){return ctx.reply(err.message);}
+  }
+  if(state.action==='teacher_q_edit_prompt'){
+    const prompt=ctx.message.text.trim();
+    if(prompt.length<3||prompt.length>3000)return ctx.reply('أرسل سؤالًا بين 3 و3000 حرف.');
+    if(state.type==='tf'){
+      userState.set(ctx.from.id,{...state,action:'teacher_q_edit_tf_answer',prompt});
+      return ctx.reply('اختر الإجابة الصحيحة:',Markup.inlineKeyboard([[callbackButton('صح',`ex_edit_tfans:${state.questionId}:صح`),callbackButton('خطأ',`ex_edit_tfans:${state.questionId}:خطأ`)]]));
+    }
+    userState.set(ctx.from.id,{...state,action:'teacher_q_edit_options',prompt});
+    return ctx.reply('أرسل الخيارات، كل خيار في سطر مستقل (من 2 إلى 6):');
+  }
+  if(state.action==='teacher_q_edit_options'){
+    const options=ctx.message.text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+    if(options.length<2||options.length>6||new Set(options).size!==options.length)return ctx.reply('أرسل من خيارين إلى 6 خيارات مختلفة.');
+    userState.set(ctx.from.id,{...state,action:'teacher_q_edit_mcq_answer',options});
+    return ctx.reply('اختر الإجابة الصحيحة:',Markup.inlineKeyboard(options.map((x,i)=>[callbackButton(limitButtonText(x,45),`ex_edit_mcqans:${state.questionId}:${i}`)])));
+  }
   if (state.action === 'teacher_exam_topic') {
     const title = ctx.message.text.trim();
     if (title.length < 3 || title.length > 150) {
@@ -1985,7 +2009,7 @@ function studentScheduleWindow(todayIso){
   const weekday = isoWeekday(todayIso);
   const showNextWeek = weekday === 4 || weekday === 5; // الخميس والجمعة
   const saturdayOffset = showNextWeek
-    ? (6 - weekday) + 7
+    ? (6 - weekday)
     : -((weekday + 1) % 7);
   const startDate = shiftIsoDate(todayIso, saturdayOffset);
   const endDate = shiftIsoDate(startDate, 4); // السبت إلى الأربعاء
@@ -2014,19 +2038,8 @@ function studentScheduleDays(data, startDate, endDate){
   return days;
 }
 
-// يعثر على جدول الطالب من الموسم الفعلي لمرحلته، مع fallback عند وجود تسجيل
-// قديم ما زال مرتبطًا بموسم سابق. هذا يمنع ظهور رسالة «لا توجد مواد»
-// رغم أن الأدمن وضع علامات في جدول الموسم الحالي.
+// جدول الطالب من الموسم النشط لمرحلته؛ قد يبقى تسجيل الطالب مرتبطًا بموسم سابق.
 async function getStudentLessonScheduleData(student){
-  const today=currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
-  const enrolledSeason=await db.getStudentActiveStageSeason(student.id,today);
-  if(enrolledSeason){
-    const enrolledData=await db.getLessonSchedule(enrolledSeason.stage_season_id);
-    if(enrolledData && enrolledData.subjects && enrolledData.subjects.length>0){
-      return enrolledData;
-    }
-  }
-
   if(!student.stage_id)return null;
   const activeSeason=(await db.pool.query(`
     SELECT ss.id AS stage_season_id
@@ -2035,9 +2048,9 @@ async function getStudentLessonScheduleData(student){
     WHERE ss.stage_id=$1 AND ss.is_active=true
     ORDER BY ss.id DESC
     LIMIT 1`,[student.stage_id])).rows[0];
-  if(!activeSeason)return null;
-
-  return db.getLessonSchedule(activeSeason.stage_season_id);
+  if(activeSeason)return db.getLessonSchedule(activeSeason.stage_season_id);
+  const enrolledSeason=await db.getStudentActiveStageSeason(student.id);
+  return enrolledSeason?db.getLessonSchedule(enrolledSeason.stage_season_id):null;
 }
 
 async function showStudentLessonSchedule(ctx){
@@ -2784,7 +2797,7 @@ bot.action(/admin_act_subject:(\d+)/, async (ctx) => {
     subject.stage_id,
     dailyLessonNotificationText(hasChannelLink),
     dailyLessonNotificationKeyboard(lesson),
-    { skipOnLeave: true, dailyLessonNotificationDate: notificationDate }
+    { skipOnLeave: true, dailyLessonNotificationDate: notificationDate, dailyLessonExpiresAt: lesson.active_until }
   );
   return ctx.editMessageText(
     `تم تفعيل الدرس رقم ${Number(lesson.lesson_number)} لمادة «${subject.name}» لمدة ${LESSON_ACTIVE_HOURS} ساعة ✅\n` +
@@ -3407,26 +3420,25 @@ bot.action(/teacher_att:(\d+):(\d+)/, async (ctx) => {
   await ctx.answerCbQuery();
   const rows = await db.getSubjectAttendanceForTeacher(subjectId, stageSeasonId);
   if (rows.length === 0) return ctx.reply('لا يوجد طلبة مسجّلون في هذا الموسم.');
+  const groups=new Map();
+  for(const row of rows){const id=Number(row.group_id||0);if(!groups.has(id))groups.set(id,{title:row.group_title||'بلا مجموعة',count:0});groups.get(id).count++;}
+  return ctx.reply('اختر المجموعة لعرض حضور طلبة المباحثات والتقارير:',Markup.inlineKeyboard(
+    [...groups].map(([id,g])=>[callbackButton(limitButtonText(`${g.title} — ${g.count} طالب`),`teacher_att_group:${subjectId}:${stageSeasonId}:${id}`)])));
+});
 
-  const total = Number(rows[0].total_lessons);
-  // إدارة الاستثناءات: يُبرَز المتأخرون أولًا بدل استعراض كل الطلبة
-  const weak = rows.filter((r) => Number(r.attended_lessons) < total);
-  const header = `📊 ${rows.length} طالبًا | عدد الدروس: ${total}`;
-  if (total === 0) return ctx.reply(`${header}\nلم تُنشر دروس لهذه المادة بعد.`);
-  const lines = weak
-    .slice(0, 40)
-    .map((r) => `• ${r.full_name}: ${Number(r.attended_lessons)}/${total}`);
-  const body = weak.length === 0
-    ? '✅ جميع الطلبة أكملوا كل الدروس.'
-    : `⚠️ لم يكملوا (${weak.length}):\n${lines.join('\n')}` +
-      (weak.length > 40 ? `\n… و${weak.length - 40} آخرون في الملف.` : '');
-
-  return sendMarkdownDoc(
-    ctx,
-    `حضور_المادة_${subjectId}`,
-    buildMarkdownDoc('حضور طلبة المادة', ['الطالب', 'الحضور', 'إجمالي الدروس'],
-      rows.map((r) => [r.full_name, Number(r.attended_lessons), total]))
-  );
+bot.action(/^teacher_att_group:(\d+):(\d+):(\d+)$/,async ctx=>{
+  const subjectId=Number(ctx.match[1]),seasonId=Number(ctx.match[2]),groupId=Number(ctx.match[3]);
+  if(!await teacherOwnsSubject(ctx,subjectId,seasonId))return ctx.answerCbQuery('غير مصرح.');
+  const all=await db.getSubjectAttendanceForTeacher(subjectId,seasonId);
+  const rows=all.filter(r=>Number(r.group_id||0)===groupId);
+  if(!rows.length)return ctx.answerCbQuery('لا يوجد طلبة في هذه المجموعة.');
+  await ctx.answerCbQuery();
+  const title=rows[0].group_title||'بلا مجموعة';
+  const lines=['المباحثات','التقارير'].map((label,index)=>{
+    const subset=rows.filter(r=>index?r.mode==='report':r.mode!=='report');
+    return `${label} (${subset.length}):\n${subset.length?subset.map(r=>`• ${r.full_name}: ${Number(r.attended_lessons)}/${Number(r.total_lessons)} درس`).join('\n'):'لا يوجد طلبة.'}`;
+  });
+  return ctx.reply(`📊 حضور ${title}\n\n${lines.join('\n\n')}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -4127,11 +4139,14 @@ async function renderExam(ctx, examId, edit = false) {
         .join('\n')
     : 'لا أسئلة بعد.';
   const rows = [];
-  if (exam.status === 'draft') {
-    rows.push([Markup.button.callback('➕ سؤال صح/خطأ', `ex_qtf:${examId}`)]);
-    rows.push([Markup.button.callback('➕ سؤال اختيار من متعدد', `ex_qmcq:${examId}`)]);
-
-  } else {
+  if(Number(exam.attempt_count)===0){
+    rows.push([callbackButton('✏️ تعديل موضوع الامتحان',`ex_edit_title:${examId}`)]);
+    rows.push([callbackButton('📅 تعديل تاريخ الامتحان',`ex_edit_date:${examId}`)]);
+    rows.push([callbackButton('➕ سؤال صح/خطأ',`ex_qtf:${examId}`),callbackButton('➕ سؤال اختيار متعدد',`ex_qmcq:${examId}`)]);
+    rows.push([callbackButton('✏️ تعديل سؤال',`ex_edit_question:${examId}`),callbackButton('🗑️ حذف سؤال',`ex_delete_question:${examId}`)]);
+    rows.push([callbackButton('🗑️ حذف الامتحان',`ex_delete:${examId}`)]);
+  }
+  if (exam.status === 'published') {
     rows.push([Markup.button.callback('📊 النتائج', `ex_res:${examId}`)]);
     rows.push([Markup.button.callback('🕓 تأجيل الامتحان', `ex_pp:${examId}`)]);
   }
@@ -4152,6 +4167,65 @@ bot.action(/ex_view:(\d+)/, async (ctx) => {
   }
   await ctx.answerCbQuery();
   return renderExam(ctx, exam.id);
+});
+
+async function editableExamForAction(ctx,examId){
+  const exam=await studies.getExamById(examId);
+  if(!exam||!await teacherOwnsSubject(ctx,exam.subject_id,exam.stage_season_id)||Number(exam.attempt_count)>0)return null;
+  return exam;
+}
+bot.action(/^ex_edit_title:(\d+)$/,async ctx=>{
+  const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن تعديل هذا الامتحان.');
+  userState.set(ctx.from.id,{action:'teacher_exam_edit_title',examId:exam.id});await ctx.answerCbQuery();return ctx.reply('أرسل موضوع الامتحان الجديد:');
+});
+bot.action(/^ex_edit_date:(\d+)$/,async ctx=>{
+  const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن تعديل هذا الامتحان.');
+  await ctx.answerCbQuery();return ctx.reply('اختر تاريخ الامتحان الجديد:',Markup.inlineKeyboard(studies.upcomingWeekDays().map(day=>[callbackButton(day.label,`ex_edit_day:${exam.id}:${day.iso}`)])));
+});
+bot.action(/^ex_edit_day:(\d+):(\d{4}-\d{2}-\d{2})$/,async ctx=>{
+  const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن تعديل هذا الامتحان.');
+  try{await studies.updateExam(exam.id,{title:exam.title,dateIso:ctx.match[2],hours:exam.available_hours});await ctx.answerCbQuery('حُفظ التاريخ');return renderExam(ctx,exam.id);}
+  catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
+});
+bot.action(/^ex_delete:(\d+)$/,async ctx=>{
+  const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن حذف هذا الامتحان.');
+  await ctx.answerCbQuery();return ctx.reply(`حذف «${exam.title}» وأسئلته؟`,Markup.inlineKeyboard([[callbackButton('نعم، احذف الامتحان',`ex_delete_confirm:${exam.id}`)]]));
+});
+bot.action(/^ex_delete_confirm:(\d+)$/,async ctx=>{
+  const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن حذف هذا الامتحان.');
+  try{await studies.deleteExam(exam.id);await ctx.answerCbQuery('حُذف الامتحان');return ctx.editMessageText('حُذف الامتحان وأسئلته.');}
+  catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
+});
+for(const action of ['edit','delete'])bot.action(new RegExp(`^ex_${action}_question:(\\d+)$`),async ctx=>{
+  const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن تعديل الأسئلة.');
+  const questions=await studies.listExamQuestions(exam.id);await ctx.answerCbQuery();
+  if(!questions.length)return ctx.reply('لا توجد أسئلة.');
+  return ctx.reply(action==='edit'?'اختر السؤال لتعديله:':'اختر السؤال لحذفه:',Markup.inlineKeyboard(questions.map(q=>[callbackButton(limitButtonText(`${q.position}. ${q.prompt}`,48),`ex_${action}_question_pick:${q.id}`)])));
+});
+bot.action(/^ex_edit_question_pick:(\d+)$/,async ctx=>{
+  const q=await studies.getQuestionById(Number(ctx.match[1]));const exam=q&&await editableExamForAction(ctx,q.exam_id);
+  if(!exam)return ctx.answerCbQuery('لا يمكن تعديل السؤال.');
+  userState.set(ctx.from.id,{action:'teacher_q_edit_prompt',questionId:q.id,examId:exam.id,type:q.question_type});
+  await ctx.answerCbQuery();return ctx.reply(`السؤال الحالي: ${q.prompt}\nأرسل نص السؤال الجديد:`);
+});
+bot.action(/^ex_delete_question_pick:(\d+)$/,async ctx=>{
+  const q=await studies.getQuestionById(Number(ctx.match[1]));const exam=q&&await editableExamForAction(ctx,q.exam_id);
+  if(!exam)return ctx.answerCbQuery('لا يمكن حذف السؤال.');
+  try{await studies.deleteExamQuestion(q.id);await ctx.answerCbQuery('حُذف السؤال');return renderExam(ctx,exam.id);}
+  catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
+});
+bot.action(/^ex_edit_tfans:(\d+):(صح|خطأ)$/,async ctx=>{
+  const state=userState.get(ctx.from.id),q=await studies.getQuestionById(Number(ctx.match[1]));
+  if(!state||state.action!=='teacher_q_edit_tf_answer'||state.questionId!==q?.id||!await editableExamForAction(ctx,q.exam_id))return ctx.answerCbQuery('انتهت عملية التعديل.');
+  try{await studies.updateExamQuestion(q.id,{type:'tf',prompt:state.prompt,correct:ctx.match[2]});userState.delete(ctx.from.id);await ctx.answerCbQuery('حُفظ السؤال');return renderExam(ctx,q.exam_id);}
+  catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
+});
+bot.action(/^ex_edit_mcqans:(\d+):(\d+)$/,async ctx=>{
+  const state=userState.get(ctx.from.id),q=await studies.getQuestionById(Number(ctx.match[1]));
+  if(!state||state.action!=='teacher_q_edit_mcq_answer'||state.questionId!==q?.id||!await editableExamForAction(ctx,q.exam_id))return ctx.answerCbQuery('انتهت عملية التعديل.');
+  const correct=state.options[Number(ctx.match[2])];if(!correct)return ctx.answerCbQuery('خيار غير صالح.');
+  try{await studies.updateExamQuestion(q.id,{type:'mcq',prompt:state.prompt,options:state.options,correct});userState.delete(ctx.from.id);await ctx.answerCbQuery('حُفظ السؤال');return renderExam(ctx,q.exam_id);}
+  catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
 });
 
 bot.action(/ex_qtf:(\d+)/, async (ctx) => {
@@ -5440,11 +5514,9 @@ bot.action(/^sr_stu:(\d+):(\d+):(\d+)(?::(\d+):(\d+))?$/, async (ctx) => {
   if(page>0)nav.push(callbackButton('تقارير سابقة',`sr_stu:${studentId}:${subjectId}:${ssId}:${groupId}:${page-1}`));
   if((page+1)*10<Number(reports[0].total_count))nav.push(callbackButton('تقارير تالية',`sr_stu:${studentId}:${subjectId}:${ssId}:${groupId}:${page+1}`));
   if(nav.length)rows.push(nav);
-  rows.push([
-    callbackButton(
-      `📊 حفظ متوسط التقييمات كدرجة التقارير (${summary.average === null ? '—' : Number(summary.average)}/${studies.GRADE_WEIGHTS.participationTotal})`,
-      `sr_apply:${studentId}:${subjectId}:${ssId}`
-    ),
+  if(Number(summary.total)>0&&Number(summary.graded)===Number(summary.total))rows.push([
+    callbackButton(`✅ اعتماد درجة التقارير: ${Number(summary.average)}/${studies.GRADE_WEIGHTS.participationTotal}`,
+      `sr_apply:${studentId}:${subjectId}:${ssId}`),
   ]);
   rows.push([
     callbackButton('✍️ تحديد درجة التقارير يدويًا', `sr_manual:${studentId}:${subjectId}:${ssId}`),
@@ -5454,8 +5526,8 @@ bot.action(/^sr_stu:(\d+):(\d+):(\d+)(?::(\d+):(\d+))?$/, async (ctx) => {
       `التقارير المُقيَّمة: ${Number(summary.graded)} من ${Number(summary.total)}` +
       `${summary.average === null ? '' : ` | متوسط التقييمات: ${Number(summary.average)} من ${studies.GRADE_WEIGHTS.participationTotal}`}\n\n` +
       'اضغط «تقييم هذا التقرير» لإعطائه درجة أو تعديل تقييمه السابق.\n' +
-      `«حفظ متوسط التقييمات كدرجة التقارير» يسجّل متوسط التقارير المُقيَّمة فقط، من ${studies.GRADE_WEIGHTS.participationTotal}، في خانة درجة التقارير لهذه المادة وهذا الموسم. التقارير غير المُقيَّمة لا تدخل في الحساب.\n` +
-      'ويمكنك اختيار «تحديد درجة التقارير يدويًا» لإدخال الدرجة التي تريد حفظها مباشرةً.',
+      `بعد تقييم التقارير كلها يظهر زر «اعتماد درجة التقارير». يحسب متوسط درجاتها من ${studies.GRADE_WEIGHTS.participationTotal} ويحفظه درجةً معتمدة لهذه المادة وهذا الموسم.\n` +
+      'للاستثناءات يمكنك تحديد درجة التقارير يدويًا.',
     Markup.inlineKeyboard(rows)
   );
 });
@@ -5967,7 +6039,7 @@ async function handleChannelLesson(ctx) {
       channel.stage_id,
       dailyLessonNotificationText(hasChannelLink),
       dailyLessonNotificationKeyboard(lesson),
-      { skipOnLeave: true, dailyLessonNotificationDate: notificationDate }
+      { skipOnLeave: true, dailyLessonNotificationDate: notificationDate, dailyLessonExpiresAt: lesson.active_until }
     );
 
     await notifyAdmins(
@@ -6021,7 +6093,7 @@ async function checkReminders() {
             AND NOT EXISTS(SELECT 1 FROM attendance a WHERE a.student_id=st.id AND a.lesson_id=l.id)
             AND NOT EXISTS(SELECT 1 FROM student_leaves sl WHERE sl.student_id=st.id AND sl.stage_season_id=e.stage_season_id
               AND sl.status='approved' AND $3::date BETWEEN sl.start_date AND sl.end_date)
-          ON CONFLICT(dedupe_key) DO NOTHING`,[lesson.id,JSON.stringify([text,singleLessonKeyboard(lesson)]),currentDateInTimeZone(ATTENDANCE_TIME_ZONE)]);
+          ON CONFLICT(dedupe_key) DO NOTHING`,[lesson.id,JSON.stringify([text,Markup.inlineKeyboard([[callbackButton('أضغط لتسجيل الحضور',`attend:${lesson.id}`)]])]),currentDateInTimeZone(ATTENDANCE_TIME_ZONE)]);
         await c.query('UPDATE lessons SET reminder_sent=true WHERE id=$1',[lesson.id]);
         await c.query('COMMIT');
       }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
@@ -6184,6 +6256,7 @@ module.exports = {
   groupStudentReport,
   parseLeaveDays,
   currentDateInTimeZone,
+  studentScheduleWindow,
   buildAdminAbsenceMessages,
   lessonKeyboard,
   singleLessonKeyboard,

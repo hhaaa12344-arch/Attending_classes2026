@@ -215,6 +215,16 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           const id=positiveInt(m[1]);result={removed:await studies.deleteExamQuestion(id)};
           if(result.removed)await audit(actor.id,'remove_question','question',id,null,result);
         }
+        else if((m=/^\/exams\/(\d+)\/(update|delete)$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]),before=await studies.getExamById(id);
+          result=m[2]==='update'?await studies.updateExam(id,body):await studies.deleteExam(id);
+          await audit(actor.id,m[2]+'_exam','exam',id,before,result);
+        }
+        else if((m=/^\/questions\/(\d+)\/update$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]),before=await studies.getQuestionById(id);
+          result=await studies.updateExamQuestion(id,body);
+          await audit(actor.id,'update_question','question',id,before,result);
+        }
         else if((m=/^\/leaves\/(\d+)\/decision$/.exec(route))&&req.method==='POST'){
           if(typeof body.approve!=='boolean')throw appError('حدد الموافقة أو الرفض.');
           const id=positiveInt(m[1]);result=await db.decideLeave(id,body.approve,actor.id);

@@ -7,7 +7,7 @@ async function enqueueNotification(client, { key, chatId, text, extra = {}, meth
   [key, chatId, method, JSON.stringify([text, extra]), priority, expiresAt,JSON.stringify(mark)]);
 }
 
-function createOutboxWorker(pool, queue) {
+function createOutboxWorker(pool, queue, deleteMessage = null) {
   let running = false;
   let stopped = false;
   let nextPoll = 0;
@@ -23,6 +23,17 @@ function createOutboxWorker(pool, queue) {
       }
       await pool.query(`UPDATE notification_outbox SET status='expired'
         WHERE status IN ('pending','sending') AND expires_at <= now()`);
+      if(deleteMessage){
+        const expired=(await pool.query(`SELECT id,chat_id,telegram_message_id FROM notification_outbox
+          WHERE status='sent' AND telegram_message_id IS NOT NULL AND deleted_at IS NULL
+            AND expires_at<=now() AND (dedupe_key LIKE 'daily:%' OR dedupe_key LIKE 'lesson-reminder:%')
+          ORDER BY expires_at,id LIMIT 20`)).rows;
+        for(const notice of expired){
+          try{await deleteMessage(Number(notice.chat_id),Number(notice.telegram_message_id));}
+          catch(err){if(![400,404].includes(err.response?.error_code))continue;}
+          await pool.query('UPDATE notification_outbox SET deleted_at=now() WHERE id=$1',[notice.id]);
+        }
+      }
       // Lease one item at a time: never reserve a large batch while waiting for Telegram.
       for (let i = 0; i < 250 && !stopped; i++) {
         const { rows } = await pool.query(`UPDATE notification_outbox SET status='sending',
@@ -34,11 +45,12 @@ function createOutboxWorker(pool, queue) {
         const job = rows[0];
         if (!job) {nextPoll=Date.now()+5000;break;}
         try {
-          await queue[job.method](Number(job.chat_id), ...job.payload, { priority: job.priority });
+          const sent=await queue[job.method](Number(job.chat_id), ...job.payload, { priority: job.priority });
           const c=await pool.connect();
           try{
             await c.query('BEGIN');
-            await c.query(`UPDATE notification_outbox SET status='sent',sent_at=now(),lease_until=NULL,last_error=NULL WHERE id=$1`,[job.id]);
+            await c.query(`UPDATE notification_outbox SET status='sent',sent_at=now(),lease_until=NULL,last_error=NULL,
+              telegram_message_id=$2 WHERE id=$1`,[job.id,sent?.message_id||null]);
             const mark=job.delivery_mark;
             if(mark?.kind==='student_absence')await c.query('UPDATE student_attendance_days SET student_alert_sent_at=COALESCE(student_alert_sent_at,now()) WHERE id=$1',[mark.id]);
             if(mark?.kind==='admin_absence')await c.query('UPDATE student_attendance_days SET admin_alert_sent_at=COALESCE(admin_alert_sent_at,now()) WHERE id=ANY($1::bigint[])',[mark.ids]);

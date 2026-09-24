@@ -61,6 +61,8 @@ async function initIntegritySchema(pool) {
     CREATE INDEX IF NOT EXISTS idx_outbox_due ON notification_outbox(available_at, priority, id)
       WHERE status IN ('pending','sending');
     ALTER TABLE notification_outbox ADD COLUMN IF NOT EXISTS delivery_mark JSONB;
+    ALTER TABLE notification_outbox ADD COLUMN IF NOT EXISTS telegram_message_id BIGINT;
+    ALTER TABLE notification_outbox ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
     -- Existing historical sessions must NOT be broadcast on migration.
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS start_notifications_queued BOOLEAN NOT NULL DEFAULT true;
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_notifications_queued BOOLEAN NOT NULL DEFAULT true;

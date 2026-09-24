@@ -707,11 +707,8 @@ async function addExamQuestion(examId, { type, prompt, options, correct }) {
   await client.query('BEGIN');
   const exam = await client.query('SELECT status FROM exams WHERE id=$1 FOR UPDATE', [examId]).then((r) => r.rows[0]);
   if (!exam) throw new Error('الامتحان غير موجود.');
-  if (exam.status === 'published') {
-    const err = new Error('لا يمكن تعديل أسئلة امتحان منشور.');
-    err.code = 'EXAM_PUBLISHED';
-    throw err;
-  }
+  if((await client.query('SELECT 1 FROM exam_attempts WHERE exam_id=$1 LIMIT 1',[examId])).rowCount)
+    throw appError('بدأ أحد الطلبة الامتحان؛ لا يمكن تعديل أسئلته.','ALREADY_TAKEN',409);
   const pos = await client
     .query('SELECT COALESCE(MAX(position),0)+1 AS n FROM exam_questions WHERE exam_id=$1', [examId])
     .then((r) => Number(r.rows[0].n));
@@ -736,10 +733,88 @@ async function deleteExamQuestion(questionId) {
   try{
     await c.query('BEGIN');
     const exam=(await c.query('SELECT e.* FROM exams e JOIN exam_questions q ON q.exam_id=e.id WHERE q.id=$1 FOR UPDATE OF e',[questionId])).rows[0];
-    if(!exam||exam.status!=='draft')throw appError('يمكن حذف أسئلة المسودة فقط.');
+    if(!exam)throw appError('السؤال غير موجود.','NOT_FOUND',404);
+    if((await c.query('SELECT 1 FROM exam_attempts WHERE exam_id=$1 LIMIT 1',[exam.id])).rowCount)
+      throw appError('بدأ أحد الطلبة الامتحان؛ لا يمكن تعديل أسئلته.','ALREADY_TAKEN',409);
+    if(exam.status==='published'&&Number((await c.query('SELECT COUNT(*) AS n FROM exam_questions WHERE exam_id=$1',[exam.id])).rows[0].n)===1)
+      throw appError('أضف سؤالًا بديلًا قبل حذف آخر سؤال من الامتحان المنشور.','LAST_QUESTION',409);
     const r=await c.query('DELETE FROM exam_questions WHERE id=$1 RETURNING id',[questionId]);
     await c.query('COMMIT');return r.rowCount>0;
   }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+}
+
+async function updateExamQuestion(questionId,{type,prompt,options,correct}){
+  if(!['tf','mcq'].includes(type))throw appError('نوع السؤال غير صالح.');
+  if(typeof prompt!=='string'||prompt.trim().length<3||prompt.length>3000)throw appError('نص السؤال يجب أن يكون بين 3 و3000 حرف.');
+  const answers=type==='tf'?['صح','خطأ']:options;
+  if(!Array.isArray(answers)||answers.length<2||answers.length>6||new Set(answers).size!==answers.length||
+    !answers.includes(correct)||answers.some(x=>typeof x!=='string'||!x.trim()||x.length>300))
+    throw appError('الخيارات أو الإجابة الصحيحة غير صالحة.');
+  const c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    const exam=(await c.query('SELECT e.id FROM exams e JOIN exam_questions q ON q.exam_id=e.id WHERE q.id=$1 FOR UPDATE OF e',[questionId])).rows[0];
+    if(!exam)throw appError('السؤال غير موجود.','NOT_FOUND',404);
+    if((await c.query('SELECT 1 FROM exam_attempts WHERE exam_id=$1 LIMIT 1',[exam.id])).rowCount)
+      throw appError('بدأ أحد الطلبة الامتحان؛ لا يمكن تعديل أسئلته.','ALREADY_TAKEN',409);
+    const result=(await c.query(`UPDATE exam_questions SET question_type=$2,prompt=$3,options=$4::jsonb,correct_answer=$5
+      WHERE id=$1 RETURNING *`,[questionId,type,prompt.trim(),type==='mcq'?JSON.stringify(options):null,correct])).rows[0];
+    await c.query('COMMIT');return result;
+  }catch(err){await c.query('ROLLBACK');throw err;}finally{c.release();}
+}
+
+async function updateExam(examId,{title,dateIso,hours}){
+  if(typeof title!=='string'||title.trim().length<3||title.trim().length>150)throw appError('عنوان الامتحان يجب أن يكون بين 3 و150 حرفًا.');
+  const parsedDate=new Date(`${dateIso}T00:00:00Z`);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(dateIso||'')||Number.isNaN(parsedDate.getTime())||parsedDate.toISOString().slice(0,10)!==dateIso)
+    throw appError('تاريخ الامتحان غير صالح.');
+  const h=Number(hours);
+  if(!Number.isInteger(h)||h<1||h>720)throw appError('مدة الإتاحة يجب أن تكون بين 1 و720 ساعة.');
+  const c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    const before=(await c.query(`SELECT e.* FROM exams e JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+      WHERE e.id=$1 FOR UPDATE OF e`,[examId])).rows[0];
+    if(!before)throw appError('الامتحان غير موجود أو موسمه غير نشط.','NOT_FOUND',404);
+    if((await c.query('SELECT 1 FROM exam_attempts WHERE exam_id=$1 LIMIT 1',[examId])).rowCount)
+      throw appError('بدأ أحد الطلبة الامتحان؛ لا يمكن تعديله.','ALREADY_TAKEN',409);
+    const result=(await c.query(`UPDATE exams SET title=$2,
+      opens_at=(($3::date+make_interval(hours=>$5::int)) AT TIME ZONE $6) AT TIME ZONE 'UTC',
+      closes_at=((($3::date+make_interval(hours=>$5::int)) AT TIME ZONE $6) AT TIME ZONE 'UTC')+make_interval(hours=>$4::int),
+      available_hours=$4::int WHERE id=$1 RETURNING *`,[examId,title.trim(),dateIso,h,EXAM_START_HOUR,SCHEDULE_TZ])).rows[0];
+    const changed=before.title!==result.title||new Date(before.opens_at).getTime()!==new Date(result.opens_at).getTime()||Number(before.available_hours)!==h;
+    if(changed){
+      await c.query(`UPDATE notification_outbox SET status='expired' WHERE dedupe_key LIKE $1 AND status='pending'`,[`exam:${examId}:%`]);
+      const message=`📝 تم تعديل الامتحان «${result.title}».\nيفتح: ${new Date(result.opens_at).toLocaleString('ar-IQ',{timeZone:SCHEDULE_TZ})}\nمدة الإتاحة: ${h} ساعة.`;
+      await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
+        SELECT $1||':'||st.id::text,st.telegram_id,$2::jsonb,$3 FROM enrollments en JOIN students st ON st.id=en.student_id AND st.is_active=true
+        WHERE en.stage_season_id=$4 AND en.status='active' ON CONFLICT DO NOTHING`,
+        [`exam-edit:${examId}:${Date.now()}`,JSON.stringify([message,{}]),result.closes_at,result.stage_season_id]);
+    }
+    await c.query('COMMIT');return result;
+  }catch(err){await c.query('ROLLBACK');throw err;}finally{c.release();}
+}
+
+async function deleteExam(examId){
+  const c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    const exam=(await c.query(`SELECT e.* FROM exams e JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+      WHERE e.id=$1 FOR UPDATE OF e`,[examId])).rows[0];
+    if(!exam)throw appError('الامتحان غير موجود أو موسمه غير نشط.','NOT_FOUND',404);
+    if((await c.query('SELECT 1 FROM exam_attempts WHERE exam_id=$1 LIMIT 1',[examId])).rowCount)
+      throw appError('بدأ أحد الطلبة الامتحان؛ لا يمكن حذفه وسجلاته.','ALREADY_TAKEN',409);
+    await c.query(`UPDATE notification_outbox SET status='expired' WHERE status='pending' AND
+      (dedupe_key LIKE $1 OR dedupe_key LIKE $2 OR dedupe_key LIKE $3)`,
+      [`exam:${examId}:%`,`exam-edit:${examId}:%`,`exam-postpone:${examId}:%`]);
+    await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload)
+      SELECT 'exam-cancel:'||$1::text||':'||st.id::text,st.telegram_id,$2::jsonb
+      FROM enrollments en JOIN students st ON st.id=en.student_id AND st.is_active=true
+      WHERE en.stage_season_id=$3 AND en.status='active' ON CONFLICT DO NOTHING`,
+      [examId,JSON.stringify([`أُلغي الامتحان «${exam.title||'الشهري '+exam.exam_number}» ولم يعد متاحًا.`,{}]),exam.stage_season_id]);
+    await c.query('DELETE FROM exams WHERE id=$1',[examId]);
+    await c.query('COMMIT');return {deleted:true};
+  }catch(err){await c.query('ROLLBACK');throw err;}finally{c.release();}
 }
 
 async function getExamsReadyToAutoPublish(limit = 50) {
@@ -781,7 +856,8 @@ const getExamById = (examId) =>
   pool
     .query(
       `SELECT e.*, sub.name AS subject_name,
-              (SELECT COUNT(*) FROM exam_questions q WHERE q.exam_id=e.id) AS question_count
+              (SELECT COUNT(*) FROM exam_questions q WHERE q.exam_id=e.id) AS question_count,
+              (SELECT COUNT(*) FROM exam_attempts a WHERE a.exam_id=e.id) AS attempt_count
        FROM exams e JOIN subjects sub ON sub.id=e.subject_id WHERE e.id=$1`,
       [examId]
     )
@@ -1257,6 +1333,8 @@ async function applyReportAverage(studentId, subjectId, stageSeasonId) {
     err.code = 'NO_GRADED_REPORTS';
     throw err;
   }
+  if(Number(summary.graded)!==Number(summary.total))
+    throw appError(`قيّم التقارير المتبقية أولًا (${Number(summary.graded)} من ${Number(summary.total)} مقيّم).`,'REPORTS_PENDING',409);
   const avg = Number(summary.average);
   await setReportScore(studentId, subjectId, stageSeasonId, avg);
   return { average: avg, graded: Number(summary.graded), total: Number(summary.total) };
@@ -1842,6 +1920,9 @@ module.exports = {
   addExamQuestion,
   listExamQuestions,
   deleteExamQuestion,
+  updateExamQuestion,
+  updateExam,
+  deleteExam,
   getExamsReadyToAutoPublish,
   publishExam,
   getExamById,

@@ -48,7 +48,10 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
         SELECT student_id,subject_id,stage_season_id,group_id,assigned_at,ended_at
         FROM group_membership_history
       )
-      SELECT st.id AS student_id,st.full_name,
+      SELECT st.id AS student_id,st.full_name,pm.mode,
+             current_group.group_id,discussion_group_label(current_group.group_id) AS group_title,
+             (SELECT COUNT(*) FROM student_reports r WHERE r.student_id=st.id AND r.subject_id=pm.subject_id
+               AND r.stage_season_id=pm.stage_season_id) AS report_count,
              COUNT(DISTINCT ms.id) AS eligible_sessions,
              COUNT(DISTINCT ms.id) FILTER (
                WHERE start_att.id IS NOT NULL AND end_att.id IS NOT NULL
@@ -59,6 +62,8 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
       FROM participation_modes pm
       JOIN students st ON st.id=pm.student_id AND st.is_active=true
       JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=pm.stage_season_id AND e.status='active'
+      LEFT JOIN group_memberships current_group ON current_group.student_id=st.id
+        AND current_group.subject_id=pm.subject_id AND current_group.stage_season_id=pm.stage_season_id
       LEFT JOIN memberships gm ON gm.student_id=pm.student_id AND gm.subject_id=pm.subject_id
         AND gm.stage_season_id=pm.stage_season_id
       LEFT JOIN mubahatha_sessions ms ON ms.group_id=gm.group_id
@@ -69,9 +74,8 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
       LEFT JOIN mubahatha_attendance end_att ON end_att.session_id=ms.id
         AND end_att.student_id=pm.student_id AND end_att.phase='end'
       WHERE pm.subject_id=$1 AND pm.stage_season_id=$2
-        AND (pm.mode='mubahatha' OR pm.joined_mubahatha_at IS NOT NULL)
-      GROUP BY st.id,st.full_name
-      ORDER BY st.full_name,st.id`,[subjectId,seasonId])).rows;
+      GROUP BY st.id,st.full_name,pm.mode,pm.subject_id,pm.stage_season_id,current_group.group_id
+      ORDER BY current_group.group_id,st.full_name,st.id`,[subjectId,seasonId])).rows;
   }
 
   async function dashboard(actor){
@@ -180,6 +184,10 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
         const {subjectId,seasonId}=await requireOwnedSubject(actor,q.subjectId,q.seasonId);
         result=await studies.listStudentReports(studentId,subjectId,seasonId,{page:Number(q.page||0),size:30,groupId:q.groupId?positiveInt(q.groupId):null});
       }
+      else if(route==='/reports/summary'){
+        const {subjectId,seasonId}=await requireOwnedSubject(actor,q.subjectId,q.seasonId);
+        result=await studies.getReportGradingSummary(positiveInt(q.studentId),subjectId,seasonId);
+      }
       else if(route==='/exams'){
         const {subjectId,seasonId}=await requireOwnedSubject(actor,q.subjectId,q.seasonId);
         result=await studies.listExamsForSubject(subjectId,seasonId);
@@ -217,6 +225,14 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
         if(!report)throw appError('التقرير غير موجود أو ليس ضمن موادك.','FORBIDDEN',403);
         result=await studies.setReportItemScore(reportId,validScore(body.score,15),actor.id);
       }
+      else if(route==='/reports/average'){
+        const studentId=positiveInt(body.studentId);
+        const {subjectId,seasonId}=await requireOwnedSubject(actor,body.subjectId,body.seasonId);
+        const enrolled=(await db.pool.query(`SELECT 1 FROM enrollments WHERE student_id=$1 AND stage_season_id=$2 AND status='active'`,
+          [studentId,seasonId])).rowCount;
+        if(!enrolled)throw appError('الطالب غير مسجّل في هذا الموسم.','FORBIDDEN',403);
+        result=await studies.applyReportAverage(studentId,subjectId,seasonId);
+      }
       else if(route==='/exams'){
         const {subjectId,seasonId}=await requireOwnedSubject(actor,body.subjectId,body.seasonId);
         const examNumber=positiveInt(body.examNumber,'رقم الامتحان');
@@ -234,6 +250,17 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
       else if((m=/^\/exams\/(\d+)\/publish$/.exec(route))){
         const exam=await requireOwnedExam(actor,m[1]);
         result=await studies.publishExam(exam.id);
+      }
+      else if((m=/^\/exams\/(\d+)\/(update|delete)$/.exec(route))){
+        const exam=await requireOwnedExam(actor,m[1]);
+        result=m[2]==='update'?await studies.updateExam(exam.id,body):await studies.deleteExam(exam.id);
+      }
+      else if((m=/^\/questions\/(\d+)\/(update|delete)$/.exec(route))){
+        const questionId=positiveInt(m[1]);
+        const question=await studies.getQuestionById(questionId);
+        if(!question)throw appError('السؤال غير موجود.','NOT_FOUND',404);
+        await requireOwnedExam(actor,question.exam_id);
+        result=m[2]==='update'?await studies.updateExamQuestion(questionId,body):{removed:await studies.deleteExamQuestion(questionId)};
       }
       else throw appError('العملية غير متاحة في لوحة الأستاذ.','NOT_FOUND',404);
       json(res,200,result??null);return true;
