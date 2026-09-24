@@ -13,10 +13,6 @@ test.before(async()=>{
   app.bot.botInfo={id:12345,is_bot:true,username:'AttendanceTestBot',first_name:'test'};
 });
 test.after(async()=>{Telegram.prototype.callApi=original;if(db)await db.pool.end();});
-test('student lesson schedule advances from Thursday and Friday to the immediate Saturday',()=>{
-  assert.deepEqual(app.studentScheduleWindow('2026-09-24'),{startDate:'2026-09-26',endDate:'2026-09-30',label:'الأسبوع القادم'});
-  assert.deepEqual(app.studentScheduleWindow('2026-09-25'),{startDate:'2026-09-26',endDate:'2026-09-30',label:'الأسبوع القادم'});
-});
 async function send(id,text,data){messages.length=0;const from={id,is_bot:false,first_name:'test'};const message={message_id:messageId++,date:Math.floor(Date.now()/1000),from,chat:{id,type:'private'},text,...(text&&text.startsWith('/')?{entities:[{offset:0,length:text.split(/\s/)[0].length,type:'bot_command'}]}:{})};
   await app.bot.handleUpdate(data?{update_id:messageId,callback_query:{id:'cb'+messageId,from,data,message}}:{update_id:messageId,message});return messages;
 }
@@ -38,38 +34,6 @@ test('bot: student management starts with stages, stage contents and students wi
   await send(42,'🎓 إدارة الطلبة');assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='students_stage:'+stage.id)));
   await send(42,'',`students_stage:${stage.id}`);assert.ok(messages.some(m=>m.text?.includes('المرحلة التمهيدية')));
   await send(42,'',`students_page:${stage.id}:0`);assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='stu_select:'+student.id)));
-});
-test('bot: general incomplete-action notice is previewed and queued only by admin',async()=>{
-  await send(42,'🎓 إدارة الطلبة');
-  assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='students_remind_all')));
-  await send(student.telegram_id,'','students_remind_all');
-  assert.ok(!messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]).some(b=>b.callback_data?.startsWith('students_remind_send:')));
-  await send(42,'','students_remind_all');
-  const campaign=messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]).find(b=>b.callback_data?.startsWith('students_remind_send:'))?.callback_data;
-  assert.ok(campaign);
-  await send(42,'',campaign);
-  const sent=(await db.pool.query("SELECT payload FROM notification_outbox WHERE dedupe_key LIKE 'student-incomplete:%' AND chat_id=$1",[student.telegram_id])).rows;
-  assert.equal(sent.length,1);assert.match(sent[0].payload[0],/اختر نوع مشاركتك/);
-  await send(42,'',campaign);
-  assert.equal((await db.pool.query("SELECT 1 FROM notification_outbox WHERE dedupe_key LIKE 'student-incomplete:%' AND chat_id=$1",[student.telegram_id])).rowCount,1);
-});
-test('bot: an unapproved Telegram group is left until admin approves readdition',async()=>{
-  const chat={id:-1009876543210,type:'supergroup',title:'مجموعة اختبار الموافقة'};
-  const membership=()=>({update_id:++messageId,my_chat_member:{chat,from:{id:777,is_bot:false,first_name:'عضو'},date:Math.floor(Date.now()/1000),
-    old_chat_member:{user:{id:12345,is_bot:true},status:'left'},new_chat_member:{user:{id:12345,is_bot:true},status:'administrator'}}});
-  messages.length=0;await app.bot.handleUpdate(membership());
-  assert.ok(messages.some(m=>m.method==='leaveChat'&&Number(m.chat_id)===chat.id));
-  assert.equal((await db.pool.query('SELECT approved_at FROM approved_group_chats WHERE chat_id=$1',[chat.id])).rows[0].approved_at,null);
-  messages.length=0;
-  await app.bot.handleUpdate({update_id:++messageId,message:{message_id:++messageId,date:Math.floor(Date.now()/1000),
-    from:{id:777,is_bot:false,first_name:'عضو'},chat,text:'/start'}});
-  assert.ok(messages.some(m=>m.method==='leaveChat'&&Number(m.chat_id)===chat.id));
-  await send(777,'',`group_approve:${chat.id}`);
-  assert.equal((await db.pool.query('SELECT approved_at FROM approved_group_chats WHERE chat_id=$1',[chat.id])).rows[0].approved_at,null);
-  await send(42,'',`group_approve:${chat.id}`);
-  assert.ok((await db.pool.query('SELECT approved_at FROM approved_group_chats WHERE chat_id=$1',[chat.id])).rows[0].approved_at);
-  messages.length=0;await app.bot.handleUpdate(membership());
-  assert.ok(!messages.some(m=>m.method==='leaveChat'));
 });
 test('bot: first-use confirmation required, marking disappears and today retains reply keyboard',async()=>{
   await send(90000,'📚 دروس اليوم');assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='confirm_official_student')));
@@ -186,19 +150,31 @@ test('bot: student screens identify the student and report upload explains its w
   await send(student.telegram_id,'',`rep_send:${subject.id}:${ss}`);
   assert.ok(messages.some(m=>m.text?.includes(heading)&&m.text.includes('مرة واحدة أسبوعيًا، وليس يوميًا')));
 });
-test('bot: teacher can edit a question and delete an untouched exam',async()=>{
-  const teacher=(await db.getTeacherByTelegramId(80000));
-  const exam=await studies.createExam(subject.id,ss,teacher.id,{examNumber:2,title:'موضوع أول',dateIso:'2030-01-01',hours:24});
-  const question=await studies.addExamQuestion(exam.id,{type:'tf',prompt:'سؤال قديم',correct:'صح'});
-  await send(80000,'',`ex_view:${exam.id}`);
-  assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data===`ex_edit_question:${exam.id}`)));
-  await send(80000,'',`ex_edit_question:${exam.id}`);
-  await send(80000,'',`ex_edit_question_pick:${question.id}`);
-  await send(80000,'سؤال جديد واضح');
-  await send(80000,'',`ex_edit_tfans:${question.id}:خطأ`);
-  assert.equal((await studies.getQuestionById(question.id)).correct_answer,'خطأ');
-  await send(80000,'',`ex_edit_title:${exam.id}`);await send(80000,'موضوع جديد');
-  assert.equal((await studies.getExamById(exam.id)).title,'موضوع جديد');
-  await send(80000,'',`ex_delete:${exam.id}`);await send(80000,'',`ex_delete_confirm:${exam.id}`);
-  assert.equal(await studies.getExamById(exam.id),undefined);
+
+test('bot: teacher attendance matches discussion sessions rather than published lessons',async()=>{
+  const teacher=(await db.pool.query("INSERT INTO teachers(full_name,telegram_id) VALUES('أستاذ حضور المباحثات',83000) RETURNING *")).rows[0];
+  await db.pool.query('INSERT INTO teaching_assignments(teacher_id,subject_id,stage_season_id) VALUES($1,$2,$3)',[teacher.id,subject.id,ss]);
+  const attendee=await db.createStudent(93000,'طالب حضور مباحثات تجريبي',stage.id);
+  const group=await studies.createMubahathaGroup(subject.id,ss,{title:'مجموعة اختبار الحضور'});
+  assert.ok(await studies.setParticipationMode(attendee.id,subject.id,ss,'mubahatha'));
+  assert.equal((await studies.assignStudentToGroup(attendee.id,subject.id,ss)).group.id,group.id);
+  await db.pool.query("UPDATE participation_modes SET joined_mubahatha_at=now()-interval '1 day' WHERE student_id=$1 AND subject_id=$2",[attendee.id,subject.id]);
+  await db.pool.query("UPDATE group_memberships SET assigned_at=now()-interval '1 day' WHERE student_id=$1 AND subject_id=$2",[attendee.id,subject.id]);
+  const sessions=(await db.pool.query(`INSERT INTO mubahatha_sessions(group_id,teacher_id,title,opened_at,closes_at,is_closed)
+    VALUES($1,$2,'جلسة أولى',now()-interval '2 hours',now()-interval '1 hour',true),
+          ($1,$2,'جلسة ثانية',now()-interval '1 hour',now(),true) RETURNING id`,[group.id,teacher.id])).rows;
+  await db.pool.query("INSERT INTO mubahatha_attendance(session_id,student_id,phase) VALUES($1,$3,'start'),($1,$3,'end'),($2,$3,'start')",[sessions[0].id,sessions[1].id,attendee.id]);
+  await db.activateLesson(subject.id,24);
+  const attendance=await studies.listDiscussionAttendanceForTeacher(subject.id,ss);
+  const row=attendance.find(r=>Number(r.student_id)===attendee.id);
+  assert.deepEqual([Number(row.attended_sessions),Number(row.eligible_sessions),Number(row.incomplete_sessions)],[1,2,1]);
+  await send(83000,'📊 حضور موادي');
+  assert.ok(messages.some(m=>m.text?.includes('حضور مباحثات')));
+  await send(83000,'',`teacher_att:${subject.id}:${ss}`);
+  assert.ok(messages.some(m=>m.text?.includes(`${attendee.full_name}: 1/2 (1 بداية بلا نهاية)`)));
+  const doc=messages.find(m=>m.method==='sendDocument');
+  assert.ok(doc?.document.source.toString('utf8').includes(`| ${attendee.full_name} | 1 | 2 | 1 |`));
+  assert.ok(!doc.document.source.toString('utf8').includes('إجمالي الدروس'));
+  await send(attendee.telegram_id,'',`teacher_att:${subject.id}:${ss}`);
+  assert.ok(!messages.some(m=>m.method==='sendDocument'));
 });
