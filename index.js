@@ -2004,7 +2004,7 @@ function studentScheduleWindow(todayIso){
   const weekday = isoWeekday(todayIso);
   const showNextWeek = weekday === 4 || weekday === 5; // الخميس والجمعة
   const saturdayOffset = showNextWeek
-    ? (6 - weekday) + 7
+    ? 6 - weekday
     : -((weekday + 1) % 7);
   const startDate = shiftIsoDate(todayIso, saturdayOffset);
   const endDate = shiftIsoDate(startDate, 4); // السبت إلى الأربعاء
@@ -6284,6 +6284,7 @@ module.exports = {
   groupStudentReport,
   parseLeaveDays,
   currentDateInTimeZone,
+  studentScheduleWindow,
   buildAdminAbsenceMessages,
   lessonKeyboard,
   singleLessonKeyboard,
