@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const {JSDOM}=require('jsdom');
 const stage={id:1,name:'المرحلة التمهيدية',is_active:true,stage_type:'full',stage_season_id:1,season_name:'الموسم الأول',student_count:35,subject_count:1,group_count:1,
-  subjects:[{id:1,name:'الفقه',hashtag:'فقه',teacher_name:'الأستاذ الأول',teachers:[{id:1,name:'الأستاذ الأول'}]}],groups:[{id:1,title:'الأولى',subject_id:1,subject_name:'الفقه',member_count:35,capacity:40}],seasons:[{id:1,name:'الأول',is_active:true}]};
+  subjects:[{id:1,name:'الفقه',hashtag:'فقه',teacher_name:'الأستاذ الأول',teachers:[{id:1,name:'الأستاذ الأول'}]}],groups:[{id:1,title:'الأولى',subject_id:1,subject_name:'الفقه',member_count:35,reserved_count:38,capacity:40}],seasons:[{id:1,name:'الأول',is_active:true}]};
 async function setup({authorized=true}={}){
   const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../admin/index.html'),'utf8'),{url:'https://institute.example/admin/',runScripts:'outside-only'});
   const w=dom.window;w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};w.confirm=()=>true;
@@ -111,6 +111,8 @@ test('admin participation settings: explicit subject exclusion and whole-stage o
  const {dom,w,requests,until,click}=await setup();try{
   await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
   click('[data-tab="subjects"]');await until(()=>w.document.querySelector('#participation-settings'));
+  assert.match(w.document.querySelector('#content').textContent,/الأعضاء \/ المحجوز \/ السعة/);
+  assert.match(w.document.querySelector('#content').textContent,/35 \/ 38 \/ 40/);
   const form=w.document.querySelector('#participation-settings');
   form.querySelector('[name="grouped"]').value='false';form.querySelector('[data-study-id="1"]').value='false';
   form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));

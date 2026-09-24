@@ -25,18 +25,53 @@ test('concurrent subject choices keep one number, including report mode; repeat 
   await studies.initStudiesSchema();
   assert.equal((await studies.assignStudentToGroup(student.id,subjects[0].id,ss)).created,false);
 });
-test('full matching group never falls back to another number; removal remembers the number',async()=>{
+test('a first subject reserves the same cohort seat in other subjects',async()=>{
   const {ss,subjects,groups,student,stage}=await setup(1);
   const other=await db.createStudent(++id,'طالب آخر ثاني ثالث',stage.id);
   await studies.assignStudentToGroup(other.id,subjects[1].id,ss);
-  await studies.assignStudentToGroup(student.id,subjects[0].id,ss);
+  assert.equal((await studies.assignStudentToGroup(student.id,subjects[0].id,ss)).group.group_number,2);
+  assert.equal((await studies.assignStudentToGroup(student.id,subjects[1].id,ss)).group.group_number,2);
+  await studies.removeStudentFromGroup(student.id,subjects[0].id,ss);
+  assert.equal((await studies.assignStudentToGroup(student.id,subjects[0].id,ss)).group.group_number,2);
+  await studies.setGroupActive(groups[2][0].id,false);
+  assert.equal((await studies.assignStudentToGroup(student.id,subjects[2].id,ss)).group.group_number,2);
+});
+test('four subjects and four group numbers reserve seats before later material choices',async()=>{
+  const stage=await db.addStage('مرحلة أربعة مواد '+(++id));
+  const ss=(await db.listStageSeasons(stage.id))[0].id;
+  const subjects=[];for(let i=0;i<4;i++)subjects.push(await db.addSubject(stage.id,'مادة '+i+' '+id,'مادة'+i+id));
+  const groups=[];for(const sub of subjects){const row=[];for(let i=0;i<4;i++)row.push(await studies.createMubahathaGroup(sub.id,ss,{capacity:2}));groups.push(row);}
+  const students=[];for(let i=0;i<4;i++)students.push(await db.createStudent(++id,'طالب أربعة مواد رقم '+i,stage.id));
+  assert.equal((await studies.assignStudentToGroup(students[0].id,subjects[0].id,ss)).group.group_number,1);
+  assert.equal((await studies.assignStudentToGroup(students[1].id,subjects[1].id,ss)).group.group_number,1);
+  assert.equal((await studies.assignStudentToGroup(students[2].id,subjects[1].id,ss)).group.group_number,2);
+  assert.equal((await studies.assignStudentToGroup(students[3].id,subjects[2].id,ss)).group.group_number,2);
+  const unseen=(await studies.listGroups(subjects[3].id,ss))[0];
+  assert.equal(Number(unseen.member_count),0);assert.equal(Number(unseen.reserved_count),2);
+  await assert.rejects(studies.setGroupCapacity(groups[3][0].id,1),{code:'GROUP_CAPACITY'});
+  for(let i=0;i<students.length;i++)for(const sub of subjects){
+    const result=await studies.assignStudentToGroup(students[i].id,sub.id,ss);
+    assert.equal(result.group.group_number,i<2?1:2);
+  }
+  for(const sub of subjects){
+    const cohort=await studies.listGroups(sub.id,ss);
+    assert.deepEqual(cohort.slice(0,2).map(g=>Number(g.member_count)),[2,2]);
+  }
+  const extra=await db.addSubject(stage.id,'مادة إضافية '+id,'إضافية'+id);
+  await assert.rejects(studies.createMubahathaGroup(extra.id,ss,{capacity:1}),{code:'GROUP_CAPACITY'});
+  assert.equal((await studies.createMubahathaGroup(extra.id,ss,{capacity:2})).group_number,1);
+});
+test('existing overbooking needs matching capacity corrected before the saved cohort can finish',async()=>{
+  const {ss,subjects,groups,student,stage}=await setup(1);
+  const other=await db.createStudent(++id,'طالب سجل سابق ثان ثالث',stage.id);
+  assert.equal((await studies.assignStudentToGroup(student.id,subjects[0].id,ss)).group.group_number,1);
+  await db.pool.query('INSERT INTO group_memberships(group_id,student_id,subject_id,stage_season_id) VALUES($1,$2,$3,$4)',
+    [groups[1][0].id,other.id,subjects[1].id,ss]);
   const denied=await studies.assignStudentToGroup(student.id,subjects[1].id,ss);
   assert.equal(denied.reason,'GROUP_FULL');assert.equal(denied.groupNumber,1);
-  assert.equal(await studies.getStudentGroup(student.id,subjects[1].id,ss),undefined);
-  await studies.removeStudentFromGroup(student.id,subjects[0].id,ss);
-  assert.equal((await studies.assignStudentToGroup(student.id,subjects[1].id,ss)).reason,'GROUP_FULL');
-  await studies.setGroupActive(groups[2][0].id,false);
-  assert.equal((await studies.assignStudentToGroup(student.id,subjects[2].id,ss)).reason,'GROUP_UNAVAILABLE');
+  for(const perSubject of groups)await studies.setGroupCapacity(perSubject[0].id,2);
+  const corrected=await studies.assignStudentToGroup(student.id,subjects[1].id,ss);
+  assert.equal(corrected.group.group_number,1);
 });
 test('admin cohort move changes every enrolled subject atomically and preserves report snapshots',async()=>{
   const {ss,subjects,groups,student}=await setup();
