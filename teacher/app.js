@@ -221,7 +221,7 @@
     try{
       const rows=await api(`/api/teacher/groups?subjectId=${n(sub.subject_id)}&seasonId=${n(sub.stage_season_id)}`);
       sheetBody.innerHTML=rows.length?rows.map(g=>`
-        <article class="list-card"><div class="list-card-head"><div><h4>${esc(g.title)}</h4><p>${g.invite_link?'رابط المجموعة محفوظ':'لا يوجد رابط دعوة محفوظ'}</p></div><span class="badge ${n(g.member_count)>=n(g.capacity)?'warn':''}">${n(g.member_count)}/${n(g.capacity)}</span></div></article>`).join(''):empty('لا توجد مجموعات لهذه المادة.');
+        <article class="list-card"><div class="list-card-head"><div><h4>${esc(g.title)}</h4><p>${g.invite_link?'رابط المجموعة محفوظ':'لا يوجد رابط دعوة محفوظ'} · ${n(g.member_count)} عضو في المادة</p></div><span class="badge ${n(g.discussion_grouping===false?g.member_count:g.reserved_count)>=n(g.capacity)?'warn':''}">${n(g.discussion_grouping===false?g.member_count:g.reserved_count)}/${n(g.capacity)} ${g.discussion_grouping===false?'عضو':'محجوز'}</span></div></article>`).join(''):empty('لا توجد مجموعات لهذه المادة.');
     }catch(err){sheetBody.innerHTML=empty(err.message);}
   }
 
