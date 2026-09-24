@@ -123,11 +123,26 @@ async function initStudiesSchema() {
       available_hours INTEGER NOT NULL CHECK (available_hours > 0),
       closes_at TIMESTAMP NOT NULL,
       max_score NUMERIC NOT NULL DEFAULT 5,
-      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','published')),
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','published','cancelled')),
       published_at TIMESTAMP,
-      created_at TIMESTAMP NOT NULL DEFAULT now(),
-      UNIQUE(subject_id, stage_season_id, exam_number)
+      created_at TIMESTAMP NOT NULL DEFAULT now()
     );
+    DO $exam_status$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='exams'::regclass AND conname='exams_status_check'
+          AND pg_get_constraintdef(oid) LIKE '%cancelled%'
+      ) THEN
+        ALTER TABLE exams DROP CONSTRAINT IF EXISTS exams_status_check;
+        ALTER TABLE exams ADD CONSTRAINT exams_status_check CHECK (status IN ('draft','published','cancelled'));
+      END IF;
+    END $exam_status$;
+    ALTER TABLE exams ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
+    ALTER TABLE exams ADD COLUMN IF NOT EXISTS cancelled_by BIGINT;
+    ALTER TABLE exams ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
+    ALTER TABLE exams DROP CONSTRAINT IF EXISTS exams_subject_id_stage_season_id_exam_number_key;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_exams_active_monthly_number
+      ON exams(subject_id,stage_season_id,exam_number) WHERE status<>'cancelled';
 
     -- الأسئلة: صح/خطأ أو اختيار من متعدد، ويجوز الخلط بينهما في الامتحان الواحد.
     CREATE TABLE IF NOT EXISTS exam_questions (
@@ -308,7 +323,7 @@ const countParticipationBySubject = (subjectId, stageSeasonId) =>
     .query(
       `SELECT mode, COUNT(*) AS count FROM participation_modes
        WHERE subject_id=$1 AND stage_season_id=$2 GROUP BY mode`,
-      [subjectId, stageSeasonId]
+       [subjectId, stageSeasonId]
     )
     .then((r) => r.rows);
 
@@ -322,7 +337,6 @@ async function createMubahathaGroup(subjectId, stageSeasonId, { title, inviteLin
   await client.query('BEGIN');
   const setting=(await client.query('SELECT discussion_grouping FROM stage_seasons WHERE id=$1 FOR SHARE',[stageSeasonId])).rows[0];
   if(setting?.discussion_grouping===false)throw appError('هذه المرحلة تعمل دون تقسيم. عدّل رابط مباحثة المادة من إعدادات المرحلة.');
-  await client.query('SELECT pg_advisory_xact_lock(734222,$1::int)',[stageSeasonId]);
   // Serialize numbering for this subject/season; MAX+1 alone races.
   await client.query('SELECT pg_advisory_xact_lock($1::int,$2::int)', [subjectId, stageSeasonId]);
   const valid = await client.query(`SELECT 1 FROM subjects sub JOIN stage_seasons ss ON ss.stage_id=sub.stage_id
@@ -334,8 +348,6 @@ async function createMubahathaGroup(subjectId, stageSeasonId, { title, inviteLin
     [subjectId, stageSeasonId]
   );
   const number = Number(next.rows[0].n);
-  const reserved=Number((await client.query('SELECT group_reserved_count($1,$2) AS n',[stageSeasonId,number])).rows[0].n);
-  if(capacity<reserved)throw appError(`السعة ${capacity} أقل من ${reserved} مقعدًا محجوزًا مسبقًا للمجموعة رقم ${number} عبر مواد المرحلة.`,'GROUP_CAPACITY',409);
   const group = await client
     .query(
       `INSERT INTO mubahatha_groups(subject_id, stage_season_id, group_number, title, invite_link, telegram_chat_id, capacity)
@@ -355,9 +367,8 @@ const getGroupById = (groupId) =>
 const listGroups = (subjectId, stageSeasonId) =>
   pool
     .query(
-      `SELECT g.*,ss.discussion_grouping, discussion_group_label(g.id) AS title, (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) AS member_count,
-         group_reserved_count(g.stage_season_id,g.group_number) AS reserved_count
-       FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id
+      `SELECT g.*, discussion_group_label(g.id) AS title, (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) AS member_count
+       FROM mubahatha_groups g
        WHERE g.subject_id=$1 AND g.stage_season_id=$2 AND g.merged_into_id IS NULL
        ORDER BY g.group_number`,
       [subjectId, stageSeasonId]
@@ -376,18 +387,12 @@ async function updateGroupSettings(groupId,body) {
   const c=await pool.connect();
   try {
     await c.query('BEGIN');
-    const origin=(await c.query('SELECT stage_season_id FROM mubahatha_groups WHERE id=$1',[groupId])).rows[0];
-    if(!origin)throw appError('المجموعة غير موجودة.','NOT_FOUND',404);
-    const season=(await c.query('SELECT discussion_grouping FROM stage_seasons WHERE id=$1 FOR SHARE',[origin.stage_season_id])).rows[0];
-    await c.query('SELECT pg_advisory_xact_lock(734222,$1::int)',[origin.stage_season_id]);
     const before=(await c.query('SELECT * FROM mubahatha_groups WHERE id=$1 FOR UPDATE',[groupId])).rows[0];
     if(!before)throw appError('المجموعة غير موجودة.','NOT_FOUND',404);
     if(before.merged_into_id)throw appError('هذه مجموعة سابقة مدمجة؛ سجلها محفوظ ولا يمكن إعادة تفعيلها.');
-    if((body.capacity!==undefined&&Number(body.capacity)<before.capacity)||(body.active===true&&!before.is_active)){
+    if(body.capacity!==undefined){
       const n=Number((await c.query('SELECT COUNT(*) AS n FROM group_memberships WHERE group_id=$1',[groupId])).rows[0].n);
-      const reserved=season?.discussion_grouping?Number((await c.query('SELECT group_reserved_count($1,$2) AS n',[before.stage_season_id,before.group_number])).rows[0].n):0;
-      const required=Math.max(n,reserved);
-      if(Number(body.capacity??before.capacity)<required)throw appError(`لا يمكن خفض السعة دون عدد المقاعد المحجوزة للمجموعة (${required}).`,'GROUP_CAPACITY');
+      if(Number(body.capacity)<n)throw appError(`لا يمكن خفض السعة دون عدد الطلبة الحالي (${n}).`,'GROUP_CAPACITY');
     }
     const result=(await c.query(`UPDATE mubahatha_groups SET capacity=$2,invite_link=$3,is_active=$4 WHERE id=$1 RETURNING *`,
       [groupId,body.capacity??before.capacity,body.inviteLink===undefined?before.invite_link:body.inviteLink||null,body.active??before.is_active])).rows[0];
@@ -488,6 +493,42 @@ const listGroupSessions = (groupId) =>
       [groupId]
     )
     .then((r) => r.rows);
+
+// مصدر موحد لحضور المباحثات في لوحة الأستاذ وأزرار البوت.
+// تحسب الجلسات التي كان الطالب مؤهلًا لها فقط، ويكتمل الحضور بالبداية والنهاية معًا.
+const listDiscussionAttendanceForTeacher = (subjectId, stageSeasonId) =>
+  pool.query(`
+    WITH memberships AS (
+      SELECT student_id,subject_id,stage_season_id,group_id,assigned_at,NULL::timestamp AS ended_at
+      FROM group_memberships
+      UNION ALL
+      SELECT student_id,subject_id,stage_season_id,group_id,assigned_at,ended_at
+      FROM group_membership_history
+    )
+    SELECT st.id AS student_id,st.full_name,
+           COUNT(DISTINCT ms.id) AS eligible_sessions,
+           COUNT(DISTINCT ms.id) FILTER (
+             WHERE start_att.id IS NOT NULL AND end_att.id IS NOT NULL
+           ) AS attended_sessions,
+           COUNT(DISTINCT ms.id) FILTER (
+             WHERE start_att.id IS NOT NULL AND end_att.id IS NULL
+           ) AS incomplete_sessions
+    FROM participation_modes pm
+    JOIN students st ON st.id=pm.student_id AND st.is_active=true
+    JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=pm.stage_season_id AND e.status='active'
+    LEFT JOIN memberships gm ON gm.student_id=pm.student_id AND gm.subject_id=pm.subject_id
+      AND gm.stage_season_id=pm.stage_season_id
+    LEFT JOIN mubahatha_sessions ms ON ms.group_id=gm.group_id
+      AND ms.opened_at>=gm.assigned_at AND (gm.ended_at IS NULL OR ms.opened_at<gm.ended_at)
+      AND (pm.joined_mubahatha_at IS NULL OR ms.opened_at>=pm.joined_mubahatha_at)
+    LEFT JOIN mubahatha_attendance start_att ON start_att.session_id=ms.id
+      AND start_att.student_id=pm.student_id AND start_att.phase='start'
+    LEFT JOIN mubahatha_attendance end_att ON end_att.session_id=ms.id
+      AND end_att.student_id=pm.student_id AND end_att.phase='end'
+    WHERE pm.subject_id=$1 AND pm.stage_season_id=$2
+      AND (pm.mode='mubahatha' OR pm.joined_mubahatha_at IS NOT NULL)
+    GROUP BY st.id,st.full_name
+    ORDER BY st.full_name,st.id`, [subjectId, stageSeasonId]).then((r) => r.rows);
 
 const getOpenSessionForGroup = (groupId) =>
   pool
@@ -717,8 +758,11 @@ async function addExamQuestion(examId, { type, prompt, options, correct }) {
   await client.query('BEGIN');
   const exam = await client.query('SELECT status FROM exams WHERE id=$1 FOR UPDATE', [examId]).then((r) => r.rows[0]);
   if (!exam) throw new Error('الامتحان غير موجود.');
-  if((await client.query('SELECT 1 FROM exam_attempts WHERE exam_id=$1 LIMIT 1',[examId])).rowCount)
-    throw appError('بدأ أحد الطلبة الامتحان؛ لا يمكن تعديل أسئلته.','ALREADY_TAKEN',409);
+  if (exam.status === 'published') {
+    const err = new Error('لا يمكن تعديل أسئلة امتحان منشور.');
+    err.code = 'EXAM_PUBLISHED';
+    throw err;
+  }
   const pos = await client
     .query('SELECT COALESCE(MAX(position),0)+1 AS n FROM exam_questions WHERE exam_id=$1', [examId])
     .then((r) => Number(r.rows[0].n));
@@ -743,88 +787,10 @@ async function deleteExamQuestion(questionId) {
   try{
     await c.query('BEGIN');
     const exam=(await c.query('SELECT e.* FROM exams e JOIN exam_questions q ON q.exam_id=e.id WHERE q.id=$1 FOR UPDATE OF e',[questionId])).rows[0];
-    if(!exam)throw appError('السؤال غير موجود.','NOT_FOUND',404);
-    if((await c.query('SELECT 1 FROM exam_attempts WHERE exam_id=$1 LIMIT 1',[exam.id])).rowCount)
-      throw appError('بدأ أحد الطلبة الامتحان؛ لا يمكن تعديل أسئلته.','ALREADY_TAKEN',409);
-    if(exam.status==='published'&&Number((await c.query('SELECT COUNT(*) AS n FROM exam_questions WHERE exam_id=$1',[exam.id])).rows[0].n)===1)
-      throw appError('أضف سؤالًا بديلًا قبل حذف آخر سؤال من الامتحان المنشور.','LAST_QUESTION',409);
+    if(!exam||exam.status!=='draft')throw appError('يمكن حذف أسئلة المسودة فقط.');
     const r=await c.query('DELETE FROM exam_questions WHERE id=$1 RETURNING id',[questionId]);
     await c.query('COMMIT');return r.rowCount>0;
   }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
-}
-
-async function updateExamQuestion(questionId,{type,prompt,options,correct}){
-  if(!['tf','mcq'].includes(type))throw appError('نوع السؤال غير صالح.');
-  if(typeof prompt!=='string'||prompt.trim().length<3||prompt.length>3000)throw appError('نص السؤال يجب أن يكون بين 3 و3000 حرف.');
-  const answers=type==='tf'?['صح','خطأ']:options;
-  if(!Array.isArray(answers)||answers.length<2||answers.length>6||new Set(answers).size!==answers.length||
-    !answers.includes(correct)||answers.some(x=>typeof x!=='string'||!x.trim()||x.length>300))
-    throw appError('الخيارات أو الإجابة الصحيحة غير صالحة.');
-  const c=await pool.connect();
-  try{
-    await c.query('BEGIN');
-    const exam=(await c.query('SELECT e.id FROM exams e JOIN exam_questions q ON q.exam_id=e.id WHERE q.id=$1 FOR UPDATE OF e',[questionId])).rows[0];
-    if(!exam)throw appError('السؤال غير موجود.','NOT_FOUND',404);
-    if((await c.query('SELECT 1 FROM exam_attempts WHERE exam_id=$1 LIMIT 1',[exam.id])).rowCount)
-      throw appError('بدأ أحد الطلبة الامتحان؛ لا يمكن تعديل أسئلته.','ALREADY_TAKEN',409);
-    const result=(await c.query(`UPDATE exam_questions SET question_type=$2,prompt=$3,options=$4::jsonb,correct_answer=$5
-      WHERE id=$1 RETURNING *`,[questionId,type,prompt.trim(),type==='mcq'?JSON.stringify(options):null,correct])).rows[0];
-    await c.query('COMMIT');return result;
-  }catch(err){await c.query('ROLLBACK');throw err;}finally{c.release();}
-}
-
-async function updateExam(examId,{title,dateIso,hours}){
-  if(typeof title!=='string'||title.trim().length<3||title.trim().length>150)throw appError('عنوان الامتحان يجب أن يكون بين 3 و150 حرفًا.');
-  const parsedDate=new Date(`${dateIso}T00:00:00Z`);
-  if(!/^\d{4}-\d{2}-\d{2}$/.test(dateIso||'')||Number.isNaN(parsedDate.getTime())||parsedDate.toISOString().slice(0,10)!==dateIso)
-    throw appError('تاريخ الامتحان غير صالح.');
-  const h=Number(hours);
-  if(!Number.isInteger(h)||h<1||h>720)throw appError('مدة الإتاحة يجب أن تكون بين 1 و720 ساعة.');
-  const c=await pool.connect();
-  try{
-    await c.query('BEGIN');
-    const before=(await c.query(`SELECT e.* FROM exams e JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
-      WHERE e.id=$1 FOR UPDATE OF e`,[examId])).rows[0];
-    if(!before)throw appError('الامتحان غير موجود أو موسمه غير نشط.','NOT_FOUND',404);
-    if((await c.query('SELECT 1 FROM exam_attempts WHERE exam_id=$1 LIMIT 1',[examId])).rowCount)
-      throw appError('بدأ أحد الطلبة الامتحان؛ لا يمكن تعديله.','ALREADY_TAKEN',409);
-    const result=(await c.query(`UPDATE exams SET title=$2,
-      opens_at=(($3::date+make_interval(hours=>$5::int)) AT TIME ZONE $6) AT TIME ZONE 'UTC',
-      closes_at=((($3::date+make_interval(hours=>$5::int)) AT TIME ZONE $6) AT TIME ZONE 'UTC')+make_interval(hours=>$4::int),
-      available_hours=$4::int WHERE id=$1 RETURNING *`,[examId,title.trim(),dateIso,h,EXAM_START_HOUR,SCHEDULE_TZ])).rows[0];
-    const changed=before.title!==result.title||new Date(before.opens_at).getTime()!==new Date(result.opens_at).getTime()||Number(before.available_hours)!==h;
-    if(changed){
-      await c.query(`UPDATE notification_outbox SET status='expired' WHERE dedupe_key LIKE $1 AND status='pending'`,[`exam:${examId}:%`]);
-      const message=`📝 تم تعديل الامتحان «${result.title}».\nيفتح: ${new Date(result.opens_at).toLocaleString('ar-IQ',{timeZone:SCHEDULE_TZ})}\nمدة الإتاحة: ${h} ساعة.`;
-      await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
-        SELECT $1||':'||st.id::text,st.telegram_id,$2::jsonb,$3 FROM enrollments en JOIN students st ON st.id=en.student_id AND st.is_active=true
-        WHERE en.stage_season_id=$4 AND en.status='active' ON CONFLICT DO NOTHING`,
-        [`exam-edit:${examId}:${Date.now()}`,JSON.stringify([message,{}]),result.closes_at,result.stage_season_id]);
-    }
-    await c.query('COMMIT');return result;
-  }catch(err){await c.query('ROLLBACK');throw err;}finally{c.release();}
-}
-
-async function deleteExam(examId){
-  const c=await pool.connect();
-  try{
-    await c.query('BEGIN');
-    const exam=(await c.query(`SELECT e.* FROM exams e JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
-      WHERE e.id=$1 FOR UPDATE OF e`,[examId])).rows[0];
-    if(!exam)throw appError('الامتحان غير موجود أو موسمه غير نشط.','NOT_FOUND',404);
-    if((await c.query('SELECT 1 FROM exam_attempts WHERE exam_id=$1 LIMIT 1',[examId])).rowCount)
-      throw appError('بدأ أحد الطلبة الامتحان؛ لا يمكن حذفه وسجلاته.','ALREADY_TAKEN',409);
-    await c.query(`UPDATE notification_outbox SET status='expired' WHERE status='pending' AND
-      (dedupe_key LIKE $1 OR dedupe_key LIKE $2 OR dedupe_key LIKE $3)`,
-      [`exam:${examId}:%`,`exam-edit:${examId}:%`,`exam-postpone:${examId}:%`]);
-    await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload)
-      SELECT 'exam-cancel:'||$1::text||':'||st.id::text,st.telegram_id,$2::jsonb
-      FROM enrollments en JOIN students st ON st.id=en.student_id AND st.is_active=true
-      WHERE en.stage_season_id=$3 AND en.status='active' ON CONFLICT DO NOTHING`,
-      [examId,JSON.stringify([`أُلغي الامتحان «${exam.title||'الشهري '+exam.exam_number}» ولم يعد متاحًا.`,{}]),exam.stage_season_id]);
-    await c.query('DELETE FROM exams WHERE id=$1',[examId]);
-    await c.query('COMMIT');return {deleted:true};
-  }catch(err){await c.query('ROLLBACK');throw err;}finally{c.release();}
 }
 
 async function getExamsReadyToAutoPublish(limit = 50) {
@@ -866,8 +832,7 @@ const getExamById = (examId) =>
   pool
     .query(
       `SELECT e.*, sub.name AS subject_name,
-              (SELECT COUNT(*) FROM exam_questions q WHERE q.exam_id=e.id) AS question_count,
-              (SELECT COUNT(*) FROM exam_attempts a WHERE a.exam_id=e.id) AS attempt_count
+              (SELECT COUNT(*) FROM exam_questions q WHERE q.exam_id=e.id) AS question_count
        FROM exams e JOIN subjects sub ON sub.id=e.subject_id WHERE e.id=$1`,
       [examId]
     )
@@ -878,7 +843,7 @@ const listExamsForSubject = (subjectId, stageSeasonId) =>
     .query(
       `SELECT e.*, (SELECT COUNT(*) FROM exam_questions q WHERE q.exam_id=e.id) AS question_count,
               (SELECT COUNT(*) FROM exam_attempts a WHERE a.exam_id=e.id AND a.submitted_at IS NOT NULL) AS submitted_count
-       FROM exams e WHERE e.subject_id=$1 AND e.stage_season_id=$2 ORDER BY e.exam_number`,
+        FROM exams e WHERE e.subject_id=$1 AND e.stage_season_id=$2 ORDER BY e.exam_number,e.created_at,e.id`,
       [subjectId, stageSeasonId]
     )
     .then((r) => r.rows);
@@ -930,7 +895,8 @@ async function postponeExam(examId, newDateIso, hours) {
   const client=await pool.connect();
   try {
   await client.query('BEGIN');
-  await client.query('SELECT id FROM exams WHERE id=$1 FOR UPDATE',[examId]);
+   const original=(await client.query('SELECT id,status FROM exams WHERE id=$1 FOR UPDATE',[examId])).rows[0];
+   if(!original||original.status==='cancelled')throw appError('الامتحان غير موجود أو ملغى.','CONFLICT',409);
   const submitted = await client
     .query('SELECT COUNT(*) AS c FROM exam_attempts WHERE exam_id=$1', [examId])
     .then((r) => Number(r.rows[0].c));
@@ -939,6 +905,7 @@ async function postponeExam(examId, newDateIso, hours) {
     err.code = 'ALREADY_TAKEN';
     throw err;
   }
+
   const h = Number(hours);
   if (!Number.isInteger(h) || h < 1 || h > 720) {
     const err = new Error('عدد ساعات الإتاحة يجب أن يكون بين 1 و720.');
@@ -969,6 +936,45 @@ async function postponeExam(examId, newDateIso, hours) {
   }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
 }
 
+// إلغاء آمن يحفظ الامتحان وأسئلته للتدقيق ويمنع البدء فيه، مع إشعار من وصلهم الإعلان.
+async function cancelExam(examId, actorId, reason = '') {
+  const note=String(reason||'').trim();
+  if(note.length>500)throw appError('سبب الإلغاء طويل جدًا (الحد 500 حرف).');
+  const client=await pool.connect();
+  try{
+    await client.query('BEGIN');
+    const exam=(await client.query(`SELECT e.*,sub.name AS subject_name FROM exams e
+      JOIN subjects sub ON sub.id=e.subject_id
+      JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+      WHERE e.id=$1 FOR UPDATE OF e`,[examId])).rows[0];
+    if(!exam||exam.status==='cancelled')throw appError('الامتحان غير موجود أو ملغى مسبقًا.','CONFLICT',409);
+    const attempts=(await client.query('SELECT COUNT(*)::int AS n FROM exam_attempts WHERE exam_id=$1',[examId])).rows[0].n;
+    if(attempts>0)throw appError('بدأ طلبة هذا الامتحان؛ لا يمكن إلغاء امتحان له محاولات محفوظة.','CONFLICT',409);
+    await client.query(`UPDATE exams SET status='cancelled',cancelled_at=now(),cancelled_by=$2,cancellation_reason=$3
+      WHERE id=$1`,[examId,actorId,note||null]);
+    await client.query(`UPDATE notification_outbox SET status='expired'
+      WHERE status='pending' AND (dedupe_key LIKE $1 OR dedupe_key LIKE $2)`,
+      [`exam:${examId}:%`,`exam-postpone:${examId}:%`]);
+    const message=`📢 أُلغي الامتحان الشهري ${exam.exam_number} في مادة «${exam.subject_name}»`+
+      `، الموضوع: «${exam.title||'الامتحان الشهري'}».\nلا تدخل إلى الامتحان في موعده السابق.`+
+      (note?`\nالسبب: ${note}`:'');
+    const queued=await client.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
+      SELECT 'exam-cancel:'||$1::text||':'||targets.chat_id::text,targets.chat_id,$2::jsonb,
+             now()+interval '7 days'
+      FROM (
+        SELECT DISTINCT st.telegram_id AS chat_id FROM enrollments en
+        JOIN students st ON st.id=en.student_id AND st.is_active=true
+        WHERE en.stage_season_id=$3 AND en.status='active'
+        UNION
+        SELECT DISTINCT o.chat_id FROM notification_outbox o
+        WHERE o.dedupe_key LIKE $4 OR o.dedupe_key LIKE $5
+      ) targets
+      ON CONFLICT DO NOTHING`,[examId,JSON.stringify([message,{}]),exam.stage_season_id,
+        `exam:${examId}:%`,`exam-postpone:${examId}:%`]);
+    await client.query('COMMIT');
+    return {examId,recipientCount:queued.rowCount,subjectName:exam.subject_name,examNumber:exam.exam_number};
+  }catch(err){await client.query('ROLLBACK');throw err;}finally{client.release();}
+}
 const getExamResults = (examId) =>
   pool
     .query(
@@ -1343,8 +1349,6 @@ async function applyReportAverage(studentId, subjectId, stageSeasonId) {
     err.code = 'NO_GRADED_REPORTS';
     throw err;
   }
-  if(Number(summary.graded)!==Number(summary.total))
-    throw appError(`قيّم التقارير المتبقية أولًا (${Number(summary.graded)} من ${Number(summary.total)} مقيّم).`,'REPORTS_PENDING',409);
   const avg = Number(summary.average);
   await setReportScore(studentId, subjectId, stageSeasonId, avg);
   return { average: avg, graded: Number(summary.graded), total: Number(summary.total) };
@@ -1437,13 +1441,9 @@ async function addScheduleSlot(groupId, { dayOfWeek, hour, minute = 0, durationH
         AND sl.day_of_week*1440+sl.hour*60+sl.minute+shift.n<$3+60
         AND sl.day_of_week*1440+sl.hour*60+sl.minute+shift.n+sl.duration_hours*60>$3 LIMIT 1`,[ownerId,groupId,start])).rows[0];
     if(conflict)throw appError('يتداخل الموعد مع مباحثة أخرى للأستاذ أو المجموعة. اختر وقتًا آخر.','SCHEDULE_CONFLICT',409);
-    const conflicts=(await c.query(`SELECT sl.*,sub.name AS subject_name,other.group_number AS other_group_number
-      FROM schedule_slots sl JOIN subjects sub ON sub.id=sl.subject_id
-      JOIN mubahatha_groups other ON other.id=sl.group_id
+    const conflicts=(await c.query(`SELECT sl.*,sub.name AS subject_name FROM schedule_slots sl JOIN subjects sub ON sub.id=sl.subject_id
       WHERE sl.stage_season_id=$1 AND sl.is_active=true AND sl.subject_id<>$2 AND sl.day_of_week=$3
         AND sl.hour*60+sl.minute<$4+60 AND sl.hour*60+sl.minute+sl.duration_hours*60>$4`,[group.stage_season_id,group.subject_id,day,h*60+m])).rows;
-    if(conflicts.some(sl=>Number(sl.other_group_number)===Number(group.group_number)))
-      throw appError('يتداخل الموعد مع مادة أخرى للمجموعة نفسها. اختر وقتًا آخر.','SCHEDULE_CONFLICT',409);
     const slot=(await c.query(`INSERT INTO schedule_slots(group_id,subject_id,stage_season_id,teacher_id,day_of_week,hour,minute,duration_hours)
       VALUES($1,$2,$3,$4,$5,$6,$7,1) ON CONFLICT(group_id,day_of_week,hour,minute)
       DO UPDATE SET is_active=true,teacher_id=EXCLUDED.teacher_id,duration_hours=1 RETURNING *`,[groupId,group.subject_id,group.stage_season_id,ownerId,day,h,m])).rows[0];
@@ -1919,6 +1919,7 @@ module.exports = {
   openSession,
   closeSession,
   listGroupSessions,
+  listDiscussionAttendanceForTeacher,
   getOpenSessionForGroup,
   markSessionAttendance,
   openEndAttendance,
@@ -1934,9 +1935,6 @@ module.exports = {
   addExamQuestion,
   listExamQuestions,
   deleteExamQuestion,
-  updateExamQuestion,
-  updateExam,
-  deleteExam,
   getExamsReadyToAutoPublish,
   publishExam,
   getExamById,
@@ -1949,6 +1947,7 @@ module.exports = {
   finalizeAttempt,
   getExamResults,
   postponeExam,
+  cancelExam,
   getAttemptById,
   getQuestionById,
   getStudentExamResults,

@@ -104,33 +104,6 @@ function createAdminOverrides(pool) {
       return {added:rows.length,existing:ids.length-rows.length};
     });
   }
-  async function lessonAttendance(id,q={}) {
-    const lesson=await parent(pool,'lesson',id);
-    const page=pageOptions(q.page||0,25);
-    const search=String(q.q||'').trim();
-    if(search.length>150)throw appError('عبارة البحث طويلة.');
-    const args=[id,`%${search.replace(/[\\%_]/g,'\\$&')}%`];
-    const filter=`FROM attendance a JOIN students st ON st.id=a.student_id
-      WHERE a.lesson_id=$1 AND st.full_name ILIKE $2`;
-    const total=Number((await pool.query(`SELECT COUNT(*) AS n ${filter}`,args)).rows[0].n);
-    const rows=(await pool.query(`SELECT a.student_id,st.full_name,a.listened_at,a.marking_kind,a.marked_by,a.admin_note
-      ${filter} ORDER BY st.full_name,st.id LIMIT $3 OFFSET $4`,[...args,page.size,page.offset])).rows;
-    return {lesson:{id:lesson.id,subject_name:lesson.subject_name,activated_at:lesson.activated_at},rows,total,page:page.page,size:page.size};
-  }
-  async function removeLessonAttendance(id,studentId,actor) {
-    studentId=positiveInt(studentId);
-    return transaction(async c=>{
-      await c.query('SELECT pg_advisory_xact_lock(734221,1)');
-      const lesson=await parent(c,'lesson',id);
-      const removed=(await c.query('DELETE FROM attendance WHERE lesson_id=$1 AND student_id=$2 RETURNING *',[id,studentId])).rows[0];
-      if(!removed)throw appError('لم يعد لهذا الطالب حضور في الدرس المحدد. حدّث القائمة.','NOT_FOUND',404);
-      await require('./absence').refreshAdministrativeAttendance(c,[studentId],lesson.stage_season_id,
-        process.env.ATTENDANCE_TIME_ZONE||'Asia/Baghdad');
-      await audit(c,actor,'remove_lesson_attendance','lesson',id,
-        {student_id:studentId,attendance:removed},null);
-      return {removed:true,studentId,lessonId:id};
-    });
-  }
   async function reopenExam(id,body,actor) {
     const studentId=positiveInt(body.studentId),subjectId=positiveInt(body.subjectId);
     const {start,end}=windowDates(body),note=noteValue(body.note);
@@ -158,6 +131,6 @@ function createAdminOverrides(pool) {
       return result;
     });
   }
-  return {options,correctSubject,lateAttendance,lessonAttendance,removeLessonAttendance,reopenExam};
+  return {options,correctSubject,lateAttendance,reopenExam};
 }
 module.exports={createAdminOverrides,windowDates};

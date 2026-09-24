@@ -61,8 +61,7 @@ function createAdminData(db, studies) {
         AND NOT EXISTS(SELECT 1 FROM participation_modes pm WHERE pm.student_id=e.student_id AND pm.subject_id=sub.id AND pm.stage_season_id=$2))::int AS undecided_count
       FROM subjects sub WHERE sub.stage_id=$1 ORDER BY sub.name,sub.id`,[id,info.stage_season_id])).rows;
     const groups = (await pool.query(`SELECT g.*,sub.name AS subject_name,
-      (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) AS member_count,
-      group_reserved_count(g.stage_season_id,g.group_number) AS reserved_count
+      (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) AS member_count
       FROM mubahatha_groups g JOIN subjects sub ON sub.id=g.subject_id WHERE g.stage_season_id=$1 AND g.merged_into_id IS NULL
       ORDER BY sub.name,g.group_number`,[info.stage_season_id])).rows;
     if(info.discussion_grouping===false)for(const g of groups){g.title='المرحلة كاملة';g.group_number=null;}

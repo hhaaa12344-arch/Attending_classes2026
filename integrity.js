@@ -12,6 +12,24 @@ async function initIntegritySchema(pool) {
     CREATE INDEX IF NOT EXISTS idx_students_stage_name_id ON students(stage_id, full_name, id);
     CREATE INDEX IF NOT EXISTS idx_memberships_group_student ON group_memberships(group_id, student_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_group_opened ON mubahatha_sessions(group_id, opened_at);
+    -- نقلات سابقة أبقت عضوية المجموعة الحالية رغم خروج الطالب من مرحلتها.
+    -- تُنقل إلى التاريخ أولًا حتى تبقى جلساته السابقة قابلة للاحتساب.
+    INSERT INTO group_membership_history(student_id,group_id,subject_id,stage_season_id,assigned_at,ended_at)
+      SELECT m.student_id,m.group_id,m.subject_id,m.stage_season_id,m.assigned_at,
+             GREATEST(m.assigned_at,COALESCE(e.ended_at,now()))
+      FROM group_memberships m
+      JOIN students st ON st.id=m.student_id
+      JOIN stage_seasons ss ON ss.id=m.stage_season_id
+      LEFT JOIN enrollments e ON e.student_id=m.student_id AND e.stage_season_id=m.stage_season_id
+      WHERE st.stage_id<>ss.stage_id OR e.status IS DISTINCT FROM 'active'
+      ON CONFLICT DO NOTHING;
+    DELETE FROM group_memberships m WHERE m.id IN (
+      SELECT old.id FROM group_memberships old
+      JOIN students st ON st.id=old.student_id
+      JOIN stage_seasons ss ON ss.id=old.stage_season_id
+      LEFT JOIN enrollments e ON e.student_id=old.student_id AND e.stage_season_id=old.stage_season_id
+      WHERE st.stage_id<>ss.stage_id OR e.status IS DISTINCT FROM 'active'
+    );
     CREATE TABLE IF NOT EXISTS absence_dirty_students (
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
       stage_season_id INTEGER NOT NULL REFERENCES stage_seasons(id) ON DELETE CASCADE,
@@ -43,17 +61,19 @@ async function initIntegritySchema(pool) {
       lease_until TIMESTAMPTZ, expires_at TIMESTAMPTZ,
       last_error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), sent_at TIMESTAMPTZ
     );
-    CREATE TABLE IF NOT EXISTS approved_group_chats (
-      chat_id BIGINT PRIMARY KEY,
-      title TEXT,
-      requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      approved_at TIMESTAMPTZ,
-      approved_by BIGINT
+    CREATE TABLE IF NOT EXISTS message_broadcasts (
+      id BIGSERIAL PRIMARY KEY,
+      request_key TEXT NOT NULL UNIQUE,
+      actor_id BIGINT NOT NULL,
+      actor_role TEXT NOT NULL CHECK (actor_role IN ('admin','teacher')),
+      scope_kind TEXT NOT NULL CHECK (scope_kind IN ('all','subject','group')),
+      subject_id INTEGER,
+      stage_season_id INTEGER,
+      group_id INTEGER,
+      message_text TEXT NOT NULL,
+      recipient_count INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
-    INSERT INTO approved_group_chats(chat_id,title,approved_at)
-      SELECT DISTINCT telegram_chat_id,title,now() FROM mubahatha_groups
-      WHERE telegram_chat_id IS NOT NULL
-      ON CONFLICT(chat_id) DO NOTHING;
     CREATE TABLE IF NOT EXISTS student_contact_messages (
       id BIGSERIAL PRIMARY KEY,
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -72,8 +92,6 @@ async function initIntegritySchema(pool) {
     CREATE INDEX IF NOT EXISTS idx_outbox_due ON notification_outbox(available_at, priority, id)
       WHERE status IN ('pending','sending');
     ALTER TABLE notification_outbox ADD COLUMN IF NOT EXISTS delivery_mark JSONB;
-    ALTER TABLE notification_outbox ADD COLUMN IF NOT EXISTS telegram_message_id BIGINT;
-    ALTER TABLE notification_outbox ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
     -- Existing historical sessions must NOT be broadcast on migration.
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS start_notifications_queued BOOLEAN NOT NULL DEFAULT true;
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_notifications_queued BOOLEAN NOT NULL DEFAULT true;

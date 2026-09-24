@@ -8,8 +8,6 @@ const { initIntegritySchema } = require('./integrity');
 const access = require('./access').createAccess(db.pool);
 const adminData = require('./adminData').createAdminData(db, studies);
 const scheduler = require('./scheduler').createScheduler({pool:db.pool,studies});
-const studentReminders = require('./studentReminders');
-const { randomUUID } = require('node:crypto');
 const {
   extractFirstUrl,
   extractHashtags,
@@ -64,17 +62,12 @@ const {STUDENT_BUTTON: GUIDE_BUTTON, ADMIN_BUTTON: GUIDE_ADMIN_BUTTON}=require('
 const {initStudentGuideSchema,createStudentGuide}=require('./studentGuide');
 const studentGuide=createStudentGuide({pool:db.pool,telegram:bot.telegram});
 bot.use(require('./updateGate').createUpdateGate());
-bot.use(async(ctx,next)=>{
-  if(!['group','supergroup'].includes(ctx.chat?.type)||ctx.update.my_chat_member)return next();
-  const approved=(await db.pool.query('SELECT 1 FROM approved_group_chats WHERE chat_id=$1 AND approved_at IS NOT NULL',[ctx.chat.id])).rowCount>0;
-  if(approved)return next();
-  try{await bot.telegram.leaveChat(ctx.chat.id);}catch(err){console.warn('تعذر مغادرة مجموعة غير معتمدة:',err.description||err.message);}
-});
 
 // طابور إرسال عام ينظّم معدّل الرسائل ويعالج 429؛ يُستعمل للبث الجماعي.
 const { createTelegramQueue, PRIORITY } = require('./telegramQueue');
 const tgQueue = createTelegramQueue(bot.telegram);
-const outboxWorker = require('./outbox').createOutboxWorker(db.pool,tgQueue,bot.telegram.deleteMessage.bind(bot.telegram));
+const outboxWorker = require('./outbox').createOutboxWorker(db.pool,tgQueue);
+const broadcasts = require('./broadcasts').createBroadcasts(db.pool);
 // Both background sends and replies share the same rate limiter.
 for(const method of ['sendMessage','sendDocument','sendPhoto']) bot.telegram[method]=tgQueue[method];
 bot.use((ctx,next)=>{
@@ -107,7 +100,7 @@ const PREVIEW_BLOCKED_TEXT_ACTIONS = new Set([
   'teacher_slot_postpone_reason',
 ]);
 // أزرار قوائم الطالب/الأستاذ التي تُنفّذ عمليات (لا مجرد عرض)
-const PREVIEW_BLOCKED_HEARS = new Set(['🌴 طلب إجازة', '📄 إرسال تقرير']);
+const PREVIEW_BLOCKED_HEARS = new Set(['🌴 طلب إجازة', '📄 إرسال تقرير', '📣 رسالة جماعية']);
 
 bot.use(async (ctx, next) => {
   if (!isInPreview(ctx)) return next();
@@ -228,6 +221,7 @@ const STUDENT_MENU_BUTTONS = new Set([
 const TEACHER_MENU_SPACER = '\u3164';
 const TEACHER_MENU_BUTTONS = new Set([
   '💬 التواصل مع طالب معين',
+  '📣 رسالة جماعية',
   '🔗 روابط المعهد',
   '🚪 الخروج من المعاينة',
   '📚 موادي', '📊 حضور موادي', '👥 المجموعات',
@@ -238,6 +232,7 @@ const TEACHER_MENU_BUTTONS = new Set([
 
 const ADMIN_MENU_BUTTONS = new Set([
   '💬 التواصل مع طالب معين',
+  '📣 رسالة جماعية',
   GUIDE_ADMIN_BUTTON,
   BACKUP_BUTTON,
   '⚙️ إدارة روابط المعهد',
@@ -401,7 +396,7 @@ function teacherMainMenu() {
     [replyButton('✏️ تحرير الدرجات'), replyButton('📄 تقارير الطلبة')],
     [replyButton('🔗 روابط المجموعات')],
     [replyButton('🔗 روابط المعهد')],
-    [replyButton('💬 التواصل مع طالب معين')],
+    [replyButton('💬 التواصل مع طالب معين'), replyButton('📣 رسالة جماعية')],
     [replyButton('🖥️ فتح لوحة الأستاذ')],
     [replyButton(TEACHER_MENU_SPACER)],
   ]).resize();
@@ -413,7 +408,7 @@ function adminMainMenu() {
     ['🟢 تفعيل درس يدويًا', '📊 تقرير الحضور'],
     ['🛠️ إدارة الدروس المفعّلة'],
     ['🎓 إدارة الطلبة', '🔗 ربط قناة بمرحلة'],
-    ['💬 التواصل مع طالب معين'],
+    ['💬 التواصل مع طالب معين', '📣 رسالة جماعية'],
     ['📡 القنوات المرتبطة', '🏷️ المواد والهاشتاغات'],
     ['🩺 تشخيص مشاكل القنوات'],
     ['⚙️ إدارة المراحل', '🗓️ بدء موسم جديد'],
@@ -457,14 +452,13 @@ async function sendToStageStudents(stageId, text, extra = undefined, options = {
     excludeStudentIds = new Set(),
     skipOnLeave = false,
     dailyLessonNotificationDate = null,
-    dailyLessonExpiresAt = null,
   } = options;
   const today = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
 
   // استعلام واحد يُرجع المستحقين، بدل استعلامَي إجازة/حجز لكل طالب على حدة.
   let recipients;
   if (dailyLessonNotificationDate) {
-    return require('./dailyNotifications').queueDailyLessons(db.pool,{stageId,onDate:dailyLessonNotificationDate,text,extra,excluded:[...excludeStudentIds],expiresAt:dailyLessonExpiresAt});
+    return require('./dailyNotifications').queueDailyLessons(db.pool,{stageId,onDate:dailyLessonNotificationDate,text,extra,excluded:[...excludeStudentIds]});
   } else if (skipOnLeave) {
     recipients = await db.getEligibleStudentsForStage(stageId, today);
   } else {
@@ -1343,6 +1337,22 @@ bot.on('text', async (ctx, next) => {
       return ctx.reply(`حُفظت رسالتك للطالب للإرسال عبر البوت ✅\nرقم الرسالة: ${saved.id}`,role==='admin'?adminMainMenu():teacherMainMenu());
     }catch(err){return ctx.reply(`تعذر حفظ الرسالة: ${err.message}`);}
   }
+  if(state.action==='broadcast_compose'){
+    const message=String(ctx.message.text||'').trim();
+    if(!message||message.length>3000)return ctx.reply('اكتب رسالة من 1 إلى 3000 حرف، أو اضغط «❌ إلغاء العملية».');
+    const actor=await broadcastActor(ctx);
+    if(!actor){userState.delete(ctx.from.id);return ctx.reply('انتهت صلاحية الإرسال. افتح الزر من جديد.');}
+    try{
+      const preview=await broadcasts.preview(actor,state.scope);
+      if(!preview.recipientCount)return ctx.reply('لا يوجد طلبة مستلمون في هذا النطاق. اختر نطاقًا آخر.');
+      userState.set(ctx.from.id,{action:'broadcast_confirm',scope:state.scope,message,
+        requestKey:`broadcast:${ctx.from.id}:${ctx.message.message_id}`});
+      return ctx.reply(`📣 مراجعة الرسالة\nالنطاق: ${preview.label}\nعدد المستلمين: ${preview.recipientCount}\n\n${message}\n\nهل تريد إرسالها؟`,
+        Markup.inlineKeyboard([[callbackButton('✅ تأكيد الإرسال', 'broadcast:confirm')],
+          [callbackButton('❌ إلغاء', 'admin_cancel_noop')]]));
+    }catch(err){userState.delete(ctx.from.id);return ctx.reply(`تعذر تجهيز الرسالة: ${err.message}`);}
+  }
+  if(state.action==='broadcast_confirm')return ctx.reply('اضغط «تأكيد الإرسال» أو «إلغاء» أسفل معاينة الرسالة.');
   if (state.action === 'awaiting_onboarding_ack') {
     return ctx.reply('اضغط زر «ابدأ التسجيل» أسفل الدليل، أو «لديّ كود تفعيل / نقل حساب». لفتح الدليل مجددًا أرسل /guide.');
   }
@@ -1565,29 +1575,6 @@ bot.on('text', async (ctx, next) => {
   }
 
   // -------- الأستاذ: موضوع الامتحان قبل تحديد ساعات الإتاحة --------
-  if(state.action==='teacher_exam_edit_title'){
-    const exam=await studies.getExamById(state.examId);
-    if(!exam||!await teacherOwnsSubject(ctx,exam.subject_id,exam.stage_season_id))return ctx.reply('غير مصرح.');
-    const dateIso=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(exam.opens_at));
-    try{await studies.updateExam(exam.id,{title:ctx.message.text.trim(),dateIso,hours:exam.available_hours});userState.delete(ctx.from.id);return renderExam(ctx,exam.id);}
-    catch(err){return ctx.reply(err.message);}
-  }
-  if(state.action==='teacher_q_edit_prompt'){
-    const prompt=ctx.message.text.trim();
-    if(prompt.length<3||prompt.length>3000)return ctx.reply('أرسل سؤالًا بين 3 و3000 حرف.');
-    if(state.type==='tf'){
-      userState.set(ctx.from.id,{...state,action:'teacher_q_edit_tf_answer',prompt});
-      return ctx.reply('اختر الإجابة الصحيحة:',Markup.inlineKeyboard([[callbackButton('صح',`ex_edit_tfans:${state.questionId}:صح`),callbackButton('خطأ',`ex_edit_tfans:${state.questionId}:خطأ`)]]));
-    }
-    userState.set(ctx.from.id,{...state,action:'teacher_q_edit_options',prompt});
-    return ctx.reply('أرسل الخيارات، كل خيار في سطر مستقل (من 2 إلى 6):');
-  }
-  if(state.action==='teacher_q_edit_options'){
-    const options=ctx.message.text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
-    if(options.length<2||options.length>6||new Set(options).size!==options.length)return ctx.reply('أرسل من خيارين إلى 6 خيارات مختلفة.');
-    userState.set(ctx.from.id,{...state,action:'teacher_q_edit_mcq_answer',options});
-    return ctx.reply('اختر الإجابة الصحيحة:',Markup.inlineKeyboard(options.map((x,i)=>[callbackButton(limitButtonText(x,45),`ex_edit_mcqans:${state.questionId}:${i}`)])));
-  }
   if (state.action === 'teacher_exam_topic') {
     const title = ctx.message.text.trim();
     if (title.length < 3 || title.length > 150) {
@@ -2017,7 +2004,7 @@ function studentScheduleWindow(todayIso){
   const weekday = isoWeekday(todayIso);
   const showNextWeek = weekday === 4 || weekday === 5; // الخميس والجمعة
   const saturdayOffset = showNextWeek
-    ? (6 - weekday)
+    ? (6 - weekday) + 7
     : -((weekday + 1) % 7);
   const startDate = shiftIsoDate(todayIso, saturdayOffset);
   const endDate = shiftIsoDate(startDate, 4); // السبت إلى الأربعاء
@@ -2046,8 +2033,19 @@ function studentScheduleDays(data, startDate, endDate){
   return days;
 }
 
-// جدول الطالب من الموسم النشط لمرحلته؛ قد يبقى تسجيل الطالب مرتبطًا بموسم سابق.
+// يعثر على جدول الطالب من الموسم الفعلي لمرحلته، مع fallback عند وجود تسجيل
+// قديم ما زال مرتبطًا بموسم سابق. هذا يمنع ظهور رسالة «لا توجد مواد»
+// رغم أن الأدمن وضع علامات في جدول الموسم الحالي.
 async function getStudentLessonScheduleData(student){
+  const today=currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
+  const enrolledSeason=await db.getStudentActiveStageSeason(student.id,today);
+  if(enrolledSeason){
+    const enrolledData=await db.getLessonSchedule(enrolledSeason.stage_season_id);
+    if(enrolledData && enrolledData.subjects && enrolledData.subjects.length>0){
+      return enrolledData;
+    }
+  }
+
   if(!student.stage_id)return null;
   const activeSeason=(await db.pool.query(`
     SELECT ss.id AS stage_season_id
@@ -2056,9 +2054,9 @@ async function getStudentLessonScheduleData(student){
     WHERE ss.stage_id=$1 AND ss.is_active=true
     ORDER BY ss.id DESC
     LIMIT 1`,[student.stage_id])).rows[0];
-  if(activeSeason)return db.getLessonSchedule(activeSeason.stage_season_id);
-  const enrolledSeason=await db.getStudentActiveStageSeason(student.id);
-  return enrolledSeason?db.getLessonSchedule(enrolledSeason.stage_season_id):null;
+  if(!activeSeason)return null;
+
+  return db.getLessonSchedule(activeSeason.stage_season_id);
 }
 
 async function showStudentLessonSchedule(ctx){
@@ -2805,7 +2803,7 @@ bot.action(/admin_act_subject:(\d+)/, async (ctx) => {
     subject.stage_id,
     dailyLessonNotificationText(hasChannelLink),
     dailyLessonNotificationKeyboard(lesson),
-    { skipOnLeave: true, dailyLessonNotificationDate: notificationDate, dailyLessonExpiresAt: lesson.active_until }
+    { skipOnLeave: true, dailyLessonNotificationDate: notificationDate }
   );
   return ctx.editMessageText(
     `تم تفعيل الدرس رقم ${Number(lesson.lesson_number)} لمادة «${subject.name}» لمدة ${LESSON_ACTIVE_HOURS} ساعة ✅\n` +
@@ -3064,7 +3062,6 @@ async function openStudentManagement(ctx) {
     registrationOpen ? 'danger' : 'success'
   )]);
   rows.push([callbackButton('🔎 البحث في جميع الطلبة', 'students_search:0')]);
-  rows.push([callbackButton('📣 تنويه لجميع الطلبة ذوي الإجراءات الناقصة', 'students_remind_all')]);
   return ctx.reply(
     `إدارة الطلبة\nحالة الانضمام الجديد: ${registrationOpen?'🟢 مفتوح':'🔴 متوقف'}\n\nاختر المرحلة أو الإجراء المطلوب:`,
     Markup.inlineKeyboard(rows)
@@ -3098,7 +3095,7 @@ bot.action(/^students_stage:(\d+)$/,async ctx=>{
 bot.action(/^students_content:(\d+)$/,async ctx=>{
   if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
   await ctx.answerCbQuery();const s=await adminData.stage(Number(ctx.match[1]));
-  const lines=s.subjects.map(sub=>`📘 ${sub.name} — ${sub.teacher_name||'بلا أستاذ'}\n`+s.groups.filter(g=>g.subject_id===sub.id).map(g=>s.discussion_grouping===false?`• ${g.title}: ${g.member_count}/${g.capacity}`:`• ${g.title}: ${g.member_count} عضو، ${g.reserved_count}/${g.capacity} مقعد محجوز`).join('\n'));
+  const lines=s.subjects.map(sub=>`📘 ${sub.name} — ${sub.teacher_name||'بلا أستاذ'}\n`+s.groups.filter(g=>g.subject_id===sub.id).map(g=>`• ${g.title}: ${g.member_count}/${g.capacity}`).join('\n'));
   return ctx.reply((lines.join('\n\n')||'لا توجد مواد بعد.').slice(0,3800),Markup.inlineKeyboard([[callbackButton('↩️ المرحلة',`students_stage:${s.id}`)]]));
 });
 bot.action(/^students_page:(\d+):(\d+)$/,async ctx=>{
@@ -3145,28 +3142,6 @@ bot.hears('🖥️ لوحة الإدارة',openAdminWeb);
 bot.command('admin_web',openAdminWeb);
 bot.action('admin_students', openStudentManagement);
 bot.hears('🎓 إدارة الطلبة', openStudentManagement);
-
-bot.action('students_remind_all',async ctx=>{
-  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
-  await ctx.answerCbQuery();
-  const rows=await studentReminders.incompleteStudents(db.pool);
-  if(!rows.length)return ctx.reply('لا يوجد طلاب لديهم إجراءات ناقصة حاليًا.');
-  const campaignId=randomUUID();
-  userState.set(ctx.from.id,{action:'students_remind_all',campaignId,at:Date.now()});
-  return ctx.reply(`سيُرسل تنويه مخصص إلى ${rows.length} طالبًا لديهم إجراءات ناقصة. يذكر التنويه ما ينقص كل طالب وطريقة إكماله عبر البوت.`,
-    Markup.inlineKeyboard([[callbackButton('📨 إرسال التنويهات الآن',`students_remind_send:${campaignId}`)],
-      [callbackButton('↩️ إدارة الطلبة','admin_students')]]));
-});
-bot.action(/^students_remind_send:([0-9a-f-]{36})$/,async ctx=>{
-  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
-  const state=userState.get(ctx.from.id);
-  if(state?.action!=='students_remind_all'||state.campaignId!==ctx.match[1]||Date.now()-state.at>10*60*1000)
-    return ctx.answerCbQuery('انتهت صلاحية خطوة الإرسال. افتح إدارة الطلبة مجددًا.',{show_alert:true});
-  userState.delete(ctx.from.id);
-  await ctx.answerCbQuery('يجري إدراج التنويهات للإرسال.');
-  const result=await studentReminders.queueIncompleteStudents(db.pool,state.campaignId);
-  return ctx.reply(`أُدرج ${result.queued} تنويهًا مخصصًا في طابور الإرسال من أصل ${result.eligible} طالبًا تنطبق عليهم الشروط الآن.`);
-});
 
 bot.action(/admin_registration:(on|off)/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
@@ -3436,7 +3411,7 @@ async function showTeacherAttendanceMenu(ctx) {
       `teacher_att:${s.subject_id}:${s.stage_season_id}`
     ),
   ]);
-  return ctx.reply('اختر المادة لعرض حضور طلبتها:', Markup.inlineKeyboard(rows));
+  return ctx.reply('اختر المادة لعرض حضور مباحثات طلبتها:', Markup.inlineKeyboard(rows));
 }
 
 bot.hears('📊 حضور موادي', showTeacherAttendanceMenu);
@@ -3449,27 +3424,26 @@ bot.action(/teacher_att:(\d+):(\d+)/, async (ctx) => {
   }
 
   await ctx.answerCbQuery();
-  const rows = await db.getSubjectAttendanceForTeacher(subjectId, stageSeasonId);
-  if (rows.length === 0) return ctx.reply('لا يوجد طلبة مسجّلون في هذا الموسم.');
-  const groups=new Map();
-  for(const row of rows){const id=Number(row.group_id||0);if(!groups.has(id))groups.set(id,{title:row.group_title||'بلا مجموعة',count:0});groups.get(id).count++;}
-  return ctx.reply('اختر المجموعة لعرض حضور طلبة المباحثات والتقارير:',Markup.inlineKeyboard(
-    [...groups].map(([id,g])=>[callbackButton(limitButtonText(`${g.title} — ${g.count} طالب`),`teacher_att_group:${subjectId}:${stageSeasonId}:${id}`)])));
-});
+  const rows = await studies.listDiscussionAttendanceForTeacher(subjectId, stageSeasonId);
+  if (rows.length === 0) return ctx.reply('لا يوجد طلبة في نمط المباحثات لهذه المادة.');
 
-bot.action(/^teacher_att_group:(\d+):(\d+):(\d+)$/,async ctx=>{
-  const subjectId=Number(ctx.match[1]),seasonId=Number(ctx.match[2]),groupId=Number(ctx.match[3]);
-  if(!await teacherOwnsSubject(ctx,subjectId,seasonId))return ctx.answerCbQuery('غير مصرح.');
-  const all=await db.getSubjectAttendanceForTeacher(subjectId,seasonId);
-  const rows=all.filter(r=>Number(r.group_id||0)===groupId);
-  if(!rows.length)return ctx.answerCbQuery('لا يوجد طلبة في هذه المجموعة.');
-  await ctx.answerCbQuery();
-  const title=rows[0].group_title||'بلا مجموعة';
-  const lines=['المباحثات','التقارير'].map((label,index)=>{
-    const subset=rows.filter(r=>index?r.mode==='report':r.mode!=='report');
-    return `${label} (${subset.length}):\n${subset.length?subset.map(r=>`• ${r.full_name}: ${Number(r.attended_lessons)}/${Number(r.total_lessons)} درس`).join('\n'):'لا يوجد طلبة.'}`;
-  });
-  return ctx.reply(`📊 حضور ${title}\n\n${lines.join('\n\n')}`);
+  const lines = rows.slice(0, 20).map((r) =>
+    `• ${r.full_name}: ${Number(r.attended_sessions)}/${Number(r.eligible_sessions)}` +
+    (Number(r.incomplete_sessions) ? ` (${Number(r.incomplete_sessions)} بداية بلا نهاية)` : '')
+  );
+  await ctx.reply(
+    `📊 حضور مباحثات المادة — ${rows.length} طالبًا\n` +
+    'يكتمل الحضور بتسجيل البداية والنهاية للجلسة نفسها.\n\n' +
+    lines.join('\n') +
+    (rows.length > 20 ? `\n… وبقية الطلبة في الملف المرفق.` : '')
+  );
+  return sendMarkdownDoc(
+    ctx,
+    `حضور_مباحثات_المادة_${subjectId}`,
+    buildMarkdownDoc('حضور مباحثات طلبة المادة', ['الطالب', 'الحضور المكتمل', 'الجلسات المؤهلة', 'بداية بلا نهاية'],
+      rows.map((r) => [r.full_name, Number(r.attended_sessions), Number(r.eligible_sessions), Number(r.incomplete_sessions)]),
+      'يُحسب الحضور مكتملًا عند تسجيل البداية والنهاية للجلسة نفسها؛ وقد يختلف عدد الجلسات المؤهلة من طالب لآخر.')
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -3678,7 +3652,7 @@ async function runScheduleTick() {
 }
 
 async function runScheduleTickInner() {
-  return scheduler.tick(ADMIN_IDS);
+  return scheduler.tick();
 }
 
 // يفتح حضور النهاية (مرة واحدة) ويرسل زر «حضرت النهاية» لطلبة المجموعة عبر الطابور.
@@ -3826,6 +3800,66 @@ async function teacherOwnsSubject(ctx, subjectId, stageSeasonId) {
   return owns ? { id: teacher.id, isAdmin: false } : null;
 }
 
+async function broadcastActor(ctx) {
+  if(isInPreview(ctx))return null;
+  if(isAdmin(ctx))return {id:ctx.from.id,role:'admin'};
+  const teacher=await effectiveTeacher(ctx);
+  return teacher?{id:ctx.from.id,role:'teacher',teacherId:teacher.id}:null;
+}
+
+async function startBroadcastCompose(ctx,scope) {
+  const actor=await broadcastActor(ctx);
+  if(!actor)return ctx.answerCbQuery('هذه العملية متاحة للأستاذ والإدارة فقط.');
+  try{
+    const preview=await broadcasts.preview(actor,scope);
+    await ctx.answerCbQuery();
+    if(!preview.recipientCount)return ctx.reply('لا يوجد طلبة مستلمون في هذا النطاق. اختر نطاقًا آخر.');
+    userState.set(ctx.from.id,{action:'broadcast_compose',scope});
+    return ctx.reply(`📣 رسالة جماعية\nالنطاق: ${preview.label}\nعدد المستلمين حاليًا: ${preview.recipientCount}\n\nأرسل نص الرسالة (حتى 3000 حرف). سيظهر لك تأكيد قبل الإرسال.`);
+  }catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
+}
+
+bot.hears('📣 رسالة جماعية', async ctx=>{
+  const actor=await broadcastActor(ctx);
+  if(!actor)return ctx.reply('هذه العملية متاحة للأستاذ والإدارة فقط.');
+  const subjects=await getActorSubjects(ctx);
+  const rows=[];
+  if(actor.role==='admin')rows.push([callbackButton('📣 جميع الطلبة', 'broadcast:scope:all')]);
+  rows.push(...subjects.map(s=>[callbackButton(limitButtonText(`${s.subject_name} — ${s.stage_name}`,50),
+    `broadcast:subject:${s.subject_id}:${s.stage_season_id}`)]));
+  if(!rows.length)return ctx.reply('لا توجد مواد مسندة إليك في الموسم الحالي.');
+  return ctx.reply('اختر المادة، ثم حدد جميع طلبتها أو مجموعة معينة:',Markup.inlineKeyboard(rows));
+});
+
+bot.action('broadcast:scope:all',async ctx=>startBroadcastCompose(ctx,{kind:'all'}));
+bot.action(/^broadcast:subject:(\d+):(\d+)$/,async ctx=>{
+  const subjectId=Number(ctx.match[1]),seasonId=Number(ctx.match[2]);
+  if(!await teacherOwnsSubject(ctx,subjectId,seasonId))return ctx.answerCbQuery('هذه المادة ليست ضمن موادك.');
+  const groups=(await studies.listGroups(subjectId,seasonId)).filter(g=>g.is_active);
+  await ctx.answerCbQuery();
+  return ctx.reply('اختر نطاق الرسالة:',Markup.inlineKeyboard([
+    [callbackButton('📚 جميع طلبة المادة',`broadcast:scope:subject:${subjectId}:${seasonId}`)],
+    ...groups.map(g=>[callbackButton(limitButtonText(`👥 ${g.title}`,50),
+      `broadcast:scope:group:${subjectId}:${seasonId}:${g.id}`)]),
+  ]));
+});
+bot.action(/^broadcast:scope:subject:(\d+):(\d+)$/,async ctx=>
+  startBroadcastCompose(ctx,{kind:'subject',subjectId:Number(ctx.match[1]),seasonId:Number(ctx.match[2])}));
+bot.action(/^broadcast:scope:group:(\d+):(\d+):(\d+)$/,async ctx=>
+  startBroadcastCompose(ctx,{kind:'group',subjectId:Number(ctx.match[1]),seasonId:Number(ctx.match[2]),groupId:Number(ctx.match[3])}));
+bot.action('broadcast:confirm',async ctx=>{
+  const state=userState.get(ctx.from.id);
+  if(state?.action!=='broadcast_confirm')return ctx.answerCbQuery('انتهت صلاحية المعاينة. ابدأ من جديد.',{show_alert:true});
+  const actor=await broadcastActor(ctx);
+  if(!actor)return ctx.answerCbQuery('غير مصرح.',{show_alert:true});
+  try{
+    const result=await broadcasts.send(actor,state.scope,state.message,state.requestKey);
+    userState.delete(ctx.from.id);
+    await ctx.answerCbQuery('حُفظت الرسالة للإرسال ✅');
+    return ctx.editMessageText(`✅ حُفظت الرسالة الجماعية للإرسال إلى ${result.recipientCount} طالبًا.\nرقم الإرسال: ${result.id}`);
+  }catch(err){return ctx.answerCbQuery(`تعذر الإرسال: ${err.message}`,{show_alert:true});}
+});
+
 bot.hears('👥 المجموعات', (ctx) => pickTeacherSubject(ctx, 'tg_groups', 'اختر المادة لإدارة مجموعاتها:'));
 
 async function renderGroups(ctx, subjectId, stageSeasonId, edit = false) {
@@ -3834,8 +3868,8 @@ async function renderGroups(ctx, subjectId, stageSeasonId, edit = false) {
     ? groups
         .map(
           (g) =>
-            `${g.group_number}) ${g.title} — ${g.discussion_grouping===false?`${Number(g.member_count)}/${g.capacity} عضو`:`${Number(g.member_count)} عضو، ${Number(g.reserved_count)}/${g.capacity} مقعد محجوز`}` +
-            `${Number(g.discussion_grouping===false?g.member_count:g.reserved_count) >= g.capacity ? ' (ممتلئة)' : ''}` +
+            `${g.group_number}) ${g.title} — ${Number(g.member_count)}/${g.capacity}` +
+            `${Number(g.member_count) >= g.capacity ? ' (ممتلئة)' : ''}` +
             `${g.invite_link ? '' : ' ⚠️ بلا رابط دعوة'}`
         )
         .join('\n')
@@ -3896,8 +3930,8 @@ bot.action(/tg_chat:(\d+)/, async (ctx) => {
     return ctx.reply(
       'لم يُضَف البوت مشرفًا في أي مجموعة بعد.\n\n' +
         'الخطوات:\n' +
-        '1) أضِف البوت إلى مجموعة تليجرام؛ سيغادرها ويطلب موافقة الأدمن.\n' +
-        '2) بعد الموافقة أضِفه مجددًا، ثم عُد إلى هنا واختر المجموعة.'
+        '1) أضِف البوت إلى مجموعة تليجرام.\n' +
+        '2) عُد إلى هنا واختر المجموعة.'
     );
   }
   return ctx.reply(
@@ -3917,7 +3951,6 @@ bot.action(/tg_chatdo:(\d+):(-?\d+)/, async (ctx) => {
   if (!group || !(await teacherOwnsSubject(ctx, group.subject_id, group.stage_season_id))) {
     return ctx.answerCbQuery('غير مصرح.');
   }
-  if(!pendingGroupChats.has(chatId))return ctx.answerCbQuery('المجموعة غير متاحة للربط. أضف البوت بعد موافقة الأدمن.',{show_alert:true});
   await studies.setGroupChatId(groupId, chatId);
   pendingGroupChats.delete(chatId);
   await ctx.answerCbQuery('تم الربط ✅');
@@ -4106,19 +4139,22 @@ bot.action(/ex_subj:(\d+):(\d+)/, async (ctx) => {
   if (!(await teacherOwnsSubject(ctx, subjectId, ssId))) return ctx.answerCbQuery('غير مصرح.');
   await ctx.answerCbQuery();
   const exams = await studies.listExamsForSubject(subjectId, ssId);
-  const byNumber = new Map(exams.map((e) => [e.exam_number, e]));
+  const byNumber = new Map(exams.filter(e=>e.status!=='cancelled').map((e) => [e.exam_number, e]));
   const rows = [];
   for (let n = 1; n <= studies.GRADE_WEIGHTS.examsPerSeason; n += 1) {
     const e = byNumber.get(n);
     rows.push([
       e
         ? Markup.button.callback(
-            `${e.status === 'published' ? '📤' : '⏰'} الشهري ${n} — ${Number(e.question_count)} سؤال` +
-              `${e.status === 'published' ? ` (${Number(e.submitted_count)} سلّموا)` : ' (مجدول)'}`,
+            `${e.status === 'cancelled' ? '🚫' : e.status === 'published' ? '📤' : '⏰'} الشهري ${n} — ${Number(e.question_count)} سؤال` +
+              (e.status === 'cancelled' ? ' (ملغى)' : e.status === 'published' ? ` (${Number(e.submitted_count)} سلّموا)` : ' (مجدول)'),
             `ex_view:${e.id}`
           )
         : Markup.button.callback(`➕ إنشاء الامتحان الشهري ${n}`, `ex_new:${subjectId}:${ssId}:${n}`),
     ]);
+    for(const cancelled of exams.filter(e=>e.exam_number===n&&e.status==='cancelled')){
+      rows.push([Markup.button.callback(`🚫 سجل الامتحان الملغى ${n}`,`ex_view:${cancelled.id}`)]);
+    }
   }
   return ctx.reply(
     `امتحانات المادة (${studies.GRADE_WEIGHTS.examsPerSeason} امتحانات، كل واحد ` +
@@ -4171,20 +4207,18 @@ async function renderExam(ctx, examId, edit = false) {
         .join('\n')
     : 'لا أسئلة بعد.';
   const rows = [];
-  if(Number(exam.attempt_count)===0){
-    rows.push([callbackButton('✏️ تعديل موضوع الامتحان',`ex_edit_title:${examId}`)]);
-    rows.push([callbackButton('📅 تعديل تاريخ الامتحان',`ex_edit_date:${examId}`)]);
-    rows.push([callbackButton('➕ سؤال صح/خطأ',`ex_qtf:${examId}`),callbackButton('➕ سؤال اختيار متعدد',`ex_qmcq:${examId}`)]);
-    rows.push([callbackButton('✏️ تعديل سؤال',`ex_edit_question:${examId}`),callbackButton('🗑️ حذف سؤال',`ex_delete_question:${examId}`)]);
-    rows.push([callbackButton('🗑️ حذف الامتحان',`ex_delete:${examId}`)]);
-  }
-  if (exam.status === 'published') {
+  if (exam.status === 'draft') {
+    rows.push([Markup.button.callback('➕ سؤال صح/خطأ', `ex_qtf:${examId}`)]);
+    rows.push([Markup.button.callback('➕ سؤال اختيار من متعدد', `ex_qmcq:${examId}`)]);
+
+  } else if(exam.status === 'published') {
     rows.push([Markup.button.callback('📊 النتائج', `ex_res:${examId}`)]);
     rows.push([Markup.button.callback('🕓 تأجيل الامتحان', `ex_pp:${examId}`)]);
   }
+  if(exam.status!=='cancelled')rows.push([Markup.button.callback('🚫 إلغاء الامتحان وإشعار الطلبة',`ex_cancel:${examId}`)]);
   const text =
     `📝 ${exam.title || 'الامتحان الشهري ' + exam.exam_number} — ${exam.subject_name}\n` +
-    `الحالة: ${exam.status === 'published' ? 'منشور 📤' : 'مجدول تلقائيًا ⏰'}\n` +
+    `الحالة: ${exam.status === 'cancelled' ? 'ملغى 🚫' : exam.status === 'published' ? 'منشور 📤' : 'مجدول تلقائيًا ⏰'}\n` +
     `يفتح: ${new Date(exam.opens_at).toISOString().slice(0, 16).replace('T', ' ')}\n` +
     `يُغلق: ${new Date(exam.closes_at).toISOString().slice(0, 16).replace('T', ' ')}\n` +
     `الدرجة: ${Number(exam.max_score)}\n\nالأسئلة (${questions.length}):\n${lines.slice(0,2700)}${lines.length>2700?'\n… بقية الأسئلة متاحة كاملة في لوحة الإدارة.':''}`;
@@ -4201,63 +4235,23 @@ bot.action(/ex_view:(\d+)/, async (ctx) => {
   return renderExam(ctx, exam.id);
 });
 
-async function editableExamForAction(ctx,examId){
-  const exam=await studies.getExamById(examId);
-  if(!exam||!await teacherOwnsSubject(ctx,exam.subject_id,exam.stage_season_id)||Number(exam.attempt_count)>0)return null;
-  return exam;
-}
-bot.action(/^ex_edit_title:(\d+)$/,async ctx=>{
-  const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن تعديل هذا الامتحان.');
-  userState.set(ctx.from.id,{action:'teacher_exam_edit_title',examId:exam.id});await ctx.answerCbQuery();return ctx.reply('أرسل موضوع الامتحان الجديد:');
+bot.action(/^ex_cancel:(\d+)$/,async ctx=>{
+  const exam=await studies.getExamById(Number(ctx.match[1]));
+  if(!exam||!await teacherOwnsSubject(ctx,exam.subject_id,exam.stage_season_id))return ctx.answerCbQuery('غير مصرح.');
+  if(exam.status==='cancelled')return ctx.answerCbQuery('الامتحان ملغى مسبقًا.');
+  await ctx.answerCbQuery();
+  return ctx.reply(`هل تريد إلغاء «${exam.title||'الامتحان الشهري '+exam.exam_number}»؟\nسيُحفظ سجله ويصل إشعار إلغاء للطلبة. لا يمكن الإلغاء إذا بدأ طالب محاولة.`,
+    Markup.inlineKeyboard([[callbackButton('✅ تأكيد الإلغاء',`ex_cancel_confirm:${exam.id}`)],
+      [callbackButton('تراجع','admin_cancel_noop')]]));
 });
-bot.action(/^ex_edit_date:(\d+)$/,async ctx=>{
-  const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن تعديل هذا الامتحان.');
-  await ctx.answerCbQuery();return ctx.reply('اختر تاريخ الامتحان الجديد:',Markup.inlineKeyboard(studies.upcomingWeekDays().map(day=>[callbackButton(day.label,`ex_edit_day:${exam.id}:${day.iso}`)])));
-});
-bot.action(/^ex_edit_day:(\d+):(\d{4}-\d{2}-\d{2})$/,async ctx=>{
-  const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن تعديل هذا الامتحان.');
-  try{await studies.updateExam(exam.id,{title:exam.title,dateIso:ctx.match[2],hours:exam.available_hours});await ctx.answerCbQuery('حُفظ التاريخ');return renderExam(ctx,exam.id);}
-  catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
-});
-bot.action(/^ex_delete:(\d+)$/,async ctx=>{
-  const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن حذف هذا الامتحان.');
-  await ctx.answerCbQuery();return ctx.reply(`حذف «${exam.title}» وأسئلته؟`,Markup.inlineKeyboard([[callbackButton('نعم، احذف الامتحان',`ex_delete_confirm:${exam.id}`)]]));
-});
-bot.action(/^ex_delete_confirm:(\d+)$/,async ctx=>{
-  const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن حذف هذا الامتحان.');
-  try{await studies.deleteExam(exam.id);await ctx.answerCbQuery('حُذف الامتحان');return ctx.editMessageText('حُذف الامتحان وأسئلته.');}
-  catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
-});
-for(const action of ['edit','delete'])bot.action(new RegExp(`^ex_${action}_question:(\\d+)$`),async ctx=>{
-  const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن تعديل الأسئلة.');
-  const questions=await studies.listExamQuestions(exam.id);await ctx.answerCbQuery();
-  if(!questions.length)return ctx.reply('لا توجد أسئلة.');
-  return ctx.reply(action==='edit'?'اختر السؤال لتعديله:':'اختر السؤال لحذفه:',Markup.inlineKeyboard(questions.map(q=>[callbackButton(limitButtonText(`${q.position}. ${q.prompt}`,48),`ex_${action}_question_pick:${q.id}`)])));
-});
-bot.action(/^ex_edit_question_pick:(\d+)$/,async ctx=>{
-  const q=await studies.getQuestionById(Number(ctx.match[1]));const exam=q&&await editableExamForAction(ctx,q.exam_id);
-  if(!exam)return ctx.answerCbQuery('لا يمكن تعديل السؤال.');
-  userState.set(ctx.from.id,{action:'teacher_q_edit_prompt',questionId:q.id,examId:exam.id,type:q.question_type});
-  await ctx.answerCbQuery();return ctx.reply(`السؤال الحالي: ${q.prompt}\nأرسل نص السؤال الجديد:`);
-});
-bot.action(/^ex_delete_question_pick:(\d+)$/,async ctx=>{
-  const q=await studies.getQuestionById(Number(ctx.match[1]));const exam=q&&await editableExamForAction(ctx,q.exam_id);
-  if(!exam)return ctx.answerCbQuery('لا يمكن حذف السؤال.');
-  try{await studies.deleteExamQuestion(q.id);await ctx.answerCbQuery('حُذف السؤال');return renderExam(ctx,exam.id);}
-  catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
-});
-bot.action(/^ex_edit_tfans:(\d+):(صح|خطأ)$/,async ctx=>{
-  const state=userState.get(ctx.from.id),q=await studies.getQuestionById(Number(ctx.match[1]));
-  if(!state||state.action!=='teacher_q_edit_tf_answer'||state.questionId!==q?.id||!await editableExamForAction(ctx,q.exam_id))return ctx.answerCbQuery('انتهت عملية التعديل.');
-  try{await studies.updateExamQuestion(q.id,{type:'tf',prompt:state.prompt,correct:ctx.match[2]});userState.delete(ctx.from.id);await ctx.answerCbQuery('حُفظ السؤال');return renderExam(ctx,q.exam_id);}
-  catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
-});
-bot.action(/^ex_edit_mcqans:(\d+):(\d+)$/,async ctx=>{
-  const state=userState.get(ctx.from.id),q=await studies.getQuestionById(Number(ctx.match[1]));
-  if(!state||state.action!=='teacher_q_edit_mcq_answer'||state.questionId!==q?.id||!await editableExamForAction(ctx,q.exam_id))return ctx.answerCbQuery('انتهت عملية التعديل.');
-  const correct=state.options[Number(ctx.match[2])];if(!correct)return ctx.answerCbQuery('خيار غير صالح.');
-  try{await studies.updateExamQuestion(q.id,{type:'mcq',prompt:state.prompt,options:state.options,correct});userState.delete(ctx.from.id);await ctx.answerCbQuery('حُفظ السؤال');return renderExam(ctx,q.exam_id);}
-  catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
+bot.action(/^ex_cancel_confirm:(\d+)$/,async ctx=>{
+  const exam=await studies.getExamById(Number(ctx.match[1]));
+  if(!exam||!await teacherOwnsSubject(ctx,exam.subject_id,exam.stage_season_id))return ctx.answerCbQuery('غير مصرح.');
+  try{
+    const result=await studies.cancelExam(exam.id,ctx.from.id);
+    await ctx.answerCbQuery('أُلغي الامتحان ✅');
+    return ctx.editMessageText(`🚫 أُلغي الامتحان الشهري ${result.examNumber} في مادة «${result.subjectName}».\nحُفظ إشعار الإلغاء للإرسال إلى ${result.recipientCount} طالبًا.`);
+  }catch(err){return ctx.answerCbQuery(`تعذر الإلغاء: ${err.message}`,{show_alert:true});}
 });
 
 bot.action(/ex_qtf:(\d+)/, async (ctx) => {
@@ -4694,14 +4688,14 @@ bot.action(/stu_mgsubj:(\d+):(\d+):(\d+)/, async (ctx) => {
   const [, studentId, subjectId, ssId] = ctx.match.map(Number);
   const groups = await studies.listGroups(subjectId, ssId);
   await ctx.answerCbQuery();
-  const available = groups.filter((g) => Number(g.reserved_count) < Number(g.capacity));
+  const available = groups.filter((g) => Number(g.member_count) < Number(g.capacity));
   if (available.length === 0) return ctx.reply('لا توجد مجموعة فيها متسع. أنشئ مجموعة جديدة أولًا.');
   return ctx.reply(
     'اختر الرقم الجديد: سيُوحّد في جميع مواد الطالب بهذا الموسم بعد التحقق من السعة. تبدأ أهلية الحضور من وقت النقل في المجموعات المتغيرة وتبقى التقارير السابقة محفوظة.',
     Markup.inlineKeyboard(
       available.map((g) => [
         callbackButton(
-          `${g.title} (${Number(g.reserved_count)}/${g.capacity} محجوز)`,
+          `${g.title} (${Number(g.member_count)}/${g.capacity})`,
           `stu_mgdo:${studentId}:${subjectId}:${ssId}:${g.id}`
         ),
       ])
@@ -4770,7 +4764,9 @@ bot.action(/stu_mfok:(\d+):(\d+)/, async (ctx) => {
 // ---------------------------------------------------------------------------
 // التقاط مجموعات تليجرام التي أُضيف إليها البوت
 // ---------------------------------------------------------------------------
-// تليجرام يضيف البوت أولًا ثم يرسل my_chat_member؛ لذلك يغادر أي مجموعة غير معتمدة فورًا.
+// البوت لا يفرض أي قيود على الأعضاء ولا يحظر أحدًا؛ دوره هنا التعرّف على المجموعة
+// فقط ليربطها الأستاذ أو الأدمن بمجموعة مباحثة. ضبط صلاحيات الأعضاء يبقى يدويًا
+// من إعدادات المجموعة نفسها.
 const pendingGroupChats = new Map();
 
 bot.on('my_chat_member', async (ctx) => {
@@ -4778,37 +4774,13 @@ bot.on('my_chat_member', async (ctx) => {
   const chat = upd.chat;
   if (!['group', 'supergroup'].includes(chat.type)) return;
   const status = upd.new_chat_member && upd.new_chat_member.status;
-  if(['left','kicked'].includes(status)){pendingGroupChats.delete(chat.id);return;}
   if (!['administrator', 'member'].includes(status)) return;
-  const allowed=(await db.pool.query('SELECT approved_at FROM approved_group_chats WHERE chat_id=$1',[chat.id])).rows[0]?.approved_at;
-  if(!allowed){
-    await db.pool.query(`INSERT INTO approved_group_chats(chat_id,title) VALUES($1,$2)
-      ON CONFLICT(chat_id) DO UPDATE SET title=EXCLUDED.title,requested_at=now() WHERE approved_group_chats.approved_at IS NULL`,
-      [chat.id,chat.title||null]);
-    pendingGroupChats.delete(chat.id);
-    let left=true;
-    try{await bot.telegram.leaveChat(chat.id);}catch(err){left=false;console.warn('تعذر مغادرة مجموعة غير معتمدة:',err.description||err.message);}
-    await notifyAdmins(`🔐 طلب إضافة البوت إلى مجموعة «${chat.title||chat.id}» (ID: ${chat.id}).\n`+
-      (left?'غادرها البوت. اضغط الموافقة ثم أضفه من جديد.':'تعذرت مغادرة المجموعة تلقائيًا؛ أزل البوت منها يدويًا ثم وافق إن رغبت.'),
-      Markup.inlineKeyboard([[callbackButton('✅ الموافقة على هذه المجموعة',`group_approve:${chat.id}`)]]));
-    return;
-  }
+
   pendingGroupChats.set(chat.id, { id: chat.id, title: chat.title, at: Date.now() });
   await notifyAdmins(
     `👥 أُضيف البوت إلى مجموعة «${chat.title}».\n` +
       'اربطها بمادة من «👥 المجموعات» ← المادة ← «💬 ربط مجموعة تليجرام».'
   );
-});
-
-bot.action(/^group_approve:(-?\d+)$/,async ctx=>{
-  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
-  const chatId=Number(ctx.match[1]);
-  if(!Number.isSafeInteger(chatId))return ctx.answerCbQuery('معرف المجموعة غير صالح.');
-  const row=(await db.pool.query(`UPDATE approved_group_chats SET approved_at=COALESCE(approved_at,now()),approved_by=COALESCE(approved_by,$2)
-    WHERE chat_id=$1 RETURNING title`,[chatId,ctx.from.id])).rows[0];
-  if(!row)return ctx.answerCbQuery('طلب المجموعة غير موجود.');
-  await ctx.answerCbQuery('تمت الموافقة ✅');
-  return ctx.reply(`✅ وافقت على مجموعة «${row.title||chatId}». أضف البوت إليها مجددًا، ثم اربطها بمجموعة المباحثة من لوحة الأستاذ.`);
 });
 
 // ---------------------------------------------------------------------------
@@ -5477,7 +5449,7 @@ bot.hears('🔗 روابط المجموعات', async (ctx) => {
         groups
           .map(
             (g) =>
-              `   ${g.title}: ${g.discussion_grouping===false?Number(g.member_count):`${Number(g.member_count)} عضو، ${Number(g.reserved_count)} محجوز`}/${g.capacity}` +
+              `   ${g.title}: ${Number(g.member_count)}/${g.capacity}` +
               `${g.invite_link ? '' : ' ⚠️ بلا رابط'}`
           )
           .join('\n')
@@ -5568,9 +5540,11 @@ bot.action(/^sr_stu:(\d+):(\d+):(\d+)(?::(\d+):(\d+))?$/, async (ctx) => {
   if(page>0)nav.push(callbackButton('تقارير سابقة',`sr_stu:${studentId}:${subjectId}:${ssId}:${groupId}:${page-1}`));
   if((page+1)*10<Number(reports[0].total_count))nav.push(callbackButton('تقارير تالية',`sr_stu:${studentId}:${subjectId}:${ssId}:${groupId}:${page+1}`));
   if(nav.length)rows.push(nav);
-  if(Number(summary.total)>0&&Number(summary.graded)===Number(summary.total))rows.push([
-    callbackButton(`✅ اعتماد درجة التقارير: ${Number(summary.average)}/${studies.GRADE_WEIGHTS.participationTotal}`,
-      `sr_apply:${studentId}:${subjectId}:${ssId}`),
+  rows.push([
+    callbackButton(
+      `📊 حفظ متوسط التقييمات كدرجة التقارير (${summary.average === null ? '—' : Number(summary.average)}/${studies.GRADE_WEIGHTS.participationTotal})`,
+      `sr_apply:${studentId}:${subjectId}:${ssId}`
+    ),
   ]);
   rows.push([
     callbackButton('✍️ تحديد درجة التقارير يدويًا', `sr_manual:${studentId}:${subjectId}:${ssId}`),
@@ -5580,8 +5554,8 @@ bot.action(/^sr_stu:(\d+):(\d+):(\d+)(?::(\d+):(\d+))?$/, async (ctx) => {
       `التقارير المُقيَّمة: ${Number(summary.graded)} من ${Number(summary.total)}` +
       `${summary.average === null ? '' : ` | متوسط التقييمات: ${Number(summary.average)} من ${studies.GRADE_WEIGHTS.participationTotal}`}\n\n` +
       'اضغط «تقييم هذا التقرير» لإعطائه درجة أو تعديل تقييمه السابق.\n' +
-      `بعد تقييم التقارير كلها يظهر زر «اعتماد درجة التقارير». يحسب متوسط درجاتها من ${studies.GRADE_WEIGHTS.participationTotal} ويحفظه درجةً معتمدة لهذه المادة وهذا الموسم.\n` +
-      'للاستثناءات يمكنك تحديد درجة التقارير يدويًا.',
+      `«حفظ متوسط التقييمات كدرجة التقارير» يسجّل متوسط التقارير المُقيَّمة فقط، من ${studies.GRADE_WEIGHTS.participationTotal}، في خانة درجة التقارير لهذه المادة وهذا الموسم. التقارير غير المُقيَّمة لا تدخل في الحساب.\n` +
+      'ويمكنك اختيار «تحديد درجة التقارير يدويًا» لإدخال الدرجة التي تريد حفظها مباشرةً.',
     Markup.inlineKeyboard(rows)
   );
 });
@@ -6093,7 +6067,7 @@ async function handleChannelLesson(ctx) {
       channel.stage_id,
       dailyLessonNotificationText(hasChannelLink),
       dailyLessonNotificationKeyboard(lesson),
-      { skipOnLeave: true, dailyLessonNotificationDate: notificationDate, dailyLessonExpiresAt: lesson.active_until }
+      { skipOnLeave: true, dailyLessonNotificationDate: notificationDate }
     );
 
     await notifyAdmins(
@@ -6147,7 +6121,7 @@ async function checkReminders() {
             AND NOT EXISTS(SELECT 1 FROM attendance a WHERE a.student_id=st.id AND a.lesson_id=l.id)
             AND NOT EXISTS(SELECT 1 FROM student_leaves sl WHERE sl.student_id=st.id AND sl.stage_season_id=e.stage_season_id
               AND sl.status='approved' AND $3::date BETWEEN sl.start_date AND sl.end_date)
-          ON CONFLICT(dedupe_key) DO NOTHING`,[lesson.id,JSON.stringify([text,Markup.inlineKeyboard([[callbackButton('أضغط لتسجيل الحضور',`attend:${lesson.id}`)]])]),currentDateInTimeZone(ATTENDANCE_TIME_ZONE)]);
+          ON CONFLICT(dedupe_key) DO NOTHING`,[lesson.id,JSON.stringify([text,singleLessonKeyboard(lesson)]),currentDateInTimeZone(ATTENDANCE_TIME_ZONE)]);
         await c.query('UPDATE lessons SET reminder_sent=true WHERE id=$1',[lesson.id]);
         await c.query('COMMIT');
       }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
@@ -6310,7 +6284,6 @@ module.exports = {
   groupStudentReport,
   parseLeaveDays,
   currentDateInTimeZone,
-  studentScheduleWindow,
   buildAdminAbsenceMessages,
   lessonKeyboard,
   singleLessonKeyboard,

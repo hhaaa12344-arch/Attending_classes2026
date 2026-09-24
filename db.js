@@ -837,6 +837,19 @@ async function updateStudentStage(id, stageId) {
       [stageId]
     );
     if (!target.rows[0]) throw new Error('لا يوجد موسم نشط للمرحلة الجديدة.');
+    // أغلق عضويات المجموعات القديمة قبل النقل؛ يبقى تاريخها وحضورها محفوظين.
+    await client.query(`INSERT INTO group_membership_history
+      (student_id,group_id,subject_id,stage_season_id,assigned_at,ended_at)
+      SELECT m.student_id,m.group_id,m.subject_id,m.stage_season_id,m.assigned_at,now()
+      FROM group_memberships m
+      JOIN enrollments e ON e.student_id=m.student_id AND e.stage_season_id=m.stage_season_id AND e.status='active'
+      WHERE m.student_id=$1 ON CONFLICT DO NOTHING`,[id]);
+    await client.query(`DELETE FROM group_memberships m USING enrollments e
+      WHERE m.student_id=$1 AND e.student_id=m.student_id
+        AND e.stage_season_id=m.stage_season_id AND e.status='active'`,[id]);
+    await client.query(`DELETE FROM student_group_numbers n USING enrollments e
+      WHERE n.student_id=$1 AND e.student_id=n.student_id
+        AND e.stage_season_id=n.stage_season_id AND e.status='active'`,[id]);
     await client.query(
       `UPDATE enrollments SET status='moved', ended_at=now()
        WHERE student_id=$1 AND status='active'`,
@@ -1365,21 +1378,18 @@ const listSubjectTeachers = (subjectId) =>
 const getSubjectAttendanceForTeacher = (subjectId, stageSeasonId) =>
   pool
     .query(
-      `SELECT st.id AS student_id, st.full_name,pm.mode,gm.group_id,
-              discussion_group_label(gm.group_id) AS group_title,
+      `SELECT st.id AS student_id, st.full_name,
               COUNT(l.id) AS total_lessons,
               -- يُحتسب الحضور المؤشَّر ضمن مهلة الدرس فقط، كما في تقريري الطالب والأدمن
               COUNT(a.id) FILTER (WHERE (a.listened_at <= l.active_until OR a.marking_kind='admin_late')) AS attended_lessons
        FROM enrollments e
        JOIN students st ON st.id=e.student_id
-       LEFT JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=$1 AND pm.stage_season_id=$2
-       LEFT JOIN group_memberships gm ON gm.student_id=st.id AND gm.subject_id=$1 AND gm.stage_season_id=$2
        LEFT JOIN lessons l ON l.subject_id=$1 AND l.stage_season_id=$2
             AND l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
        LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=st.id
        WHERE e.stage_season_id=$2 AND e.status='active'
-       GROUP BY st.id, st.full_name,pm.mode,gm.group_id
-       ORDER BY gm.group_id,st.full_name`,
+       GROUP BY st.id, st.full_name
+       ORDER BY st.full_name`,
       [subjectId, stageSeasonId]
     )
     .then((r) => r.rows);
