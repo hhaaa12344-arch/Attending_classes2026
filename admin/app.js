@@ -14,6 +14,7 @@ let adminSelection=null;
 Object.assign(actionLabels,{correct_lesson_subject:'تصحيح مادة الدرس',late_lesson_attendance:'حضور إداري متأخر',remove_lesson_attendance:'حذف حضور طالب من درس',reopen_student_exam:'فتح امتحان لطالب واحد'});
 Object.assign(actionLabels,{contact_student_admin:'رسالة إدارية لطالب',contact_student_teacher:'رسالة أستاذ لطالب'});
 Object.assign(actionLabels,{one_time_preliminary_22_group_1_to_2:'نقل 13 طالبًا من المجموعة 1 إلى 2'});
+Object.assign(actionLabels,{one_time_schedule_import_2026_09_24:'إدخال جداول المباحثات دفعة واحدة'});
 let contactQuery='',contactPage=0,contactStudent=null;
 const contactRequestKey=prefix=>prefix+':'+(globalThis.crypto?.randomUUID?.()||`${Date.now()}:${Math.random().toString(36).slice(2)}`);
 const contactStatuses={pending:'بانتظار الإرسال',sending:'قيد الإرسال',sent:'أُرسلت',failed:'تعذّر الإرسال',expired:'انتهت المهلة',archived:'سجل إرسال مؤرشف'};
@@ -162,12 +163,19 @@ async function loadScheduleMatrix(){view='schedule-matrix';currentStage=null;set
   await renderScheduleMatrix();
 }
 let matrixDetail=null;
+const scheduleFreeTable=items=>table(['الأستاذ','مواعيد مشغولة','الأوقات المتبقية من السبت إلى الأربعاء (7 و8 مساءً)'],items.map(t=>[
+  esc(t.teacherName),esc(t.used),t.free.map(x=>`${DAY_NAMES[x.dayOfWeek]} ${x.hour===19?'7':'8'} مساءً`).join('، ')||'لا يوجد وقت متبقٍ'
+]));
 async function renderScheduleMatrix(){
-  const n=++sequence;const s=await api('/stages/'+matrixStageId);const slots=await api('/schedule?seasonId='+s.stage_season_id);if(n!==sequence)return;
+  const n=++sequence;const [s,importState]=await Promise.all([api('/stages/'+matrixStageId),api('/schedule-batch-import')]);
+  const slots=await api('/schedule?seasonId='+s.stage_season_id);if(n!==sequence)return;
   const dayTabs=DAY_NAMES.map((d,i)=>button(d,'matrix-day',`data-day="${i}"`,String(i)===String(matrixDay)?'active':'')).join('');
   const daySlots=slots.filter(sl=>Number(sl.day_of_week)===Number(matrixDay));
   const hours=Array.from({length:8},(_,i)=>i+16);matrixDetail=s;
-  let body=`<form id="matrix-stage" class="toolbar"><label>المرحلة<select name="stageId">${matrixEligible.map(e=>`<option value="${e.id}" ${String(e.id)===String(matrixStageId)?'selected':''}>${esc(e.name)}</option>`).join('')}</select></label></form>`+
+  let body=(importState.completed?`<section class="detail-section"><h2>الأوقات المتبقية للأساتذة</h2><p>بحسب المواعيد النشطة الحالية، ضمن الأيام والساعات المحددة في الإكسل. تحقق من جدول المجموعة عند إضافة مادة جديدة.</p>${scheduleFreeTable(importState.teacherAvailability)}</section>`:
+    importState.available?`<section class="detail-section"><h2>إدخال جدول الإكسل لمرة واحدة</h2><p>${esc(importState.sourceRows)} مادة في الإكسل، ${esc(importState.groups)} مجموعة، ${esc(importState.appointments)} موعدًا أسبوعيًا. يلزم إضافة ${esc(importState.assignmentsToAdd)} إسناد أستاذ كما ورد في الملف؛ تبقى الإسنادات السابقة محفوظة.</p>${button('إدخال جميع مواعيد المباحثات دفعة واحدة','schedule-batch-import','','primary')}</section>`:
+      `<section class="detail-section"><h2>يلزم مراجعة جدول الإكسل قبل الإدخال</h2><p>${esc((importState.errors||[]).join(' '))}</p></section>`)+
+    `<form id="matrix-stage" class="toolbar"><label>المرحلة<select name="stageId">${matrixEligible.map(e=>`<option value="${e.id}" ${String(e.id)===String(matrixStageId)?'selected':''}>${esc(e.name)}</option>`).join('')}</select></label></form>`+
     `<div class="tabs" role="navigation" aria-label="أيام الأسبوع">${dayTabs}</div>`;
   if(!s.groups.length)body+=empty('لا توجد مجموعات في هذه المرحلة');
   else body+=`<div class="matrix-wrap"><table class="matrix"><thead><tr><th scope="col">المجموعة</th>${hours.map(h=>`<th scope="col">${String(h).padStart(2,'0')}:00</th>`).join('')}</tr></thead><tbody>${
@@ -514,6 +522,13 @@ document.addEventListener('click',async event=>{
       }catch(e){notify(e.message,true);}finally{busy=false;}
     }
     else if(a==='stats')await loadStats();
+    else if(a==='schedule-batch-import'){
+      const state=await api('/schedule-batch-import');
+      if(!state.available)throw Error(state.completed?'استُخدم زر إدخال الجدول سابقًا.':(state.errors||[]).join(' '));
+      dialog('إدخال جداول المباحثات لمرة واحدة',`<p>سيُضاف ${esc(state.appointments)} موعدًا أسبوعيًا لجميع ${esc(state.groups)} مجموعة في الملف. جلستا كل مجموعة في يومين مختلفين، من السبت إلى الأربعاء الساعة 7 أو 8 مساءً بتوقيت بغداد.</p><p>سيُضاف ${esc(state.assignmentsToAdd)} إسناد أستاذ غير موجود في القاعدة. الإسنادات السابقة تبقى محفوظة.</p><h3>مطابقة مواد الإكسل مع قاعدة البيانات</h3>${table(['السطر','المادة في الإكسل','المادة في القاعدة','الأستاذ'],state.mapping.map(x=>[esc(x.workbookRow),esc(x.workbookSubject),`${esc(x.stageName)} · ${esc(x.subjectName)}`,esc(x.teacherName)]))}${state.otherAssignments.length?`<h3>مواد لها إسناد سابق لأستاذ آخر</h3>${table(['سطر الإكسل','المادة','الأستاذ المسند سابقًا'],state.otherAssignments.map(x=>[esc(x.workbookRow),esc(x.subject),esc(x.teacherName)]))}`:''}<h3>الوقت المتبقي لكل أستاذ بعد الإدخال</h3>${scheduleFreeTable(state.plannedAvailability)}<div class="form-actions">${button('تأكيد إدخال جميع المواعيد','schedule-batch-import-confirm','','primary')}</div>`);
+    }else if(a==='schedule-batch-import-confirm'){
+      busy=true;const done=await api('/schedule-batch-import',{},'POST');$('#detail').close();await renderScheduleMatrix();notify(`أُدخل ${done.appointments} موعدًا، وأضيف ${done.addedAssignments} إسناد أستاذ. اختفى زر الإدخال لمرة واحدة.`);
+    }
     else if(a==='watchlist')await loadWatchlist();
     else if(a==='teacher-performance')await showTeacherPerformance(target.dataset.id);
     else if(a==='matrix-day'){matrixDay=Number(target.dataset.day);await renderScheduleMatrix();}
