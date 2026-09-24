@@ -18,6 +18,7 @@ async function readJson(req) {
 function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,origin}) {
   const overrides=require('./adminOverrides').createAdminOverrides(db.pool);
   const studentContact=require('./studentContact').createStudentContact(db.pool);
+  const oneTimeCohortMove=require('./oneTimeCohortMove').createOneTimeCohortMove(db.pool);
   const sessions=createSessions();const authLimits=new Map();let active=0;
   const teacherWeb=require('./teacherWeb').createTeacherWeb({db,studies,scheduler,botToken,origin,readJson});
   const json=(res,code,value)=>{res.writeHead(code,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
@@ -72,6 +73,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(route==='/session-management')result=await adminData.managedItems('sessions',q);
         else if(route==='/lesson-attendance')result=await adminData.lessonAttendance(q);
         else if(route==='/students')result=await adminData.students(q);
+        else if(route==='/one-time-cohort-move')result=await oneTimeCohortMove.status();
         else if(route==='/student-contact')result=await studentContact.search({actorId:actor.id,role:'admin',q:q.q||'',page:q.page||0});
         else if(/^\/student-contact\/\d+$/.test(route))result=await studentContact.history({actorId:actor.id,role:'admin',studentId:positiveInt(route.split('/')[2])});
         else if(/^\/students\/\d+$/.test(route))result=await adminData.student(positiveInt(route.split('/')[2]));
@@ -133,6 +135,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
       } else if(req.method==='POST'||req.method==='PATCH') {
         const body=await readJson(req);
         if(route==='/student-contact'&&req.method==='POST')result=await studentContact.send({...body,actorId:actor.id,role:'admin'});
+        else if(route==='/one-time-cohort-move'&&req.method==='POST')result=await oneTimeCohortMove.execute(body.studentIds,actor.id);
         else if((m=/^\/students\/(\d+)$/.exec(route))&&req.method==='PATCH')result=await adminData.updateStudent(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/stage-seasons\/(\d+)\/participation-settings$/.exec(route))&&req.method==='PATCH')result=await adminData.saveParticipationSettings(positiveInt(m[1]),body,actor.id);
         else if(route==='/teachers'&&req.method==='POST'){
