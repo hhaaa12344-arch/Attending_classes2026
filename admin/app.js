@@ -11,7 +11,7 @@ const DAY_NAMES=['الأحد','الاثنين','الثلاثاء','الأربع�
 let token='',stages=[],teachers=[],seasons=[],currentSeasonId='',currentStage=null,currentStudent=null,currentExam=null,currentTeacher=null,matrixStageId=null,matrixDay=new Date().getDay(),matrixEligible=[],tab='students',page=0,view='home',sequence=0,dialogSequence=0,busy=false;
 let lessonScheduleStageId=null,lessonScheduleData=null;
 let adminSelection=null;
-Object.assign(actionLabels,{correct_lesson_subject:'تصحيح مادة الدرس',late_lesson_attendance:'حضور إداري متأخر',reopen_student_exam:'فتح امتحان لطالب واحد'});
+Object.assign(actionLabels,{correct_lesson_subject:'تصحيح مادة الدرس',late_lesson_attendance:'حضور إداري متأخر',remove_lesson_attendance:'حذف حضور طالب من درس',reopen_student_exam:'فتح امتحان لطالب واحد'});
 Object.assign(actionLabels,{contact_student_admin:'رسالة إدارية لطالب',contact_student_teacher:'رسالة أستاذ لطالب'});
 let contactQuery='',contactPage=0,contactStudent=null;
 const contactRequestKey=prefix=>prefix+':'+(globalThis.crypto?.randomUUID?.()||`${Date.now()}:${Math.random().toString(36).slice(2)}`);
@@ -268,11 +268,28 @@ async function lessonManagementContent(stageId){
   if(data.total&&mgtPage>0&&!data.rows.length){mgtPage--;return lessonManagementContent(stageId);}
   const ro=!data.season.is_active;
   return managementSummary(data,'درسًا')+subjectSelector(data,'lesson-mgt',mgtSubjectId)+
-    table(['رقم الدرس في المادة','المادة','النشر الأصلي','نهاية التسجيل','الحضور',...(ro?[]:['الإجراءات'])],data.rows.map(l=>[`${l.item_number}<div class="subtle">المعرف #${l.id}</div>`,`${esc(l.subject_name)}<div class="subtle">${esc(lessonSource(l.source_type))}</div>`,stamp(l.activated_at),`${stamp(l.active_until)}<div>${l.is_active?'مفتوح':'انتهت المهلة'}</div>`,`${l.attended_count} / ${l.enrolled_count}`,
-      ...(ro?[]:[(l.can_reopen?button('إعادة فتح للوقت المتبقي','lesson-reopen',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`):'<span class="subtle">مضت مهلة إعادة الفتح</span>')+
+    table(['رقم الدرس في المادة','المادة','النشر الأصلي','نهاية التسجيل','الحضور','الإجراءات'],data.rows.map(l=>[`${l.item_number}<div class="subtle">المعرف #${l.id}</div>`,`${esc(l.subject_name)}<div class="subtle">${esc(lessonSource(l.source_type))}</div>`,stamp(l.activated_at),`${stamp(l.active_until)}<div>${l.is_active?'مفتوح':'انتهت المهلة'}</div>`,`${l.attended_count} / ${l.enrolled_count}`,
+      button('حذف حضور طالب','lesson-attendance-remove',`data-id="${l.id}"`)+(ro?'':(l.can_reopen?button('إعادة فتح للوقت المتبقي','lesson-reopen',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`):'<span class="subtle">مضت مهلة إعادة الفتح</span>')+
       button('تصحيح المادة','lesson-correct',`data-id="${l.id}"`)+
       (!l.is_active?button('حضور إداري متأخر لطلبة محددين','lesson-late',`data-id="${l.id}"`):'')+
-      button('تحضير الجميع','lesson-markall',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`)+button('حذف الدرس','lesson-cancel',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`,'danger')])]))+managementPager(data,'lessons');
+      button('تحضير الجميع','lesson-markall',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`)+button('حذف الدرس','lesson-cancel',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`,'danger'))]))+managementPager(data,'lessons');
+}
+let removeAttendanceState=null;
+async function removeAttendanceDialog(id,page=0,q=''){
+  const n=++dialogSequence;
+  const data=await api('/lessons/'+id+'/attendance?'+new URLSearchParams({page,q}));
+  if(n!==dialogSequence)return;
+  removeAttendanceState={id:Number(id),page:data.page,q};
+  dialog('حذف حضور طالب من درس',`<p>${esc(data.lesson.subject_name)} · الدرس #${data.lesson.id} · نشر ${stamp(data.lesson.activated_at)}</p>
+    <p>اختر الطالب الذي سُجِّل حضوره بالخطأ. يُحذف حضور هذا الدرس فقط ويُعاد حساب حالة الغياب.</p>
+    <form id="remove-attendance-search" class="toolbar"><label>بحث باسم الطالب<input name="q" maxlength="150" value="${esc(q)}"></label><button>بحث</button></form>
+    ${table(['الطالب','الحضور المسجل','الإجراء'],data.rows.map(st=>[
+      `${esc(st.full_name)} <span class="subtle">#${st.student_id}</span>`,
+      `${st.marking_kind==='admin_late'?'حضور إداري متأخر':'حضور مسجل'} · ${stamp(st.listened_at)}`,
+      button('حذف هذا الحضور','remove-lesson-attendance',`data-id="${id}" data-student="${st.student_id}" data-name="${esc(st.full_name)}"`,'danger')]))}
+    <div class="pagination"><span>${data.total} حضورًا · الصفحة ${data.page+1}</span><div>
+      ${data.page?button('السابق','remove-attendance-page',`data-page="${data.page-1}"`):''}
+      ${(data.page+1)*data.size<data.total?button('التالي','remove-attendance-page',`data-page="${data.page+1}"`):''}</div></div>`);
 }
 async function correctLessonDialog(id){
   const n=++dialogSequence,data=await api('/lessons/'+id+'/admin-options');if(n!==dialogSequence)return;
@@ -389,6 +406,17 @@ document.addEventListener('click',async event=>{
     else if(a==='exam')await showExam(target.dataset.id);
     else if(a==='lesson-correct')await correctLessonDialog(target.dataset.id);
     else if(a==='lesson-late')await studentOverrideDialog('lesson',target.dataset.id);
+    else if(a==='lesson-attendance-remove')await removeAttendanceDialog(target.dataset.id);
+    else if(a==='remove-attendance-page'&&removeAttendanceState)
+      await removeAttendanceDialog(removeAttendanceState.id,Number(target.dataset.page),removeAttendanceState.q);
+    else if(a==='remove-lesson-attendance'){
+      if(!confirm(`حذف حضور الطالب «${target.dataset.name}» من الدرس #${target.dataset.id} فقط؟`))return;
+      busy=true;
+      await api('/lessons/'+target.dataset.id+'/attendance/'+target.dataset.student+'/remove',{},'POST');
+      await loadLessonManagement();
+      await removeAttendanceDialog(target.dataset.id,removeAttendanceState?.page||0,removeAttendanceState?.q||'');
+      notify('حُذف حضور الطالب من هذا الدرس وأُعيد حساب الغياب.');
+    }
     else if(a==='exam-student-window')await studentOverrideDialog('exam',target.dataset.id);
     else if(a==='override-prev'||a==='override-next')await loadOverrideStudents(adminSelection.page+(a==='override-next'?1:-1));
     else if(a==='remove-slot'){if(!confirm('إيقاف هذا الموعد الأسبوعي؟ تبقى سجلاته السابقة محفوظة.'))return;busy=true;await api('/schedule/'+target.dataset.id+'/remove',{},'POST');await refresh();}
@@ -521,24 +549,25 @@ document.addEventListener('change',async event=>{
     else adminSelection.selected.delete(id);
     updateOverrideSelected();return;
   }
-  if(event.target.name==='stageId'&&event.target.closest('#attendance-stage')){if(busy)return;busy=true;clearNotice();try{attendanceStageId=event.target.value;page=0;await attendanceHome();}catch(e){notify(e.message,true);}finally{busy=false;}
-  }else if(event.target.name==='stageId'&&event.target.closest('#matrix-stage')){if(busy)return;busy=true;clearNotice();
-    try{matrixStageId=event.target.value;await renderScheduleMatrix();}catch(e){notify(e.message,true);}finally{busy=false;}
-  }else if(event.target.id==='lesson-schedule-stage'){if(busy)return;busy=true;clearNotice();
-    try{lessonScheduleStageId=event.target.value;await renderLessonSchedule(stages.filter(s=>s.stage_season_id));}catch(e){notify(e.message,true);}finally{busy=false;}
-  }else if(event.target.name==='stageId'&&event.target.closest('#lesson-mgt-stage')){if(busy)return;busy=true;clearNotice();
-    try{mgtStageId=event.target.value;mgtSubjectId='';mgtPage=0;await loadLessonManagement();}catch(e){notify(e.message,true);}finally{busy=false;}
-  }else if(['lesson-mgt-subject','session-mgt-subject'].includes(event.target.id)){if(busy)return;busy=true;clearNotice();
-    try{if(event.target.id==='lesson-mgt-subject'){mgtSubjectId=event.target.value;mgtPage=0;await loadLessonManagement();}else{sessionSubjectId=event.target.value;sessionPage=0;await renderStage();}}catch(e){notify(e.message,true);}finally{busy=false;}
-  }else if(event.target.id==='season-select'){if(busy)return;busy=true;clearNotice();
-    try{currentSeasonId=event.target.value;mgtSubjectId='';mgtPage=0;sessionSubjectId='';sessionPage=0;if(view==='lesson-management')await loadLessonManagement();else if(view==='stage'&&currentStage)await openStage(currentStage.id);else if(view==='lesson-attendance'){page=0;await attendanceHome();}else await home();}catch(e){notify(e.message,true);}finally{busy=false;}
-  }
+  const selected=event.target.value;
+  clearNotice();
+  try{
+    if(event.target.name==='stageId'&&event.target.closest('#attendance-stage')){attendanceStageId=selected;page=0;await attendanceHome();}
+    else if(event.target.name==='stageId'&&event.target.closest('#matrix-stage')){matrixStageId=selected;await renderScheduleMatrix();}
+    else if(event.target.id==='lesson-schedule-stage'){lessonScheduleStageId=selected;await renderLessonSchedule(stages.filter(s=>s.stage_season_id));}
+    else if(event.target.name==='stageId'&&event.target.closest('#lesson-mgt-stage')){mgtStageId=selected;mgtSubjectId='';mgtPage=0;await loadLessonManagement();}
+    else if(event.target.id==='lesson-mgt-subject'){mgtSubjectId=selected;mgtPage=0;await loadLessonManagement();}
+    else if(event.target.id==='session-mgt-subject'){sessionSubjectId=selected;sessionPage=0;await renderStage();}
+    else if(event.target.id==='season-select'){currentSeasonId=selected;mgtSubjectId='';mgtPage=0;sessionSubjectId='';sessionPage=0;if(view==='lesson-management')await loadLessonManagement();else if(view==='stage'&&currentStage)await openStage(currentStage.id);else if(view==='lesson-attendance'){page=0;await attendanceHome();}else await home();}
+  }catch(e){notify(e.message,true);}
 });
 document.addEventListener('submit',async event=>{
   const form=event.target;event.preventDefault();if(busy)return;clearNotice();const body=Object.fromEntries(new FormData(form));
   busy=true;const submit=form.querySelector('button[type="submit"],button:not([data-action])');if(submit)submit.disabled=true;
   try{
     if(form.id==='contact-search'){contactQuery=String(body.q||'').trim();contactPage=0;await loadStudentContact();}
+    else if(form.id==='remove-attendance-search'&&removeAttendanceState)
+      await removeAttendanceDialog(removeAttendanceState.id,0,String(body.q||'').trim());
     else if(form.id==='contact-send'){
       if(!contactStudent)throw Error('اختر الطالب أولًا.');
       const saved=await api('/student-contact',{studentId:contactStudent.id,message:body.message,contextKind:contactStudent.contextKind,contextId:contactStudent.contextId,requestKey:form.dataset.requestKey||(form.dataset.requestKey=contactRequestKey('admin-web'))},'POST');
