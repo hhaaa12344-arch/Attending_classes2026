@@ -43,6 +43,17 @@ async function initIntegritySchema(pool) {
       lease_until TIMESTAMPTZ, expires_at TIMESTAMPTZ,
       last_error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), sent_at TIMESTAMPTZ
     );
+    CREATE TABLE IF NOT EXISTS approved_group_chats (
+      chat_id BIGINT PRIMARY KEY,
+      title TEXT,
+      requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      approved_at TIMESTAMPTZ,
+      approved_by BIGINT
+    );
+    INSERT INTO approved_group_chats(chat_id,title,approved_at)
+      SELECT DISTINCT telegram_chat_id,title,now() FROM mubahatha_groups
+      WHERE telegram_chat_id IS NOT NULL
+      ON CONFLICT(chat_id) DO NOTHING;
     CREATE TABLE IF NOT EXISTS student_contact_messages (
       id BIGSERIAL PRIMARY KEY,
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,

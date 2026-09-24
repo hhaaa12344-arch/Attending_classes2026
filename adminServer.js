@@ -55,7 +55,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
       const actor=sessions.get(token);
       if(!actor||!adminIds.includes(actor.id))throw appError('أعد فتح لوحة الإدارة من البوت.','UNAUTHORIZED',401);
       const route=url.pathname.slice('/api/admin'.length);const q=Object.fromEntries(url.searchParams);
-      let result;
+      let result,m;
       if(req.method==='POST'&&route==='/logout'){sessions.revoke(token);return json(res,200,{ok:true});}
       if(req.method==='GET'){
         if(route==='/stages')result=await adminData.stages(q.seasonId?positiveInt(q.seasonId):null);
@@ -106,6 +106,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(route==='/audit'){const p=pageOptions(q.page||0,25);result=(await db.pool.query('SELECT * FROM admin_audit_log ORDER BY id DESC LIMIT $1 OFFSET $2',[p.size,p.offset])).rows;}
         else if(route==='/notifications')result=(await db.pool.query('SELECT status,COUNT(*) AS count FROM notification_outbox GROUP BY status')).rows;
         else if(route==='/lessons')result=await db.getRecentLessonsForStage(positiveInt(q.stageId),q.limit?positiveInt(q.limit):15);
+        else if((m=/^\/lessons\/(\d+)\/attendance$/.exec(route)))result=await overrides.lessonAttendance(positiveInt(m[1]),q);
         else if(route==='/channel-diagnostics'){
           const [alerts,channels,deep]=await Promise.all([
             db.listUnlinkedChannelAlerts(),db.listChannelsWithStage(),db.getDeepChannelDiagnostics()
@@ -130,7 +131,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         }
         else throw appError('الصفحة غير موجودة.','NOT_FOUND',404);
       } else if(req.method==='POST'||req.method==='PATCH') {
-        const body=await readJson(req);let m;
+        const body=await readJson(req);
         if(route==='/student-contact'&&req.method==='POST')result=await studentContact.send({...body,actorId:actor.id,role:'admin'});
         else if((m=/^\/students\/(\d+)$/.exec(route))&&req.method==='PATCH')result=await adminData.updateStudent(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/stage-seasons\/(\d+)\/participation-settings$/.exec(route))&&req.method==='PATCH')result=await adminData.saveParticipationSettings(positiveInt(m[1]),body,actor.id);
@@ -276,6 +277,8 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         }
         else if((m=/^\/lessons\/(\d+)\/subject$/.exec(route))&&req.method==='PATCH')result=await overrides.correctSubject(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/lessons\/(\d+)\/late-attendance$/.exec(route))&&req.method==='POST')result=await overrides.lateAttendance(positiveInt(m[1]),body,actor.id);
+        else if((m=/^\/lessons\/(\d+)\/attendance\/(\d+)\/remove$/.exec(route))&&req.method==='POST')
+          result=await overrides.removeLessonAttendance(positiveInt(m[1]),positiveInt(m[2]),actor.id);
         else if((m=/^\/exams\/(\d+)\/student-window$/.exec(route))&&req.method==='POST')result=await overrides.reopenExam(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/lessons\/(\d+)\/reopen$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]);

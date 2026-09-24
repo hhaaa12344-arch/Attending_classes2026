@@ -8,6 +8,8 @@ const { initIntegritySchema } = require('./integrity');
 const access = require('./access').createAccess(db.pool);
 const adminData = require('./adminData').createAdminData(db, studies);
 const scheduler = require('./scheduler').createScheduler({pool:db.pool,studies});
+const studentReminders = require('./studentReminders');
+const { randomUUID } = require('node:crypto');
 const {
   extractFirstUrl,
   extractHashtags,
@@ -62,6 +64,12 @@ const {STUDENT_BUTTON: GUIDE_BUTTON, ADMIN_BUTTON: GUIDE_ADMIN_BUTTON}=require('
 const {initStudentGuideSchema,createStudentGuide}=require('./studentGuide');
 const studentGuide=createStudentGuide({pool:db.pool,telegram:bot.telegram});
 bot.use(require('./updateGate').createUpdateGate());
+bot.use(async(ctx,next)=>{
+  if(!['group','supergroup'].includes(ctx.chat?.type)||ctx.update.my_chat_member)return next();
+  const approved=(await db.pool.query('SELECT 1 FROM approved_group_chats WHERE chat_id=$1 AND approved_at IS NOT NULL',[ctx.chat.id])).rowCount>0;
+  if(approved)return next();
+  try{await bot.telegram.leaveChat(ctx.chat.id);}catch(err){console.warn('تعذر مغادرة مجموعة غير معتمدة:',err.description||err.message);}
+});
 
 // طابور إرسال عام ينظّم معدّل الرسائل ويعالج 429؛ يُستعمل للبث الجماعي.
 const { createTelegramQueue, PRIORITY } = require('./telegramQueue');
@@ -3056,6 +3064,7 @@ async function openStudentManagement(ctx) {
     registrationOpen ? 'danger' : 'success'
   )]);
   rows.push([callbackButton('🔎 البحث في جميع الطلبة', 'students_search:0')]);
+  rows.push([callbackButton('📣 تنويه لجميع الطلبة ذوي الإجراءات الناقصة', 'students_remind_all')]);
   return ctx.reply(
     `إدارة الطلبة\nحالة الانضمام الجديد: ${registrationOpen?'🟢 مفتوح':'🔴 متوقف'}\n\nاختر المرحلة أو الإجراء المطلوب:`,
     Markup.inlineKeyboard(rows)
@@ -3136,6 +3145,28 @@ bot.hears('🖥️ لوحة الإدارة',openAdminWeb);
 bot.command('admin_web',openAdminWeb);
 bot.action('admin_students', openStudentManagement);
 bot.hears('🎓 إدارة الطلبة', openStudentManagement);
+
+bot.action('students_remind_all',async ctx=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();
+  const rows=await studentReminders.incompleteStudents(db.pool);
+  if(!rows.length)return ctx.reply('لا يوجد طلاب لديهم إجراءات ناقصة حاليًا.');
+  const campaignId=randomUUID();
+  userState.set(ctx.from.id,{action:'students_remind_all',campaignId,at:Date.now()});
+  return ctx.reply(`سيُرسل تنويه مخصص إلى ${rows.length} طالبًا لديهم إجراءات ناقصة. يذكر التنويه ما ينقص كل طالب وطريقة إكماله عبر البوت.`,
+    Markup.inlineKeyboard([[callbackButton('📨 إرسال التنويهات الآن',`students_remind_send:${campaignId}`)],
+      [callbackButton('↩️ إدارة الطلبة','admin_students')]]));
+});
+bot.action(/^students_remind_send:([0-9a-f-]{36})$/,async ctx=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
+  const state=userState.get(ctx.from.id);
+  if(state?.action!=='students_remind_all'||state.campaignId!==ctx.match[1]||Date.now()-state.at>10*60*1000)
+    return ctx.answerCbQuery('انتهت صلاحية خطوة الإرسال. افتح إدارة الطلبة مجددًا.',{show_alert:true});
+  userState.delete(ctx.from.id);
+  await ctx.answerCbQuery('يجري إدراج التنويهات للإرسال.');
+  const result=await studentReminders.queueIncompleteStudents(db.pool,state.campaignId);
+  return ctx.reply(`أُدرج ${result.queued} تنويهًا مخصصًا في طابور الإرسال من أصل ${result.eligible} طالبًا تنطبق عليهم الشروط الآن.`);
+});
 
 bot.action(/admin_registration:(on|off)/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
@@ -3647,7 +3678,7 @@ async function runScheduleTick() {
 }
 
 async function runScheduleTickInner() {
-  return scheduler.tick();
+  return scheduler.tick(ADMIN_IDS);
 }
 
 // يفتح حضور النهاية (مرة واحدة) ويرسل زر «حضرت النهاية» لطلبة المجموعة عبر الطابور.
@@ -3865,8 +3896,8 @@ bot.action(/tg_chat:(\d+)/, async (ctx) => {
     return ctx.reply(
       'لم يُضَف البوت مشرفًا في أي مجموعة بعد.\n\n' +
         'الخطوات:\n' +
-        '1) أضِف البوت إلى مجموعة تليجرام.\n' +
-        '2) عُد إلى هنا واختر المجموعة.'
+        '1) أضِف البوت إلى مجموعة تليجرام؛ سيغادرها ويطلب موافقة الأدمن.\n' +
+        '2) بعد الموافقة أضِفه مجددًا، ثم عُد إلى هنا واختر المجموعة.'
     );
   }
   return ctx.reply(
@@ -3886,6 +3917,7 @@ bot.action(/tg_chatdo:(\d+):(-?\d+)/, async (ctx) => {
   if (!group || !(await teacherOwnsSubject(ctx, group.subject_id, group.stage_season_id))) {
     return ctx.answerCbQuery('غير مصرح.');
   }
+  if(!pendingGroupChats.has(chatId))return ctx.answerCbQuery('المجموعة غير متاحة للربط. أضف البوت بعد موافقة الأدمن.',{show_alert:true});
   await studies.setGroupChatId(groupId, chatId);
   pendingGroupChats.delete(chatId);
   await ctx.answerCbQuery('تم الربط ✅');
@@ -4738,9 +4770,7 @@ bot.action(/stu_mfok:(\d+):(\d+)/, async (ctx) => {
 // ---------------------------------------------------------------------------
 // التقاط مجموعات تليجرام التي أُضيف إليها البوت
 // ---------------------------------------------------------------------------
-// البوت لا يفرض أي قيود على الأعضاء ولا يحظر أحدًا؛ دوره هنا التعرّف على المجموعة
-// فقط ليربطها الأستاذ أو الأدمن بمجموعة مباحثة. ضبط صلاحيات الأعضاء يبقى يدويًا
-// من إعدادات المجموعة نفسها.
+// تليجرام يضيف البوت أولًا ثم يرسل my_chat_member؛ لذلك يغادر أي مجموعة غير معتمدة فورًا.
 const pendingGroupChats = new Map();
 
 bot.on('my_chat_member', async (ctx) => {
@@ -4748,13 +4778,37 @@ bot.on('my_chat_member', async (ctx) => {
   const chat = upd.chat;
   if (!['group', 'supergroup'].includes(chat.type)) return;
   const status = upd.new_chat_member && upd.new_chat_member.status;
+  if(['left','kicked'].includes(status)){pendingGroupChats.delete(chat.id);return;}
   if (!['administrator', 'member'].includes(status)) return;
-
+  const allowed=(await db.pool.query('SELECT approved_at FROM approved_group_chats WHERE chat_id=$1',[chat.id])).rows[0]?.approved_at;
+  if(!allowed){
+    await db.pool.query(`INSERT INTO approved_group_chats(chat_id,title) VALUES($1,$2)
+      ON CONFLICT(chat_id) DO UPDATE SET title=EXCLUDED.title,requested_at=now() WHERE approved_group_chats.approved_at IS NULL`,
+      [chat.id,chat.title||null]);
+    pendingGroupChats.delete(chat.id);
+    let left=true;
+    try{await bot.telegram.leaveChat(chat.id);}catch(err){left=false;console.warn('تعذر مغادرة مجموعة غير معتمدة:',err.description||err.message);}
+    await notifyAdmins(`🔐 طلب إضافة البوت إلى مجموعة «${chat.title||chat.id}» (ID: ${chat.id}).\n`+
+      (left?'غادرها البوت. اضغط الموافقة ثم أضفه من جديد.':'تعذرت مغادرة المجموعة تلقائيًا؛ أزل البوت منها يدويًا ثم وافق إن رغبت.'),
+      Markup.inlineKeyboard([[callbackButton('✅ الموافقة على هذه المجموعة',`group_approve:${chat.id}`)]]));
+    return;
+  }
   pendingGroupChats.set(chat.id, { id: chat.id, title: chat.title, at: Date.now() });
   await notifyAdmins(
     `👥 أُضيف البوت إلى مجموعة «${chat.title}».\n` +
       'اربطها بمادة من «👥 المجموعات» ← المادة ← «💬 ربط مجموعة تليجرام».'
   );
+});
+
+bot.action(/^group_approve:(-?\d+)$/,async ctx=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
+  const chatId=Number(ctx.match[1]);
+  if(!Number.isSafeInteger(chatId))return ctx.answerCbQuery('معرف المجموعة غير صالح.');
+  const row=(await db.pool.query(`UPDATE approved_group_chats SET approved_at=COALESCE(approved_at,now()),approved_by=COALESCE(approved_by,$2)
+    WHERE chat_id=$1 RETURNING title`,[chatId,ctx.from.id])).rows[0];
+  if(!row)return ctx.answerCbQuery('طلب المجموعة غير موجود.');
+  await ctx.answerCbQuery('تمت الموافقة ✅');
+  return ctx.reply(`✅ وافقت على مجموعة «${row.title||chatId}». أضف البوت إليها مجددًا، ثم اربطها بمجموعة المباحثة من لوحة الأستاذ.`);
 });
 
 // ---------------------------------------------------------------------------

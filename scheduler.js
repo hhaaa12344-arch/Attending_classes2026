@@ -97,7 +97,41 @@ function createScheduler({ pool, studies }) {
     } catch(err) { await client.query('ROLLBACK'); throw err; }
     finally { client.release(); }
   }
-  async function tick() {
+  async function queueMissedSlotAlerts(adminIds=[]) {
+    if(!adminIds.length)return 0;
+    const {rows}=await pool.query(`WITH loc AS (SELECT now() AT TIME ZONE $1::text AS local_now),
+      dates AS (SELECT local_now::date AS day FROM loc UNION ALL SELECT local_now::date-1 FROM loc)
+      SELECT sl.id,dates.day::text AS scheduled_date,sl.hour,sl.minute,
+        sub.name AS subject_name,sg.name AS stage_name,discussion_group_label(g.id) AS group_title,
+        COALESCE(t.full_name,'أستاذ غير محدد') AS teacher_name,d.decision
+      FROM schedule_slots sl JOIN mubahatha_groups g ON g.id=sl.group_id AND g.is_active=true
+      JOIN subjects sub ON sub.id=sl.subject_id
+      JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
+      JOIN stages sg ON sg.id=ss.stage_id
+      LEFT JOIN teachers t ON t.id=sl.teacher_id
+      CROSS JOIN dates CROSS JOIN loc
+      LEFT JOIN slot_decisions d ON d.slot_id=sl.id AND d.scheduled_date=dates.day
+      WHERE sl.is_active=true AND participation_enabled(sl.subject_id,sl.stage_season_id)
+        AND EXTRACT(DOW FROM dates.day)::int=sl.day_of_week
+        AND loc.local_now>=dates.day+make_time(sl.hour,sl.minute,0)+make_interval(hours=>sl.duration_hours)
+        AND sl.created_at<=((dates.day+make_time(sl.hour,sl.minute,0)) AT TIME ZONE $1::text) AT TIME ZONE 'UTC'
+        AND d.session_id IS NULL AND d.decision IS DISTINCT FROM 'postponed'
+        AND NOT EXISTS(SELECT 1 FROM mubahatha_sessions ms WHERE ms.group_id=sl.group_id
+          AND ms.held_on=dates.day AND ms.opened_at>=((dates.day+make_time(sl.hour,sl.minute,0)) AT TIME ZONE $1::text) AT TIME ZONE 'UTC'
+          AND ms.opened_at<((dates.day+make_time(sl.hour,sl.minute,0)+make_interval(hours=>sl.duration_hours)) AT TIME ZONE $1::text) AT TIME ZONE 'UTC')
+      ORDER BY dates.day,sl.id`,[studies.SCHEDULE_TZ]);
+    let queued=0;
+    for(const slot of rows){
+      const at=`${String(slot.hour).padStart(2,'0')}:${String(slot.minute).padStart(2,'0')}`;
+      const text=`⚠️ لم تُسجَّل مباحثة الموعد المطلوب.\nالأستاذ: ${slot.teacher_name}\nالمرحلة: ${slot.stage_name}\nالمادة: ${slot.subject_name}\nالمجموعة: ${slot.group_title}\nالموعد: ${slot.scheduled_date} الساعة ${at} بتوقيت بغداد.\n${slot.decision==='confirmed'?'أكّد الأستاذ الموعد، لكن لم تُفتح جلسة.':'لم يؤكد الأستاذ الموعد ولم تُفتح جلسة.'}`;
+      for(const adminId of adminIds){
+        const result=await enqueueNotification(pool,{key:`missed-slot:${slot.id}:${slot.scheduled_date}:${adminId}`,chatId:adminId,text});
+        queued+=result.rowCount;
+      }
+    }
+    return queued;
+  }
+  async function tick(adminIds=[]) {
     if (running) return;
     running = true;
     try {
@@ -132,8 +166,9 @@ function createScheduler({ pool, studies }) {
       for (const s of pending.rows) { await queueSession(s.id,'start'); await queueSession(s.id,'end'); }
       for (const s of await studies.getSessionsNeedingAutoEnd()) await openEnd(s.id,true);
       await studies.closeExpiredSessionsWithoutEnd();
+      await queueMissedSlotAlerts(adminIds);
     } finally { running=false; }
   }
-  return { tick, openEnd, queueSession, queueSlotDecisionNotice };
+  return { tick, openEnd, queueSession, queueSlotDecisionNotice, queueMissedSlotAlerts };
 }
 module.exports = { createScheduler };
