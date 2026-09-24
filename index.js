@@ -3098,7 +3098,7 @@ bot.action(/^students_stage:(\d+)$/,async ctx=>{
 bot.action(/^students_content:(\d+)$/,async ctx=>{
   if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
   await ctx.answerCbQuery();const s=await adminData.stage(Number(ctx.match[1]));
-  const lines=s.subjects.map(sub=>`📘 ${sub.name} — ${sub.teacher_name||'بلا أستاذ'}\n`+s.groups.filter(g=>g.subject_id===sub.id).map(g=>`• ${g.title}: ${g.member_count}/${g.capacity}`).join('\n'));
+  const lines=s.subjects.map(sub=>`📘 ${sub.name} — ${sub.teacher_name||'بلا أستاذ'}\n`+s.groups.filter(g=>g.subject_id===sub.id).map(g=>s.discussion_grouping===false?`• ${g.title}: ${g.member_count}/${g.capacity}`:`• ${g.title}: ${g.member_count} عضو، ${g.reserved_count}/${g.capacity} مقعد محجوز`).join('\n'));
   return ctx.reply((lines.join('\n\n')||'لا توجد مواد بعد.').slice(0,3800),Markup.inlineKeyboard([[callbackButton('↩️ المرحلة',`students_stage:${s.id}`)]]));
 });
 bot.action(/^students_page:(\d+):(\d+)$/,async ctx=>{
@@ -3834,8 +3834,8 @@ async function renderGroups(ctx, subjectId, stageSeasonId, edit = false) {
     ? groups
         .map(
           (g) =>
-            `${g.group_number}) ${g.title} — ${Number(g.member_count)}/${g.capacity}` +
-            `${Number(g.member_count) >= g.capacity ? ' (ممتلئة)' : ''}` +
+            `${g.group_number}) ${g.title} — ${g.discussion_grouping===false?`${Number(g.member_count)}/${g.capacity} عضو`:`${Number(g.member_count)} عضو، ${Number(g.reserved_count)}/${g.capacity} مقعد محجوز`}` +
+            `${Number(g.discussion_grouping===false?g.member_count:g.reserved_count) >= g.capacity ? ' (ممتلئة)' : ''}` +
             `${g.invite_link ? '' : ' ⚠️ بلا رابط دعوة'}`
         )
         .join('\n')
@@ -4694,14 +4694,14 @@ bot.action(/stu_mgsubj:(\d+):(\d+):(\d+)/, async (ctx) => {
   const [, studentId, subjectId, ssId] = ctx.match.map(Number);
   const groups = await studies.listGroups(subjectId, ssId);
   await ctx.answerCbQuery();
-  const available = groups.filter((g) => Number(g.member_count) < Number(g.capacity));
+  const available = groups.filter((g) => Number(g.reserved_count) < Number(g.capacity));
   if (available.length === 0) return ctx.reply('لا توجد مجموعة فيها متسع. أنشئ مجموعة جديدة أولًا.');
   return ctx.reply(
     'اختر الرقم الجديد: سيُوحّد في جميع مواد الطالب بهذا الموسم بعد التحقق من السعة. تبدأ أهلية الحضور من وقت النقل في المجموعات المتغيرة وتبقى التقارير السابقة محفوظة.',
     Markup.inlineKeyboard(
       available.map((g) => [
         callbackButton(
-          `${g.title} (${Number(g.member_count)}/${g.capacity})`,
+          `${g.title} (${Number(g.reserved_count)}/${g.capacity} محجوز)`,
           `stu_mgdo:${studentId}:${subjectId}:${ssId}:${g.id}`
         ),
       ])
@@ -5477,7 +5477,7 @@ bot.hears('🔗 روابط المجموعات', async (ctx) => {
         groups
           .map(
             (g) =>
-              `   ${g.title}: ${Number(g.member_count)}/${g.capacity}` +
+              `   ${g.title}: ${g.discussion_grouping===false?Number(g.member_count):`${Number(g.member_count)} عضو، ${Number(g.reserved_count)} محجوز`}/${g.capacity}` +
               `${g.invite_link ? '' : ' ⚠️ بلا رابط'}`
           )
           .join('\n')

@@ -322,6 +322,7 @@ async function createMubahathaGroup(subjectId, stageSeasonId, { title, inviteLin
   await client.query('BEGIN');
   const setting=(await client.query('SELECT discussion_grouping FROM stage_seasons WHERE id=$1 FOR SHARE',[stageSeasonId])).rows[0];
   if(setting?.discussion_grouping===false)throw appError('هذه المرحلة تعمل دون تقسيم. عدّل رابط مباحثة المادة من إعدادات المرحلة.');
+  await client.query('SELECT pg_advisory_xact_lock(734222,$1::int)',[stageSeasonId]);
   // Serialize numbering for this subject/season; MAX+1 alone races.
   await client.query('SELECT pg_advisory_xact_lock($1::int,$2::int)', [subjectId, stageSeasonId]);
   const valid = await client.query(`SELECT 1 FROM subjects sub JOIN stage_seasons ss ON ss.stage_id=sub.stage_id
@@ -333,6 +334,8 @@ async function createMubahathaGroup(subjectId, stageSeasonId, { title, inviteLin
     [subjectId, stageSeasonId]
   );
   const number = Number(next.rows[0].n);
+  const reserved=Number((await client.query('SELECT group_reserved_count($1,$2) AS n',[stageSeasonId,number])).rows[0].n);
+  if(capacity<reserved)throw appError(`السعة ${capacity} أقل من ${reserved} مقعدًا محجوزًا مسبقًا للمجموعة رقم ${number} عبر مواد المرحلة.`,'GROUP_CAPACITY',409);
   const group = await client
     .query(
       `INSERT INTO mubahatha_groups(subject_id, stage_season_id, group_number, title, invite_link, telegram_chat_id, capacity)
@@ -352,8 +355,9 @@ const getGroupById = (groupId) =>
 const listGroups = (subjectId, stageSeasonId) =>
   pool
     .query(
-      `SELECT g.*, discussion_group_label(g.id) AS title, (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) AS member_count
-       FROM mubahatha_groups g
+      `SELECT g.*,ss.discussion_grouping, discussion_group_label(g.id) AS title, (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) AS member_count,
+         group_reserved_count(g.stage_season_id,g.group_number) AS reserved_count
+       FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id
        WHERE g.subject_id=$1 AND g.stage_season_id=$2 AND g.merged_into_id IS NULL
        ORDER BY g.group_number`,
       [subjectId, stageSeasonId]
@@ -372,12 +376,18 @@ async function updateGroupSettings(groupId,body) {
   const c=await pool.connect();
   try {
     await c.query('BEGIN');
+    const origin=(await c.query('SELECT stage_season_id FROM mubahatha_groups WHERE id=$1',[groupId])).rows[0];
+    if(!origin)throw appError('المجموعة غير موجودة.','NOT_FOUND',404);
+    const season=(await c.query('SELECT discussion_grouping FROM stage_seasons WHERE id=$1 FOR SHARE',[origin.stage_season_id])).rows[0];
+    await c.query('SELECT pg_advisory_xact_lock(734222,$1::int)',[origin.stage_season_id]);
     const before=(await c.query('SELECT * FROM mubahatha_groups WHERE id=$1 FOR UPDATE',[groupId])).rows[0];
     if(!before)throw appError('المجموعة غير موجودة.','NOT_FOUND',404);
     if(before.merged_into_id)throw appError('هذه مجموعة سابقة مدمجة؛ سجلها محفوظ ولا يمكن إعادة تفعيلها.');
-    if(body.capacity!==undefined){
+    if((body.capacity!==undefined&&Number(body.capacity)<before.capacity)||(body.active===true&&!before.is_active)){
       const n=Number((await c.query('SELECT COUNT(*) AS n FROM group_memberships WHERE group_id=$1',[groupId])).rows[0].n);
-      if(Number(body.capacity)<n)throw appError(`لا يمكن خفض السعة دون عدد الطلبة الحالي (${n}).`,'GROUP_CAPACITY');
+      const reserved=season?.discussion_grouping?Number((await c.query('SELECT group_reserved_count($1,$2) AS n',[before.stage_season_id,before.group_number])).rows[0].n):0;
+      const required=Math.max(n,reserved);
+      if(Number(body.capacity??before.capacity)<required)throw appError(`لا يمكن خفض السعة دون عدد المقاعد المحجوزة للمجموعة (${required}).`,'GROUP_CAPACITY');
     }
     const result=(await c.query(`UPDATE mubahatha_groups SET capacity=$2,invite_link=$3,is_active=$4 WHERE id=$1 RETURNING *`,
       [groupId,body.capacity??before.capacity,body.inviteLink===undefined?before.invite_link:body.inviteLink||null,body.active??before.is_active])).rows[0];

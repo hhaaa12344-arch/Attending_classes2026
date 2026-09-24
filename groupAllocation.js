@@ -10,7 +10,17 @@ async function initGroupAllocation(pool) {
     group_number INTEGER NOT NULL CHECK(group_number>0),
     PRIMARY KEY(student_id,stage_season_id)
   );
-  CREATE INDEX IF NOT EXISTS idx_memberships_student_season ON group_memberships(student_id,stage_season_id);`);
+  CREATE INDEX IF NOT EXISTS idx_group_numbers_season_number ON student_group_numbers(stage_season_id,group_number,student_id);
+  CREATE INDEX IF NOT EXISTS idx_memberships_student_season ON group_memberships(student_id,stage_season_id);
+  CREATE OR REPLACE FUNCTION group_reserved_count(ssid INTEGER, gnumber INTEGER) RETURNS INTEGER
+  LANGUAGE SQL STABLE AS $$
+    SELECT COUNT(*)::int FROM (
+      SELECT student_id FROM student_group_numbers WHERE stage_season_id=ssid AND group_number=gnumber
+      UNION
+      SELECT m.student_id FROM group_memberships m JOIN mubahatha_groups g ON g.id=m.group_id
+      WHERE m.stage_season_id=ssid AND g.group_number=gnumber
+    ) reserved
+  $$;`);
 }
 
 function createGroupAllocation(pool) {
@@ -20,6 +30,8 @@ function createGroupAllocation(pool) {
     try {
       await c.query('BEGIN');
       const season=(await c.query('SELECT discussion_grouping FROM stage_seasons WHERE id=$1 AND is_active=true FOR SHARE',[seasonId])).rows[0];
+      // A seat belongs to the cohort across subjects; serialize reservations by season.
+      await c.query('SELECT pg_advisory_xact_lock(734222,$1::int)',[seasonId]);
       // Shared by assignment and moves across ALL subjects, not subject locks.
       const student=(await c.query('SELECT id FROM students WHERE id=$1 FOR UPDATE',[studentId])).rows[0];
       if(!student)throw appError('الطالب غير موجود.');
@@ -65,6 +77,12 @@ function createGroupAllocation(pool) {
       for(const candidate of candidates) {
         const g=(await c.query('SELECT * FROM mubahatha_groups WHERE id=$1 AND is_active=true FOR UPDATE',[candidate.id])).rows[0];
         if(!g)continue;
+        const capacity=(await c.query(`SELECT MIN(capacity)::int AS minimum,
+          group_reserved_count($1,$2) AS reserved
+          FROM mubahatha_groups WHERE stage_season_id=$1 AND group_number=$2
+            AND merged_into_id IS NULL AND participation_enabled(subject_id,stage_season_id)`,
+          [seasonId,g.group_number])).rows[0];
+        if(Number(capacity.reserved)+(number?0:1)>Number(capacity.minimum))continue;
         const count=Number((await c.query('SELECT COUNT(*) AS n FROM group_memberships WHERE group_id=$1',[g.id])).rows[0].n);
         if(count>=g.capacity)continue;
         await c.query('INSERT INTO group_memberships(group_id,student_id,subject_id,stage_season_id) VALUES($1,$2,$3,$4)',[g.id,studentId,subjectId,seasonId]);
@@ -82,11 +100,19 @@ function createGroupAllocation(pool) {
       const target=(await c.query(`SELECT * FROM mubahatha_groups WHERE id=$1 AND subject_id=$2 AND stage_season_id=$3 AND is_active=true`,[targetId,subjectId,seasonId])).rows[0];
       if(!target)throw appError('المجموعة غير موجودة أو غير نشطة.');
       const current=await memberships(c,studentId,seasonId);
+      const saved=(await c.query('SELECT group_number FROM student_group_numbers WHERE student_id=$1 AND stage_season_id=$2',[studentId,seasonId])).rows[0];
       const subjects=[...new Set([subjectId,...current.map(g=>g.subject_id)])];
       // Deterministic group lock order prevents opposing student moves deadlocking.
       const targets=(await c.query(`SELECT * FROM mubahatha_groups WHERE stage_season_id=$1 AND group_number=$2
         AND subject_id=ANY($3::int[]) AND is_active=true ORDER BY id FOR UPDATE`,[seasonId,target.group_number,subjects])).rows;
       if(targets.length!==subjects.length)throw appError(`تعذر توحيد الرقم: أنشئ أو فعّل المجموعة رقم ${target.group_number} في جميع مواد الطالب أولًا.`,'GROUP_UNAVAILABLE');
+      const capacity=(await c.query(`SELECT MIN(capacity)::int AS minimum,
+        group_reserved_count($1,$2) AS reserved FROM mubahatha_groups
+        WHERE stage_season_id=$1 AND group_number=$2 AND merged_into_id IS NULL
+          AND participation_enabled(subject_id,stage_season_id)`,[seasonId,target.group_number])).rows[0];
+      const alreadyReserved=Number(saved?.group_number)===target.group_number||current.some(g=>g.group_number===target.group_number);
+      if(Number(capacity.reserved)+(alreadyReserved?0:1)>Number(capacity.minimum))
+        throw appError(`تعذر النقل: المقاعد المحجوزة للمجموعة رقم ${target.group_number} ممتلئة في إحدى المواد. لم تتغير أي مجموعة.`,'GROUP_FULL');
       const changed=targets.filter(g=>!current.some(old=>old.id===g.id));
       for(const g of changed) {
         const n=Number((await c.query('SELECT COUNT(*) AS n FROM group_memberships WHERE group_id=$1',[g.id])).rows[0].n);
