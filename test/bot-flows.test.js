@@ -13,6 +13,14 @@ test.before(async()=>{
   app.bot.botInfo={id:12345,is_bot:true,username:'AttendanceTestBot',first_name:'test'};
 });
 test.after(async()=>{Telegram.prototype.callApi=original;if(db)await db.pool.end();});
+test('student lesson schedule shows the immediate coming Saturday on Thursday and Friday',()=>{
+  for(const day of ['2026-09-24','2026-09-25'])
+    assert.deepEqual(app.studentScheduleWindow(day),{startDate:'2026-09-26',endDate:'2026-09-30',label:'الأسبوع القادم'});
+  for(const day of ['2026-09-26','2026-09-27','2026-09-28','2026-09-29','2026-09-30'])
+    assert.deepEqual(app.studentScheduleWindow(day),{startDate:'2026-09-26',endDate:'2026-09-30',label:'هذا الأسبوع'});
+  for(const day of ['2026-10-01','2026-10-02'])
+    assert.deepEqual(app.studentScheduleWindow(day),{startDate:'2026-10-03',endDate:'2026-10-07',label:'الأسبوع القادم'});
+});
 async function send(id,text,data){messages.length=0;const from={id,is_bot:false,first_name:'test'};const message={message_id:messageId++,date:Math.floor(Date.now()/1000),from,chat:{id,type:'private'},text,...(text&&text.startsWith('/')?{entities:[{offset:0,length:text.split(/\s/)[0].length,type:'bot_command'}]}:{})};
   await app.bot.handleUpdate(data?{update_id:messageId,callback_query:{id:'cb'+messageId,from,data,message}}:{update_id:messageId,message});return messages;
 }
