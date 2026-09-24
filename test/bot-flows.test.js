@@ -39,6 +39,38 @@ test('bot: student management starts with stages, stage contents and students wi
   await send(42,'',`students_stage:${stage.id}`);assert.ok(messages.some(m=>m.text?.includes('المرحلة التمهيدية')));
   await send(42,'',`students_page:${stage.id}:0`);assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='stu_select:'+student.id)));
 });
+test('bot: general incomplete-action notice is previewed and queued only by admin',async()=>{
+  await send(42,'🎓 إدارة الطلبة');
+  assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='students_remind_all')));
+  await send(student.telegram_id,'','students_remind_all');
+  assert.ok(!messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]).some(b=>b.callback_data?.startsWith('students_remind_send:')));
+  await send(42,'','students_remind_all');
+  const campaign=messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]).find(b=>b.callback_data?.startsWith('students_remind_send:'))?.callback_data;
+  assert.ok(campaign);
+  await send(42,'',campaign);
+  const sent=(await db.pool.query("SELECT payload FROM notification_outbox WHERE dedupe_key LIKE 'student-incomplete:%' AND chat_id=$1",[student.telegram_id])).rows;
+  assert.equal(sent.length,1);assert.match(sent[0].payload[0],/اختر نوع مشاركتك/);
+  await send(42,'',campaign);
+  assert.equal((await db.pool.query("SELECT 1 FROM notification_outbox WHERE dedupe_key LIKE 'student-incomplete:%' AND chat_id=$1",[student.telegram_id])).rowCount,1);
+});
+test('bot: an unapproved Telegram group is left until admin approves readdition',async()=>{
+  const chat={id:-1009876543210,type:'supergroup',title:'مجموعة اختبار الموافقة'};
+  const membership=()=>({update_id:++messageId,my_chat_member:{chat,from:{id:777,is_bot:false,first_name:'عضو'},date:Math.floor(Date.now()/1000),
+    old_chat_member:{user:{id:12345,is_bot:true},status:'left'},new_chat_member:{user:{id:12345,is_bot:true},status:'administrator'}}});
+  messages.length=0;await app.bot.handleUpdate(membership());
+  assert.ok(messages.some(m=>m.method==='leaveChat'&&Number(m.chat_id)===chat.id));
+  assert.equal((await db.pool.query('SELECT approved_at FROM approved_group_chats WHERE chat_id=$1',[chat.id])).rows[0].approved_at,null);
+  messages.length=0;
+  await app.bot.handleUpdate({update_id:++messageId,message:{message_id:++messageId,date:Math.floor(Date.now()/1000),
+    from:{id:777,is_bot:false,first_name:'عضو'},chat,text:'/start'}});
+  assert.ok(messages.some(m=>m.method==='leaveChat'&&Number(m.chat_id)===chat.id));
+  await send(777,'',`group_approve:${chat.id}`);
+  assert.equal((await db.pool.query('SELECT approved_at FROM approved_group_chats WHERE chat_id=$1',[chat.id])).rows[0].approved_at,null);
+  await send(42,'',`group_approve:${chat.id}`);
+  assert.ok((await db.pool.query('SELECT approved_at FROM approved_group_chats WHERE chat_id=$1',[chat.id])).rows[0].approved_at);
+  messages.length=0;await app.bot.handleUpdate(membership());
+  assert.ok(!messages.some(m=>m.method==='leaveChat'));
+});
 test('bot: first-use confirmation required, marking disappears and today retains reply keyboard',async()=>{
   await send(90000,'📚 دروس اليوم');assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='confirm_official_student')));
   await send(90000,'','confirm_official_student');assert.ok((await db.getStudentById(student.id)).official_confirmed_at);

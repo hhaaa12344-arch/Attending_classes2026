@@ -103,6 +103,26 @@ test('late attendance corrects a stored absence day and streak; future processin
   const row=(await db.pool.query('SELECT * FROM student_attendance_days WHERE student_id=$1 AND stage_season_id=$2',[g.students[0].id,g.ss])).rows[0];
   assert.equal(row.is_full_absence,false);
 });
+test('removing one lesson attendance keeps other lessons and recalculates saved absence',async()=>{
+  const f=await fixture();
+  await db.pool.query("UPDATE absence_monitoring_config SET started_at=now()-interval '20 days' WHERE id=1");
+  await db.pool.query('INSERT INTO attendance(student_id,lesson_id) VALUES($1,$2),($3,$2)',
+    [f.students[0].id,f.lesson.id,f.students[1].id]);
+  await db.processCompletedAttendanceDays('Asia/Baghdad');
+  const listed=await ops.lessonAttendance(f.lesson.id);
+  assert.equal(listed.total,2);
+  const hidden=await request(`/lessons/${f.lesson.id}/attendance`,null,'GET',false);
+  assert.equal(hidden.status,401);
+  const removed=await request(`/lessons/${f.lesson.id}/attendance/${f.students[0].id}/remove`,{});
+  assert.equal(removed.status,200);
+  assert.equal((await ops.lessonAttendance(f.lesson.id)).total,1);
+  assert.equal((await db.pool.query('SELECT 1 FROM attendance WHERE lesson_id=$1 AND student_id=$2',[f.lesson.id,f.students[1].id])).rowCount,1);
+  const day=(await db.pool.query('SELECT * FROM student_attendance_days WHERE student_id=$1 AND stage_season_id=$2',[f.students[0].id,f.ss])).rows[0];
+  assert.equal(day.attended_on_time_count,0);assert.equal(day.is_full_absence,true);assert.equal(day.absence_streak,1);
+  assert.equal((await request(`/lessons/${f.lesson.id}/attendance/${f.students[0].id}/remove`,{})).status,404);
+  const audit=(await db.pool.query("SELECT * FROM admin_audit_log WHERE action='remove_lesson_attendance' AND entity_id=$1",[f.lesson.id])).rows[0];
+  assert.equal(audit.before_data.student_id,f.students[0].id);
+});
 test('exam window belongs only to the selected student: listing, starting and answers honor it',async()=>{
   const f=await examFixture(),body=futureWindow(f);
   await assert.rejects(studies.startOrResumeAttempt(f.exam.id,f.students[0].id),{code:'EXAM_CLOSED'});

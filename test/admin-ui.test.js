@@ -19,6 +19,8 @@ async function setup({authorized=true}={}){
         rows:[{id:71,item_number:page?1:26,subject_name:'الفقه',title:'جلسة <img src=x>',group_title:'الأولى',activated_at:'2026-09-22T12:00:00Z',opened_at:'2026-09-22T12:00:00Z',active_until:'2026-09-23T12:00:00Z',closes_at:'2026-09-23T12:00:00Z',can_reopen:true,is_active:true,attended_count:3,enrolled_count:5,complete_count:3}]};
     }
     else if(/\/(lessons|sessions)\/71\/(reopen|cancel|mark-all)$/.test(u.pathname))data={ok:true,added:2,records:4};
+    else if(u.pathname.endsWith('/lessons/71/attendance'))data={lesson:{id:71,subject_name:'الفقه',activated_at:'2026-09-22T12:00:00Z'},rows:[{student_id:1,full_name:'طالب اختبار اسم رباعي',listened_at:'2026-09-22T13:00:00Z',marking_kind:'student'}],total:1,page:0,size:25};
+    else if(u.pathname.endsWith('/lessons/71/attendance/1/remove'))data={removed:true};
     else if(u.pathname.endsWith('/participation-settings'))data={grouped:false,pausedSlots:0};
     else if(u.pathname.endsWith('/stages'))data=[stage];else if(u.pathname.endsWith('/stages/1'))data=stage;
     else if(u.pathname.endsWith('/students/1')){
@@ -27,6 +29,7 @@ async function setup({authorized=true}={}){
     }else if(u.pathname.endsWith('/students')){const p=Number(u.searchParams.get('page'));data={rows:[{id:1,full_name:'طالب <img src=x> اختبار اسم',groups:[],is_active:true}],total:35,page:p,size:25};}
     else if(u.pathname.endsWith('/exams'))data=[{id:1,subject_name:'الفقه',title:'الشهري الأول',status:'draft'}];
     else if(u.pathname.endsWith('/exams/1'))data={id:1,title:'الشهري الأول',subject_name:'الفقه',status:'draft',questions:[{id:3,prompt:'سؤال <script>bad()</script>',question_type:'tf',correct_answer:'صح'}]};
+    else if(u.pathname.endsWith('/exams/1/delete'))data={deleted:true};
     else if(u.pathname.endsWith('/schedule')){
       if(options.method==='POST'){
         const b=JSON.parse(options.body);
@@ -150,4 +153,43 @@ test('admin DOM: discussion management exposes numbered sessions, complete atten
   click('[data-action="session-cancel"]');await until(()=>w.document.querySelector('#notice').textContent.includes('حُذفت المباحثة'));
   assert.ok(requests.some(r=>r.url.endsWith('/sessions/71/cancel')));
  }finally{dom.window.close();}
+});
+test('admin controls remain responsive while lesson deletion is saving and after exam deletion',async()=>{
+  const {dom,w,requests,until,click}=await setup();
+  try{
+    await until(()=>w.document.querySelector('.stage-card'));
+    click('[data-action="lesson-management"]');await until(()=>w.document.querySelector('#lesson-mgt-subject'));
+    const originalFetch=w.fetch;let release,started=false;
+    w.fetch=async(url,options)=>{
+      if(url.endsWith('/lessons/71/cancel')){started=true;await new Promise(resolve=>{release=resolve;});}
+      return originalFetch(url,options);
+    };
+    click('[data-action="lesson-cancel"]');await until(()=>started);
+    const filter=w.document.querySelector('#lesson-mgt-subject');filter.value='1';filter.dispatchEvent(new w.Event('change',{bubbles:true}));
+    await until(()=>requests.some(r=>r.url.includes('/lesson-management?')&&r.url.includes('subjectId=1')));
+    release();await until(()=>w.document.querySelector('#notice').textContent.includes('أُلغي تفعيل'));
+    click('[data-action="home"]');await until(()=>w.document.querySelector('.stage-card'));
+    click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
+    click('[data-action="tab"][data-tab="exams"]');await until(()=>w.document.querySelector('[data-action="exam"]'));
+    click('[data-action="exam"]');await until(()=>w.document.querySelector('[data-action="delete-exam"]'));
+    click('[data-action="delete-exam"]');await until(()=>w.document.querySelector('#notice').textContent.includes('حُذف الامتحان'));
+    assert.equal(w.document.querySelector('#detail').open,false);
+    click('[data-action="lesson-management"]');await until(()=>w.document.querySelector('#lesson-mgt-subject'));
+    const count=requests.filter(r=>r.url.includes('/lesson-management?')).length;
+    const after=w.document.querySelector('#lesson-mgt-subject');after.value='';after.dispatchEvent(new w.Event('change',{bubbles:true}));
+    await until(()=>requests.filter(r=>r.url.includes('/lesson-management?')).length>count);
+  }finally{dom.window.close();}
+});
+test('admin lesson management removes one selected student attendance',async()=>{
+  const {dom,w,requests,until,click}=await setup();
+  try{
+    await until(()=>w.document.querySelector('.stage-card'));
+    click('[data-action="lesson-management"]');await until(()=>w.document.querySelector('[data-action="lesson-attendance-remove"]'));
+    click('[data-action="lesson-attendance-remove"]');await until(()=>w.document.querySelector('[data-action="remove-lesson-attendance"]'));
+    assert.match(w.document.querySelector('#dialog-body').textContent,/طالب اختبار اسم رباعي/);
+    click('[data-action="remove-lesson-attendance"]');
+    await until(()=>requests.some(r=>r.url.endsWith('/lessons/71/attendance/1/remove')));
+    assert.equal(requests.find(r=>r.url.endsWith('/lessons/71/attendance/1/remove')).options.method,'POST');
+    await until(()=>w.document.querySelector('#dialog-notice').textContent.includes('حُذف حضور الطالب'));
+  }finally{dom.window.close();}
 });
