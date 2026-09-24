@@ -178,3 +178,24 @@ test('bot: teacher attendance matches discussion sessions rather than published 
   await send(attendee.telegram_id,'',`teacher_att:${subject.id}:${ss}`);
   assert.ok(!messages.some(m=>m.method==='sendDocument'));
 });
+
+test('bot: administrator previews and confirms a deduplicated broadcast, then cancels a notified exam',async()=>{
+  await send(42,'📣 رسالة جماعية');
+  assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='broadcast:scope:all')));
+  await send(42,'','broadcast:scope:all');
+  assert.ok(messages.some(m=>m.text?.includes('عدد المستلمين حاليًا')));
+  await send(42,'إعلان خاص باختبار الرسائل الجماعية');
+  assert.ok(messages.some(m=>m.text?.includes('مراجعة الرسالة')&&m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='broadcast:confirm')));
+  await send(42,'','broadcast:confirm');
+  assert.ok(messages.some(m=>m.method==='editMessageText'&&m.text?.includes('حُفظت الرسالة الجماعية')));
+  const sent=(await db.pool.query("SELECT COUNT(*)::int AS n FROM notification_outbox WHERE dedupe_key LIKE 'broadcast:%'")).rows[0].n;
+  assert.ok(sent>0);
+  await send(42,'','broadcast:confirm');
+  assert.equal((await db.pool.query("SELECT COUNT(*)::int AS n FROM notification_outbox WHERE dedupe_key LIKE 'broadcast:%'")).rows[0].n,sent);
+  const exam=await studies.createExam(subject.id,ss,null,{examNumber:2,title:'اختبار ملغى',dateIso:'2026-10-20',hours:24});
+  await send(42,'',`ex_cancel:${exam.id}`);
+  assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data===`ex_cancel_confirm:${exam.id}`)));
+  await send(42,'',`ex_cancel_confirm:${exam.id}`);
+  assert.equal((await studies.getExamById(exam.id)).status,'cancelled');
+  assert.ok(messages.some(m=>m.text?.includes('أُلغي الامتحان')));
+});

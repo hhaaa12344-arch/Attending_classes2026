@@ -55,6 +55,21 @@ test('UI: schedule provenance, subject correction and stale subject token are se
     await h.until(()=>h.el('#notice').textContent.includes('بقيت كل سجلات الحضور'));
   }finally{h.dom.window.close();}
 });
+test('UI: a stalled save times out, shows a useful message and releases the dashboard',async()=>{
+  const h=await setup();try{
+    const originalFetch=h.w.fetch,originalTimeout=h.w.setTimeout.bind(h.w);
+    h.w.setTimeout=(fn,delay,...args)=>originalTimeout(fn,Math.min(delay,20),...args);
+    h.w.fetch=(url,options={})=>url==='/api/admin/stages'&&options.method==='POST'
+      ?new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new h.w.DOMException('Request aborted','AbortError')),{once:true}))
+      :originalFetch(url,options);
+    h.click('[data-action="new-stage"]');
+    h.el('#create-stage input[name="name"]').value='مرحلة جديدة';h.submit('#create-stage');
+    await h.until(()=>h.el('#dialog-notice').textContent.includes('تأخر رد الخادم'));
+    assert.equal(h.el('#create-stage button').disabled,false);
+    h.click('[data-action="close-dialog"]');h.click('[data-action="student-contact"]');
+    await h.until(()=>h.w.document.querySelector('[data-action="contact-student"]'));
+  }finally{h.dom.window.close();}
+});
 test('UI: multiple attendance selections survive pages and search; existing attendance cannot be selected',async()=>{
   const h=await setup();try{
     h.click('[data-action="lesson-management"]');await h.until(()=>h.w.document.querySelector('[data-action="lesson-late"]'));

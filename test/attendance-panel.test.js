@@ -55,11 +55,12 @@ test('merging numbered groups moves students, preserves old attendance/grades/re
  const f=await fixture(),sub=f.subjects[0];
  const g1=await studies.createMubahathaGroup(sub.id,f.ss,{title:'الأولى'}),g2=await studies.createMubahathaGroup(sub.id,f.ss,{title:'الثانية'});
  const st=f.students[0];await studies.setParticipationMode(st.id,sub.id,f.ss,'mubahatha');await studies.moveStudentToGroup(st.id,sub.id,f.ss,g2.id);
- await db.pool.query("UPDATE group_memberships SET assigned_at=now()-interval '1 hour' WHERE student_id=$1 AND group_id=$2",[st.id,g2.id]);
- await db.pool.query("UPDATE participation_modes SET joined_mubahatha_at=now()-interval '1 hour' WHERE student_id=$1 AND subject_id=$2",[st.id,sub.id]);
  const session=await studies.openSession(g2.id,null,'سابقة',1);
- await db.pool.query("UPDATE mubahatha_sessions SET opened_at=now()-interval '20 minutes',closes_at=now()+interval '40 minutes',start_notifications_queued=true WHERE id=$1",[session.id]);
- await studies.markSessionAttendance(session.id,st.id,'start');await studies.openEndAttendance(session.id);await studies.markSessionAttendance(session.id,st.id,'end');
+ await db.pool.query("UPDATE group_memberships SET assigned_at=now()-interval '11 minutes' WHERE student_id=$1 AND group_id=$2",[st.id,g2.id]);
+ await db.pool.query("UPDATE participation_modes SET joined_mubahatha_at=now()-interval '11 minutes' WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3",[st.id,sub.id,f.ss]);
+ await db.pool.query("UPDATE mubahatha_sessions SET opened_at=now()-interval '10 minutes',closes_at=now()+interval '50 minutes',start_notifications_queued=true WHERE id=$1",[session.id]);
+ assert.ok(await studies.markSessionAttendance(session.id,st.id,'start'));
+ await studies.openEndAttendance(session.id);assert.ok(await studies.markSessionAttendance(session.id,st.id,'end'));
  await db.pool.query("UPDATE mubahatha_sessions SET closes_at=now()-interval '1 hour',end_closes_at=now()-interval '1 minute' WHERE id=$1",[session.id]);
  const reporter=f.students[1];await studies.setParticipationMode(reporter.id,sub.id,f.ss,'report');await studies.moveStudentToGroup(reporter.id,sub.id,f.ss,g2.id);
  const report=await studies.submitReport(reporter.id,sub.id,f.ss,{kind:'text',note:'تقرير قبل الدمج'});
@@ -77,9 +78,9 @@ test('merging numbered groups moves students, preserves old attendance/grades/re
  assert.equal(Number((await studies.listReportStudentsForGrading(sub.id,f.ss,{groupId:g1.id})).find(s=>s.student_id===reporter.id).report_count),1);
  await assert.rejects(studies.updateGroupSettings(g2.id,{active:true}));
  const repeated=await settings.save(f.ss,{grouped:false,enabledSubjectIds:f.subjects.map(s=>s.id)},42);assert.equal(repeated.movedMemberships,0);
- await db.pool.query("UPDATE group_memberships SET assigned_at=now()-interval '1 hour' WHERE student_id=$1 AND group_id=$2",[st.id,g1.id]);
  const next=await studies.openSession(g1.id,null,'بعد الدمج',1);
- await db.pool.query("UPDATE mubahatha_sessions SET opened_at=now()-interval '20 minutes',closes_at=now()+interval '40 minutes',start_notifications_queued=true WHERE id=$1",[next.id]);
+ await db.pool.query("UPDATE group_memberships SET assigned_at=now()-interval '11 minutes' WHERE student_id=$1 AND group_id=$2",[st.id,g1.id]);
+ await db.pool.query("UPDATE mubahatha_sessions SET opened_at=now()-interval '10 minutes',closes_at=now()+interval '50 minutes' WHERE id=$1",[next.id]);
  assert.ok(await studies.markSessionAttendance(next.id,st.id,'start'));
  assert.equal(await studies.markSessionAttendance(next.id,f.students[2].id,'start'),undefined,'students without discussion participation cannot mark');
 });

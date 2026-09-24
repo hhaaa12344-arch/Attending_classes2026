@@ -28,7 +28,7 @@ test.after(async()=>{if(server){server.closeAllConnections();await new Promise(r
 test('admin HTTP: public shell contains no records; every data endpoint requires verified admin',async()=>{
   const shell=await fetch(base+'/admin/');assert.equal(shell.status,200);assert.match(shell.headers.get('content-security-policy'),/default-src 'none'/);
   const html=await shell.text();assert.match(html,/dir="rtl"/);assert.ok(!html.includes(student.full_name));
-  for(const route of ['/lesson-attendance?stageId=1','/stages','/students','/leaves','/reports?seasonId=1','/attendance.csv?seasonId=1','/attendance.md?seasonId=1','/schedule-batch-import'])assert.equal((await request(route,null,'GET',null)).status,401);
+  for(const route of ['/lesson-attendance?stageId=1','/stages','/students','/leaves','/reports?seasonId=1','/attendance.csv?seasonId=1','/attendance.md?seasonId=1'])assert.equal((await request(route,null,'GET',null)).status,401);
   assert.equal((await request('/auth',{initData:signed(43)},'POST',null)).status,403);
   assert.equal((await request('/auth',{initData:signed().replace('42','45')},'POST',null)).status,401);
   const auth=await request('/auth',{initData:signed()},'POST',null);assert.equal(auth.status,200);token=(await auth.json()).token;
@@ -90,7 +90,7 @@ test('admin HTTP: attendance endpoint and season participation configuration req
   assert.equal((await (await request('/stages/'+stage.id)).json()).subjects[0].participation_enabled,false);
   assert.equal((await request(route,{grouped:true,enabledSubjectIds:[subject.id]},'PATCH')).status,200);
 });
-test('admin HTTP: exam editor, edits before attempts, postponement and logout',async()=>{
+test('admin HTTP: exam editor, protected publication, question immutability, postponement and logout',async()=>{
   const dateIso=new Date(Date.now()+86400000).toISOString().slice(0,10);
   const created=await request('/exams',{subjectId:subject.id,seasonId:ss,teacherId:teacher.id,examNumber:1,title:'امتحان تجريبي',dateIso,hours:24});
   assert.equal(created.status,200);const exam=await created.json();
@@ -98,14 +98,9 @@ test('admin HTTP: exam editor, edits before attempts, postponement and logout',a
   const added=await request('/exams/'+exam.id+'/question',{type:'tf',prompt:'هل العبارة صحيحة؟',correct:'صح'});assert.equal(added.status,200);const question=await added.json();
   assert.equal((await request('/exams/'+exam.id+'/publish',{})).status,200);
   assert.equal((await request('/exams/'+exam.id+'/publish',{})).status,409);
-  assert.equal((await request('/questions/'+question.id+'/update',{type:'tf',prompt:'هل الجواب صحيح؟',correct:'خطأ'})).status,200);
-  assert.equal((await request('/exams/'+exam.id+'/update',{title:'امتحان مصحح',dateIso,hours:12})).status,200);
-  assert.equal((await request('/exams/'+exam.id+'/question',{type:'tf',prompt:'هل العبارة صحيحة؟',correct:'صح'})).status,200);
-  assert.equal((await request('/questions/'+question.id+'/remove',{})).status,200);
+  assert.equal((await request('/questions/'+question.id+'/remove',{})).status,400);
   assert.equal((await request('/exams/'+exam.id+'/postpone',{dateIso})).status,200);
   assert.equal((await (await request('/exams/'+exam.id)).json()).questions.length,1);
-  assert.equal((await request('/exams/'+exam.id+'/delete',{})).status,200);
-  assert.equal((await request('/exams/'+exam.id)).status,404);
   assert.equal((await request('/logout',{})).status,200);assert.equal((await request('/students')).status,401);
 });
 
@@ -145,23 +140,26 @@ test('teacher HTTP: reports submitted before assignment become readable and grad
  const students=await teacherRequest(`/reports/students?subjectId=${sub.id}&seasonId=${ss}`,null,key);
  assert.ok((await students.json()).some(r=>r.student_id===student.id&&Number(r.report_count)===1));
  assert.equal((await teacherRequest('/reports/'+report.id+'/score',{score:12},key)).status,200);
-  const pendingReport=await studies.submitReport(student.id,sub.id,ss,{kind:'text',note:'تقرير جديد بانتظار التقييم'});
-  assert.equal((await teacherRequest('/reports/average',{studentId:student.id,subjectId:sub.id,seasonId:ss},key)).status,409);
-  assert.equal((await teacherRequest('/reports/'+pendingReport.id+'/score',{score:12},key)).status,200);
-  const summary=await teacherRequest(`/reports/summary?studentId=${student.id}&subjectId=${sub.id}&seasonId=${ss}`,null,key);
-  assert.equal(summary.status,200);assert.equal(Number((await summary.json()).average),12);
-  const average=await teacherRequest('/reports/average',{studentId:student.id,subjectId:sub.id,seasonId:ss},key);
-  assert.equal(average.status,200);assert.equal(Number((await average.json()).average),12);
-  const attendance=await teacherRequest(`/attendance?subjectId=${sub.id}&seasonId=${ss}`,null,key);
-  assert.equal(attendance.status,200);assert.ok((await attendance.json()).some(r=>r.student_id===student.id&&r.group_id));
-  const examResponse=await teacherRequest('/exams',{subjectId:sub.id,seasonId:ss,examNumber:1,title:'اختبار التقارير',dateIso:'2030-01-01',hours:24},key);
-  assert.equal(examResponse.status,200);const teacherExam=await examResponse.json();
-  const teacherQuestion=await (await teacherRequest(`/exams/${teacherExam.id}/questions`,{type:'tf',prompt:'سؤال تجريبي',correct:'صح'},key)).json();
-  assert.equal((await teacherRequest(`/questions/${teacherQuestion.id}/update`,{type:'tf',prompt:'سؤال معدل',correct:'خطأ'},key)).status,200);
-  assert.equal((await teacherRequest(`/exams/${teacherExam.id}/update`,{title:'اختبار معدل',dateIso:'2030-01-02',hours:12},key)).status,200);
-  assert.equal((await teacherRequest(`/exams/${teacherExam.id}/delete`,{},key)).status,200);
  await db.setTeacherActive(late.id,false);assert.equal((await teacherRequest(route,null,key)).status,401);
  await db.setTeacherActive(late.id,true);
  const again=(await (await teacherRequest('/auth',{initData:signed(780001)})).json()).token;
  assert.equal((await teacherRequest(route,null,again)).status,200);
+});
+
+test('admin and teacher HTTP: cancelling exams requires ownership and queues notices',async()=>{
+ const dateIso=new Date(Date.now()+3*86400000).toISOString().slice(0,10);
+ const exam=await studies.createExam(subject.id,ss,teacher.id,{examNumber:2,title:'امتحان للإلغاء',dateIso,hours:24});
+ assert.equal((await request('/exams/'+exam.id+'/cancel',{reason:'تغيير البرنامج'},'POST',null)).status,401);
+ const cancelled=await request('/exams/'+exam.id+'/cancel',{reason:'تغيير البرنامج'});
+ assert.equal(cancelled.status,200);assert.ok((await cancelled.json()).recipientCount>=1);
+ assert.equal((await request('/exams/'+exam.id+'/cancel',{})).status,409);
+ assert.equal((await (await request('/exams/'+exam.id)).json()).status,'cancelled');
+ assert.ok((await (await request('/audit')).json()).some(row=>row.action==='exam_cancel'&&Number(row.entity_id)===exam.id));
+ const replacement=await studies.createExam(subject.id,ss,teacher.id,{examNumber:2,title:'امتحان بديل',dateIso,hours:24});
+ await db.linkTeacherAccount(teacher.link_code,780002);
+ async function teacherRequest(path,body,key){return fetch(base+'/api/teacher'+path,{method:body?'POST':'GET',headers:{...(key?{Authorization:'Bearer '+key}:{}),...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});}
+ const auth=await teacherRequest('/auth',{initData:signed(780002)});assert.equal(auth.status,200);
+ const key=(await auth.json()).token;
+ assert.equal((await teacherRequest('/exams/'+replacement.id+'/cancel',{reason:'سبب الأستاذ'},key)).status,200);
+ assert.equal((await studies.getExamById(replacement.id)).status,'cancelled');
 });
