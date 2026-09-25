@@ -45,6 +45,7 @@ test('scoped broadcasts respect teacher ownership, deduplicate recipients and pe
 
 test('cancelling a notified exam expires its old announcement and notifies every original recipient',async()=>{
   const exam=await studies.createExam(subject.id,ss,teacher.id,{examNumber:1,title:'أحكام البيع',dateIso:'2026-10-20',hours:24});
+  const question=await studies.addExamQuestion(exam.id,{type:'tf',prompt:'سؤال قبل الإلغاء',correct:'صح'});
   const initial=(await db.pool.query('SELECT status FROM notification_outbox WHERE dedupe_key LIKE $1',[`exam:${exam.id}:%`])).rows;
   assert.equal(initial.length,3);
   await db.pool.query('UPDATE students SET is_active=false WHERE id=$1',[students[2].id]);
@@ -58,6 +59,11 @@ test('cancelling a notified exam expires its old announcement and notifies every
   assert.equal(cancelled.length,3);
   assert.ok(cancelled.every(r=>r.payload[0].includes('أُلغي الامتحان')&&r.payload[0].includes('تغيير الخطة')));
   await assert.rejects(studies.cancelExam(exam.id,42),{code:'CONFLICT'});
+  await assert.rejects(studies.addExamQuestion(exam.id,{type:'tf',prompt:'سؤال بعد الإلغاء',correct:'صح'}),{code:'CONFLICT'});
+  await assert.rejects(studies.updateExamQuestion(question.id,{type:'tf',prompt:'تغيير بعد الإلغاء',correct:'خطأ'}),{code:'CONFLICT'});
+  await assert.rejects(studies.deleteExamQuestion(question.id),{code:'CONFLICT'});
+  await assert.rejects(studies.updateExam(exam.id,{title:'تعديل الملغى',dateIso:'2026-10-25',hours:24}),{code:'CONFLICT'});
+  await assert.rejects(studies.deleteExam(exam.id),{code:'CONFLICT'});
   await studies.initStudiesSchema();
   assert.equal((await studies.getExamById(exam.id)).status,'cancelled');
   const replacement=await studies.createExam(subject.id,ss,teacher.id,{examNumber:1,title:'بديل أحكام البيع',dateIso:'2026-10-22',hours:24});
