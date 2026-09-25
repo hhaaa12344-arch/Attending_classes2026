@@ -224,7 +224,7 @@ function createAdminData(db, studies) {
       await c.query('COMMIT');return result;
     }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
   }
-  const attendanceHeaders=['معرف التسجيل','معرف الطالب','الطالب','المرحلة','الموسم','المادة','المجموعة','معرف الدرس/الجلسة','نوع الحضور','تاريخ تسجيل الحضور','وقت تسجيل الحضور','وقت التسجيل UTC'];
+  const attendanceHeaders=['تسلسل','معرف التسجيل','معرف الطالب','الطالب','المرحلة','الموسم','المادة','المجموعة','معرف الدرس/الجلسة','نوع الحضور','تاريخ تسجيل الحضور','وقت تسجيل الحضور','وقت التسجيل UTC'];
   const attendanceCells=x=>[x.id,x.student_id,x.full_name,x.stage_name,x.season_name,x.subject_name,x.group_title,x.item_id,x.phase,x.date,x.time,x.utc];
   async function* attendanceRows(seasonId, kind='lessons') {
     positiveInt(seasonId);
@@ -261,7 +261,8 @@ function createAdminData(db, studies) {
     const cell=v=>`"${String(v??'').replace(/^[\s]*[=+\-@\t\r]/,"'$&").replace(/"/g,'""')}"`;
     const line=row=>row.map(cell).join(',')+'\r\n';
     yield '\uFEFF'+line(attendanceHeaders);
-    for await(const row of attendanceRows(seasonId,kind))yield line(attendanceCells(row));
+    let sequence=0;
+    for await(const row of attendanceRows(seasonId,kind))yield line([++sequence,...attendanceCells(row)]);
   }
   async function* attendanceMarkdown(seasonId,kind='lessons') {
     positiveInt(seasonId);
@@ -279,8 +280,8 @@ function createAdminData(db, studies) {
     yield line(attendanceHeaders)+'| '+attendanceHeaders.map(()=>'---').join(' | ')+' |\n';
     let count=0;
     for await(const row of attendanceRows(seasonId,kind)){
-      const values=attendanceCells(row);values[8]=({start:'البداية',end:'النهاية'})[row.phase]||row.phase;
-      yield line(values);count++;
+      const values=[++count,...attendanceCells(row)];values[9]=({start:'البداية',end:'النهاية'})[row.phase]||row.phase;
+      yield line(values);
     }
     yield count?`\n**عدد تسجيلات الحضور:** ${count}\n`:'\nلا توجد تسجيلات حضور لهذا الموسم.\n';
   }

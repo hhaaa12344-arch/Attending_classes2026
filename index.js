@@ -833,22 +833,33 @@ function buildMarkdownTable(header, rows, { alignRight = false } = {}) {
 }
 
 // يُنشئ مستند Markdown بعنوان وسطر تاريخ ثم جدول
+function addSequenceColumn(header, rows) {
+  const hasSequence = header.some((value) => ['ت', 'تسلسل', '#'].includes(String(value ?? '').trim()));
+  if (hasSequence) return { header, rows };
+  return {
+    header: ['تسلسل', ...header],
+    rows: rows.map((row, index) => [index + 1, ...row]),
+  };
+}
+
 function buildMarkdownDoc(title, header, rows, note = '', options = {}) {
   const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+  const sequenced = options.sequence === false ? { header, rows } : addSequenceColumn(header, rows);
   return (
     `# ${title}\n\n` +
     `_تاريخ التوليد: ${stamp}_\n\n` +
     (note ? `${note}\n\n` : '') +
-    buildMarkdownTable(header, rows, options) +
+    buildMarkdownTable(sequenced.header, sequenced.rows, options) +
     '\n'
   );
 }
 
 function buildRtlMarkdownDoc(title, header, rows, note = '') {
-  // Markdown لا يفرض اتجاه الصفحة؛ نعكس نسخ الأعمدة ليكون الحقل الأول يمينًا
-  // في قارئ الجداول المعتاد، ونستخدم محاذاة Markdown دون وسوم HTML.
-  return buildMarkdownDoc(mdCell(title), [...header].reverse(),
-    rows.map(row => [...row].reverse()), mdCell(note), { alignRight: true });
+  // نضيف التسلسل قبل عكس الأعمدة، حتى يبقى عمود «تسلسل» في الموضع الطبيعي
+  // عند فتح ملف Markdown بقارئ يدعم الاتجاه من اليمين إلى اليسار.
+  const sequenced = addSequenceColumn(header, rows);
+  return buildMarkdownDoc(mdCell(title), [...sequenced.header].reverse(),
+    sequenced.rows.map(row => [...row].reverse()), mdCell(note), { alignRight: true, sequence: false });
 }
 
 function sendMarkdownDoc(ctx, filename, content, extra = {}) {
