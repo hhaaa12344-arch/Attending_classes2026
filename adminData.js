@@ -6,14 +6,14 @@ function createAdminData(db, studies) {
   async function stages(seasonId = null) {
     if (seasonId != null) {
       positiveInt(seasonId);
-      return (await pool.query(`SELECT st.id,st.name,st.stage_type,st.is_active,ss.discussion_grouping,ss.id AS stage_season_id,se.name AS season_name,true AS is_historical,
+      return (await pool.query(`SELECT st.id,st.name,st.stage_type,st.is_active,st.registration_visible,ss.discussion_grouping,ss.id AS stage_season_id,se.name AS season_name,true AS is_historical,
         (SELECT COUNT(*) FROM enrollments e WHERE e.stage_season_id=ss.id) AS student_count,
         (SELECT COUNT(*) FROM subjects s WHERE s.stage_id=st.id) AS subject_count,
         (SELECT COUNT(*) FROM mubahatha_groups g WHERE g.stage_season_id=ss.id AND g.merged_into_id IS NULL) AS group_count
         FROM stages st JOIN stage_seasons ss ON ss.stage_id=st.id AND ss.season_id=$1
         LEFT JOIN seasons se ON se.id=ss.season_id ORDER BY st.sort_order NULLS LAST,st.id`,[seasonId])).rows;
     }
-    return (await pool.query(`SELECT st.id,st.name,st.stage_type,st.is_active,ss.discussion_grouping,ss.id AS stage_season_id,se.name AS season_name,false AS is_historical,
+    return (await pool.query(`SELECT st.id,st.name,st.stage_type,st.is_active,st.registration_visible,ss.discussion_grouping,ss.id AS stage_season_id,se.name AS season_name,false AS is_historical,
       (SELECT COUNT(*) FROM students s WHERE s.stage_id=st.id AND s.is_active=true) AS student_count,
       (SELECT COUNT(*) FROM subjects s WHERE s.stage_id=st.id) AS subject_count,
       (SELECT COUNT(*) FROM mubahatha_groups g WHERE g.stage_season_id=ss.id AND g.is_active=true) AS group_count

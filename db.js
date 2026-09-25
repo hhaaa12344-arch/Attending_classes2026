@@ -38,7 +38,8 @@ async function initSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS stages (
       id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE
+      name TEXT NOT NULL UNIQUE,
+      registration_visible BOOLEAN NOT NULL DEFAULT true
     );
 
     CREATE TABLE IF NOT EXISTS subjects (
@@ -131,6 +132,7 @@ async function initSchema() {
   await pool.query(`
     ALTER TABLE stages ADD COLUMN IF NOT EXISTS sort_order INTEGER;
     ALTER TABLE stages ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;
+    ALTER TABLE stages ADD COLUMN IF NOT EXISTS registration_visible BOOLEAN NOT NULL DEFAULT true;
     ALTER TABLE stages ADD COLUMN IF NOT EXISTS next_stage_id INTEGER REFERENCES stages(id) ON DELETE SET NULL;
     ALTER TABLE students ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;
     ALTER TABLE subjects ADD COLUMN IF NOT EXISTS hashtag TEXT;
@@ -523,6 +525,18 @@ const listStages = () =>
   pool
     .query('SELECT * FROM stages WHERE is_active=true ORDER BY sort_order, id')
     .then((r) => r.rows);
+
+// المراحل الظاهرة فقط للطالب عند التسجيل الذاتي لأول مرة.
+// لا يؤثر هذا الحجب في الطلبة الموجودين أصلًا، ولا في النقل الإداري أو بقية وظائف المرحلة.
+const listRegistrationStages = () =>
+  pool
+    .query('SELECT * FROM stages WHERE is_active=true AND registration_visible=true ORDER BY sort_order, id')
+    .then((r) => r.rows);
+
+const setStageRegistrationVisible = (id, visible) =>
+  pool
+    .query('UPDATE stages SET registration_visible=$2 WHERE id=$1 RETURNING *', [id, visible === true])
+    .then((r) => r.rows[0]);
 
 const listAllStages = () =>
   pool
@@ -2692,6 +2706,8 @@ module.exports = {
   setStudentRegistrationOpen,
   addStage,
   listStages,
+  listRegistrationStages,
+  setStageRegistrationVisible,
   listAllStages,
   getStageById,
   updateStageName,

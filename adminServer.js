@@ -240,6 +240,15 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           const st=await db.getStudentById(result.student_id);
           if(st)await enqueueNotification(db.pool,{key:`leave:${id}:decision`,chatId:st.telegram_id,text:body.approve?'✅ تمت الموافقة على إجازتك.':'لم تتم الموافقة على طلب الإجازة. راجع الإدارة عند الحاجة.'});
         }
+        else if((m=/^\/stages\/(\d+)\/registration-visibility$/.exec(route))&&req.method==='PATCH'){
+          const id=positiveInt(m[1]);
+          if(typeof body.visible!=='boolean')throw appError('حالة ظهور المرحلة للتسجيل الجديد غير صالحة.');
+          const before=await db.getStageById(id);
+          if(!before)throw appError('المرحلة غير موجودة.','NOT_FOUND',404);
+          result=await db.setStageRegistrationVisible(id,body.visible);
+          await audit(actor.id,'toggle_stage_registration_visibility','stage',id,
+            {registration_visible:before.registration_visible},{registration_visible:result.registration_visible});
+        }
         else if((m=/^\/students\/(\d+)\/group$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]);const group=await studies.getGroupById(positiveInt(body.groupId));
           if(!group)throw appError('المجموعة غير موجودة.');

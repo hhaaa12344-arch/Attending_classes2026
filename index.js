@@ -1478,10 +1478,10 @@ bot.on('text', async (ctx, next) => {
     if (fullName.split(/\s+/).length < 4) {
       return ctx.reply('الرجاء إدخال الاسم الرباعي كاملًا (أربعة أسماء على الأقل).', backOnlyMenu());
     }
-    const stages = await db.listStages();
+    const stages = await db.listRegistrationStages();
     if (stages.length === 0) {
       userState.delete(ctx.from.id);
-      return ctx.reply('لم يتم إضافة أي مرحلة دراسية بعد من قبل الأدمن. حاول لاحقًا.');
+      return ctx.reply('لا توجد مرحلة متاحة للتسجيل الجديد حاليًا. يرجى المحاولة لاحقًا أو التواصل مع إدارة المعهد.');
     }
     userState.set(ctx.from.id, { action: 'awaiting_stage_choice', fullName });
     return ctx.reply('اختر مرحلتك الدراسية:', stagesKeyboard(stages, 'reg_stage'));
@@ -2014,6 +2014,17 @@ bot.action(/reg_stage:(\d+)/, async (ctx) => {
   const state = userState.get(ctx.from.id);
   if (!state || state.action !== 'awaiting_stage_choice') return ctx.answerCbQuery();
   const stageId = Number(ctx.match[1]);
+  // تحقق لحظة الضغط أيضًا: قد تكون المرحلة حُجبت بعد إرسال لوحة الاختيار للطالب.
+  const availableStages = await db.listRegistrationStages();
+  if (!availableStages.some((stage) => Number(stage.id) === stageId)) {
+    if (availableStages.length === 0) {
+      userState.delete(ctx.from.id);
+      await ctx.answerCbQuery('التسجيل في هذه المرحلة غير متاح حاليًا.', { show_alert: true });
+      return ctx.editMessageText('لا توجد مرحلة متاحة للتسجيل الجديد حاليًا. يرجى المحاولة لاحقًا أو التواصل مع إدارة المعهد.');
+    }
+    await ctx.answerCbQuery('هذه المرحلة محجوبة عن التسجيل الجديد حاليًا.', { show_alert: true });
+    return ctx.editMessageText('اختر مرحلتك الدراسية من المراحل المتاحة حاليًا:', stagesKeyboard(availableStages, 'reg_stage'));
+  }
   await db.createStudent(ctx.from.id, state.fullName, stageId);
   userState.delete(ctx.from.id);
   await ctx.answerCbQuery('تم حفظ بيانات التسجيل');
