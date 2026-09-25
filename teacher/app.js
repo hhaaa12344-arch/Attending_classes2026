@@ -24,6 +24,7 @@
   const timeText=(h,m)=>`${String(n(h)).padStart(2,'0')}:${String(n(m)).padStart(2,'0')}`;
   const dateTime=(v)=>{if(!v)return '—';try{return new Intl.DateTimeFormat('ar-IQ',{dateStyle:'medium',timeStyle:'short',timeZone:'Asia/Baghdad'}).format(new Date(v));}catch{return '—';}};
   const todayIso=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  const baghdadIso=v=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v));
   const contactRequestKey=()=>`teacher-web:${window.crypto?.randomUUID?.()||`${Date.now()}:${Math.random().toString(36).slice(2)}`}`;
   const contactStatuses={pending:'بانتظار الإرسال',sending:'قيد الإرسال',sent:'أُرسلت',failed:'تعذّر الإرسال',expired:'انتهت المهلة',archived:'سجل إرسال مؤرشف'};
 
@@ -207,12 +208,11 @@
     try{
       const rows=await api(`/api/teacher/attendance?subjectId=${n(sub.subject_id)}&seasonId=${n(sub.stage_season_id)}`);
       if(!rows.length){sheetBody.innerHTML=empty('لا يوجد طلبة في نمط المباحثات لهذه المادة.');return;}
-      const total=Math.max(0,...rows.map(r=>n(r.eligible_sessions)));
-      const completed=rows.filter(r=>n(r.attended_sessions)>=n(r.eligible_sessions)&&n(r.eligible_sessions)>0).length;
-      sheetBody.innerHTML=`
-        <div class="detail-grid"><div class="detail-box"><span>أعلى عدد جلسات مؤهلة</span><strong>${total}</strong></div><div class="detail-box"><span>حضور كامل</span><strong>${completed}/${rows.length}</strong></div></div>
-        <p class="form-hint">يُحتسب حضور المباحثة كاملًا فقط عند تسجيل حضور البداية وحضور النهاية للجلسة نفسها.</p>
-        <div>${rows.map(r=>{const eligible=n(r.eligible_sessions),a=n(r.attended_sessions),incomplete=n(r.incomplete_sessions),ratio=eligible?Math.round(a/eligible*100):0,cls=ratio>=90?'good':ratio>=70?'warn':'bad';return `<div class="attendance-row"><div><h4>${esc(r.full_name)}</h4><small>${ratio}% من جلساته المؤهلة${incomplete?` · ${incomplete} حضور بداية بلا نهاية`:''}</small></div><span class="attendance-ratio ${cls}">${a}/${eligible}</span></div>`;}).join('')}</div>`;
+      const groups=new Map();for(const row of rows){const key=String(row.group_id||0);if(!groups.has(key))groups.set(key,{title:row.group_title||'بلا مجموعة',rows:[]});groups.get(key).rows.push(row);}
+      const renderStudent=r=>{const eligible=n(r.eligible_sessions),attended=n(r.attended_sessions),incomplete=n(r.incomplete_sessions),ratio=eligible?Math.round(attended/eligible*100):0,cls=ratio>=90?'good':ratio>=70?'warn':'bad';return `<div class="attendance-row"><div><h4>${esc(r.full_name)}</h4><small>${r.mode==='report'?`${n(r.report_count)} تقرير`:`${attended} من ${eligible} مباحثة مكتملة${incomplete?` · ${incomplete} حضور بداية بلا نهاية`:''}`}</small></div>${r.mode==='report'?'':`<span class="attendance-ratio ${cls}">${attended}/${eligible}</span>`}</div>`;};
+      sheetBody.innerHTML=`<p class="form-hint">المباحثة مكتملة عند تسجيل حضور البداية والنهاية. طلبة التقارير ظاهرون في قسم مستقل لكل مجموعة.</p>`+
+        [...groups.values()].map(group=>`<section class="list-card"><h3>${esc(group.title)}</h3><h4>المباحثات (${group.rows.filter(r=>r.mode!=='report').length})</h4>${group.rows.filter(r=>r.mode!=='report').map(renderStudent).join('')||empty('لا يوجد طلبة مباحثات.')}
+          <h4>التقارير (${group.rows.filter(r=>r.mode==='report').length})</h4>${group.rows.filter(r=>r.mode==='report').map(renderStudent).join('')||empty('لا يوجد طلبة تقارير.')}</section>`).join('');
     }catch(err){sheetBody.innerHTML=empty(err.message);}
   }
 
@@ -221,7 +221,7 @@
     try{
       const rows=await api(`/api/teacher/groups?subjectId=${n(sub.subject_id)}&seasonId=${n(sub.stage_season_id)}`);
       sheetBody.innerHTML=rows.length?rows.map(g=>`
-        <article class="list-card"><div class="list-card-head"><div><h4>${esc(g.title)}</h4><p>${g.invite_link?'رابط المجموعة محفوظ':'لا يوجد رابط دعوة محفوظ'}</p></div><span class="badge ${n(g.member_count)>=n(g.capacity)?'warn':''}">${n(g.member_count)}/${n(g.capacity)}</span></div></article>`).join(''):empty('لا توجد مجموعات لهذه المادة.');
+        <article class="list-card"><div class="list-card-head"><div><h4>${esc(g.title)}</h4><p>${g.invite_link?'رابط المجموعة محفوظ':'لا يوجد رابط دعوة محفوظ'} · ${n(g.member_count)} عضو في المادة</p></div><span class="badge ${n(g.discussion_grouping===false?g.member_count:g.reserved_count)>=n(g.capacity)?'warn':''}">${n(g.discussion_grouping===false?g.member_count:g.reserved_count)}/${n(g.capacity)} ${g.discussion_grouping===false?'عضو':'محجوز'}</span></div></article>`).join(''):empty('لا توجد مجموعات لهذه المادة.');
     }catch(err){sheetBody.innerHTML=empty(err.message);}
   }
 
@@ -279,19 +279,23 @@
   async function openExamEditor(examId,sub){
     sheetTitle.textContent=`إدارة امتحان ${sub.subject_name}`;sheetKicker.textContent=sub.stage_name;sheetBody.innerHTML=empty('جاري تحميل الامتحان…');
     try{
-      const data=await api(`/api/teacher/exams/${examId}`),e=data.exam,questions=data.questions||[],draft=e.status==='draft',cancelled=e.status==='cancelled';
+      const data=await api(`/api/teacher/exams/${examId}`),e=data.exam,questions=data.questions||[],draft=e.status==='draft',cancelled=e.status==='cancelled',editable=!cancelled&&n(e.attempt_count)===0;
       sheetBody.innerHTML=`
         <div class="detail-grid"><div class="detail-box"><span>الحالة</span><strong>${cancelled?'ملغى':draft?'مجدول تلقائيًا':'منشور'}</strong></div><div class="detail-box"><span>عدد الأسئلة</span><strong>${questions.length}</strong></div></div>
-        <article class="list-card exam-summary"><div class="list-card-head"><div><h4>${esc(e.title||`الامتحان الشهري ${e.exam_number}`)}</h4><p>يفتح: ${esc(dateTime(e.opens_at))}<br>يغلق: ${esc(dateTime(e.closes_at))} · الدرجة: ${esc(e.max_score)}</p></div><span class="badge ${draft||cancelled?'':'live'}">${cancelled?'ملغى':draft?'مجدول':'منشور'}</span></div></article>
-        ${draft?`<p class="form-hint">تم إشعار الطلبة بالامتحان. أكمل إضافة الأسئلة قبل الموعد، وسيُنشر تلقائيًا عند حلول وقت الفتح.</p><div class="exam-editor-actions"><button class="mini-button" id="addTfQuestion" type="button">➕ صح / خطأ</button><button class="mini-button" id="addMcqQuestion" type="button">➕ اختيار متعدد</button></div>`:''}
+        <article class="list-card exam-summary"><div class="list-card-head"><div><h4>${esc(e.title||`الامتحان الشهري ${e.exam_number}`)}</h4><p>يفتح: ${esc(dateTime(e.opens_at))}<br>يغلق: ${esc(dateTime(e.closes_at))} · الدرجة: ${esc(e.max_score)}</p></div><span class="badge ${draft?'':'live'}">${cancelled?'ملغى':draft?'مجدول':'منشور'}</span></div></article>
+        ${editable?`<form id="editExamForm" class="form-stack"><label><span class="field-label">موضوع الامتحان</span><input id="editExamTitle" class="text-control" value="${esc(e.title)}" minlength="3" maxlength="150" required></label><label><span class="field-label">تاريخ الامتحان</span><input id="editExamDate" class="text-control" type="date" value="${baghdadIso(e.opens_at)}" required></label><label><span class="field-label">مدة الإتاحة بالساعات</span><input id="editExamHours" class="text-control" type="number" min="1" max="720" value="${n(e.available_hours)}" required></label><button class="primary-button" type="submit">حفظ تعديل الامتحان</button></form><div class="exam-editor-actions"><button class="mini-button" id="addTfQuestion" type="button">➕ صح / خطأ</button><button class="mini-button" id="addMcqQuestion" type="button">➕ اختيار متعدد</button><button class="mini-button" id="deleteExamBtn" type="button">حذف الامتحان</button></div>`:'<p class="form-hint">بدأ أحد الطلبة الامتحان؛ حُفظت أسئلته ودرجاته ولا يمكن تعديلها أو حذفه.</p>'}
         <div class="section-head compact-head"><div><span class="section-kicker">الأسئلة</span><h3>${questions.length} سؤال</h3></div></div>
-        <div class="question-list">${questions.length?questions.map((q,i)=>`<article class="question-card"><span class="question-number">${i+1}</span><div><h4>${esc(q.prompt)}</h4><p>${q.question_type==='tf'?'صح / خطأ':(Array.isArray(q.options)?q.options:[]).map(esc).join(' · ')}</p><small>الإجابة الصحيحة: ${esc(q.correct_answer)}</small></div></article>`).join(''):empty('لم تُضف أسئلة بعد.')}</div>
+        <div class="question-list">${questions.length?questions.map((q,i)=>`<article class="question-card"><span class="question-number">${i+1}</span><div><h4>${esc(q.prompt)}</h4><p>${q.question_type==='tf'?'صح / خطأ':(Array.isArray(q.options)?q.options:[]).map(esc).join(' · ')}</p><small>الإجابة الصحيحة: ${esc(q.correct_answer)}</small>${editable?`<div class="card-actions"><button class="mini-button" type="button" data-edit-question="${n(q.id)}">تعديل السؤال</button><button class="mini-button" type="button" data-delete-question="${n(q.id)}">حذف السؤال</button></div>`:''}</div></article>`).join(''):empty('لم تُضف أسئلة بعد.')}</div>
         ${cancelled?`<p class="form-hint">سبب الإلغاء: ${esc(e.cancellation_reason||'لم يُذكر سبب.')}</p>`:`<form id="cancelExamForm" class="form-stack"><label><span class="field-label">سبب الإلغاء (اختياري)</span><input name="reason" class="text-control" maxlength="500"></label><button class="secondary-button" type="submit">🚫 إلغاء الامتحان وإشعار الطلبة</button></form>`}
         <button id="backToExamList" class="secondary-button wide-button" type="button">رجوع إلى قائمة الامتحانات</button>`;
       $('#backToExamList').addEventListener('click',()=>openExams(sub));
-      if(draft){
+      if(editable){
         $('#addTfQuestion').addEventListener('click',()=>showTfQuestionForm(examId,sub));
         $('#addMcqQuestion').addEventListener('click',()=>showMcqQuestionForm(examId,sub));
+        $('#editExamForm').addEventListener('submit',async event=>{event.preventDefault();try{await api(`/api/teacher/exams/${examId}/update`,{method:'POST',body:JSON.stringify({title:$('#editExamTitle').value.trim(),dateIso:$('#editExamDate').value,hours:n($('#editExamHours').value)})});notify('حُفظ تعديل الامتحان.');await openExamEditor(examId,sub);}catch(err){notify(err.message);}});
+        $('#deleteExamBtn').addEventListener('click',async()=>{if(!confirm('حذف الامتحان وأسئلته؟'))return;try{await api(`/api/teacher/exams/${examId}/delete`,{method:'POST',body:'{}'});notify('حُذف الامتحان.');await openExams(sub);}catch(err){notify(err.message);}});
+        $$('[data-delete-question]',sheetBody).forEach(button=>button.addEventListener('click',async()=>{if(!confirm('حذف هذا السؤال؟'))return;try{await api(`/api/teacher/questions/${n(button.dataset.deleteQuestion)}/delete`,{method:'POST',body:'{}'});await openExamEditor(examId,sub);}catch(err){notify(err.message);}}));
+        $$('[data-edit-question]',sheetBody).forEach(button=>button.addEventListener('click',()=>showQuestionEditForm(examId,sub,questions.find(q=>n(q.id)===n(button.dataset.editQuestion)))));
       }
       $('#cancelExamForm')?.addEventListener('submit',async event=>{
         event.preventDefault();
@@ -301,6 +305,24 @@
         catch(err){notify(err.message);button.disabled=false;}
       });
     }catch(err){sheetBody.innerHTML=empty(err.message);}
+  }
+
+  function showQuestionEditForm(examId,sub,q){
+    if(!q)return;
+    sheetTitle.textContent='تعديل السؤال';sheetKicker.textContent=sub.subject_name;
+    sheetBody.innerHTML=`<form id="editQuestionForm" class="form-stack">
+      <label><span class="field-label">نوع السؤال</span><select id="editQuestionType" class="select-control"><option value="tf" ${q.question_type==='tf'?'selected':''}>صح / خطأ</option><option value="mcq" ${q.question_type==='mcq'?'selected':''}>اختيار متعدد</option></select></label>
+      <label><span class="field-label">نص السؤال</span><textarea id="editQuestionPrompt" class="text-area" rows="5" maxlength="3000" required>${esc(q.prompt)}</textarea></label>
+      <label><span class="field-label">الخيارات للاختيار المتعدد، كل خيار في سطر</span><textarea id="editQuestionOptions" class="text-area" rows="5">${esc((Array.isArray(q.options)?q.options:[]).join('\n'))}</textarea></label>
+      <label><span class="field-label">الإجابة الصحيحة بالنص المطابق</span><input id="editQuestionCorrect" class="text-control" value="${esc(q.correct_answer)}" required></label>
+      <div class="form-actions"><button id="cancelEditQuestion" class="secondary-button" type="button">رجوع</button><button class="primary-button" type="submit">حفظ السؤال</button></div></form>`;
+    $('#cancelEditQuestion').addEventListener('click',()=>openExamEditor(examId,sub));
+    $('#editQuestionForm').addEventListener('submit',async event=>{
+      event.preventDefault();const type=$('#editQuestionType').value;
+      const options=type==='mcq'?$('#editQuestionOptions').value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean):undefined;
+      const body={type,prompt:$('#editQuestionPrompt').value.trim(),options,correct:$('#editQuestionCorrect').value.trim()};
+      try{await api(`/api/teacher/questions/${n(q.id)}/update`,{method:'POST',body:JSON.stringify(body)});notify('حُفظ السؤال.');await openExamEditor(examId,sub);}catch(err){notify(err.message);}
+    });
   }
 
   function showTfQuestionForm(examId,sub){
@@ -345,19 +367,23 @@
     }catch(err){root.innerHTML=empty(err.message);}
   }
 
-  async function openStudentReports(studentId,subjectId,seasonId,groupId,name){
+  async function openStudentReports(studentId,subjectId,seasonId,groupId,name,page=0){
     openSheet(`تقارير ${name}`,'التقييم من 15');
     try{
-      const query=new URLSearchParams({studentId,subjectId,seasonId});if(groupId)query.set('groupId',groupId);
-      const rows=await api(`/api/teacher/reports?${query}`);
+      const query=new URLSearchParams({studentId,subjectId,seasonId,page});if(groupId)query.set('groupId',groupId);
+      const [rows,summary]=await Promise.all([api(`/api/teacher/reports?${query}`),api(`/api/teacher/reports/summary?${query}`)]);
       if(!rows.length){sheetBody.innerHTML=empty('لا توجد تقارير لهذا الطالب.');return;}
-      sheetBody.innerHTML=rows.map(r=>`
+      const total=n(summary.total),graded=n(summary.graded),average=summary.average==null?null:n(summary.average);
+      sheetBody.innerHTML=`<p class="form-hint">قيّم كل تقرير أولًا. بعد اكتمال التقييمات، اعتمد متوسطها ليصبح درجة التقارير المحفوظة للطالب في هذه المادة.</p><div class="detail-grid"><div class="detail-box"><span>التقارير المقيمة</span><strong>${graded}/${total}</strong></div><div class="detail-box"><span>المتوسط</span><strong>${average==null?'—':average+'/15'}</strong></div></div>${total>0&&graded===total?'<button id="applyReportAverage" class="primary-button wide-button" type="button">اعتماد المتوسط كدرجة التقارير</button>':''}`+rows.map(r=>`
         <article class="report-item ${r.score==null?'pending':'graded'}" data-report-id="${n(r.id)}">
           <h4>تقرير ${esc(r.group_title_snapshot||'الطالب')} ${r.score==null?'<span class="report-pending">بانتظار التقييم</span>':'<span class="report-done">تم التقييم</span>'}</h4>
           <p>${r.note?esc(r.note):r.file_kind?`تقرير محفوظ كـ ${esc(r.file_kind)} في البوت.`:'تقرير محفوظ في النظام.'}<br>تاريخ الإرسال: ${esc(dateTime(r.submitted_at))}</p>
           <div class="score-row"><label><span class="field-label">الدرجة من 15</span><input class="score-input" type="number" min="0" max="15" step="0.25" value="${r.score==null?'':esc(r.score)}" inputmode="decimal"></label><button class="primary-button score-save" type="button">حفظ التقييم</button></div>
           <button class="secondary-button report-contact" type="button">💬 الرد على هذا التقرير</button>
-        </article>`).join('');
+        </article>`).join('')+`<div class="form-actions">${page>0?'<button id="previousReportsPage" class="secondary-button" type="button">التقارير السابقة</button>':''}${(page+1)*30<n(rows[0].total_count)?'<button id="nextReportsPage" class="secondary-button" type="button">التقارير التالية</button>':''}</div>`;
+      $('#previousReportsPage')?.addEventListener('click',()=>openStudentReports(studentId,subjectId,seasonId,groupId,name,page-1));
+      $('#nextReportsPage')?.addEventListener('click',()=>openStudentReports(studentId,subjectId,seasonId,groupId,name,page+1));
+      $('#applyReportAverage')?.addEventListener('click',async()=>{try{const result=await api('/api/teacher/reports/average',{method:'POST',body:JSON.stringify({studentId,subjectId,seasonId})});notify(`اعتُمدت درجة التقارير: ${result.average} من 15.`);await loadReportStudents();}catch(err){notify(err.message);}});
       $$('.report-item',sheetBody).forEach(item=>$('.score-save',item).addEventListener('click',async()=>{
         const input=$('.score-input',item);const score=Number(input.value);if(!Number.isFinite(score)||score<0||score>15){notify('الدرجة يجب أن تكون بين 0 و15.');return;}
         const btn=$('.score-save',item);btn.disabled=true;btn.textContent='جاري الحفظ…';
@@ -366,7 +392,7 @@
           item.classList.remove('pending');item.classList.add('graded');
           const status=item.querySelector('.report-pending');if(status){status.className='report-done';status.textContent='تم التقييم';}
           btn.textContent='تم الحفظ';notify('حُفظ تقييم التقرير.');
-          await refresh();await loadReportStudents();
+          await refresh();await loadReportStudents();await openStudentReports(studentId,subjectId,seasonId,groupId,name,page);
         }
         catch(err){btn.textContent='حفظ التقييم';notify(err.message);}finally{btn.disabled=false;}
       }));
