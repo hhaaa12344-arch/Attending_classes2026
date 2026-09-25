@@ -63,6 +63,12 @@ h3{font-size:.98rem;margin-bottom:.5rem;font-weight:700;color:var(--ink-soft)}
 .stage-card{display:flex;flex-direction:column;gap:1rem;text-align:right;background:var(--paper);border:1px solid var(--line);border-top:3px solid var(--accent);border-radius:var(--radius-lg);padding:1.4rem;min-height:175px;box-shadow:var(--shadow-sm);transition:box-shadow .15s ease,transform .15s ease}
 .stage-card:hover{box-shadow:var(--shadow-md);transform:translateY(-2px)}
 .stage-card h2{font-size:1.05rem}
+
+.stage-card-shell{display:flex;flex-direction:column;gap:.55rem;min-width:0}
+.stage-card-shell .stage-card{width:100%;flex:1}
+.stage-card-shell>button:not(.stage-card){width:100%;min-height:44px}
+.stage-card-shell.registration-hidden .stage-card{border-top-color:var(--danger);background:linear-gradient(0deg,var(--danger-soft),var(--paper) 34%)}
+.stage-card-shell.registration-hidden .card-footer span:nth-child(2){color:var(--danger);font-weight:700}
 .stage-card .stats{display:flex;gap:1.6rem}
 .metric{font-size:1.6rem;line-height:1.2;display:block;font-weight:700;color:var(--ink)}
 .stage-card small{color:var(--muted)}

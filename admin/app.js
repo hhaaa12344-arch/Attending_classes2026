@@ -14,7 +14,7 @@ let adminSelection=null;
 Object.assign(actionLabels,{correct_lesson_subject:'تصحيح مادة الدرس',late_lesson_attendance:'حضور إداري متأخر',remove_lesson_attendance:'حذف حضور طالب من درس',reopen_student_exam:'فتح امتحان لطالب واحد'});
 Object.assign(actionLabels,{contact_student_admin:'رسالة إدارية لطالب',contact_student_teacher:'رسالة أستاذ لطالب'});
 Object.assign(actionLabels,{one_time_preliminary_22_group_1_to_2:'نقل 13 طالبًا من المجموعة 1 إلى 2'});
-Object.assign(actionLabels,{one_time_schedule_import_2026_09_24:'إدخال جداول المباحثات دفعة واحدة'});
+Object.assign(actionLabels,{one_time_schedule_import_2026_09_24:'إدخال جداول المباحثات دفعة واحدة',toggle_stage_registration_visibility:'حجب/إظهار مرحلة للتسجيل الجديد'});
 let contactQuery='',contactPage=0,contactStudent=null;
 const contactRequestKey=prefix=>prefix+':'+(globalThis.crypto?.randomUUID?.()||`${Date.now()}:${Math.random().toString(36).slice(2)}`);
 const contactStatuses={pending:'بانتظار الإرسال',sending:'قيد الإرسال',sent:'أُرسلت',failed:'تعذّر الإرسال',expired:'انتهت المهلة',archived:'سجل إرسال مؤرشف'};
@@ -54,7 +54,7 @@ async function home(){view='home';currentStage=null;page=0;setNav('home');const 
   const historical=Boolean(currentSeasonId);
   setContent((historical?`<div class="empty" style="border-color:#e2b8b8;background:var(--danger-soft);color:var(--danger);text-align:right;padding:1rem 1.3rem;margin-bottom:1.2rem"><p style="margin:0">تعرض بيانات موسم سابق للاطلاع فقط؛ أزرار الإضافة والتعديل مخفية.</p></div>`:'')+
     head('المراحل الدراسية','اختر المرحلة للاطلاع على طلبتها وموادها ومجموعاتها.',historical?'':button('إضافة مرحلة','new-stage','','primary'))+
-    (stages.length?`<div class="cards">${stages.map(s=>`<button class="stage-card" data-action="stage" data-id="${s.id}"><div><h2>${esc(s.name)}</h2><small>${esc(s.season_name||'لا يوجد موسم نشط')}</small></div><div class="stats"><div><span class="metric">${s.student_count}</span><small>طالب</small></div><div><span class="metric">${s.subject_count}</span><small>مادة</small></div><div><span class="metric">${s.discussion_grouping===false?'—':s.group_count}</span><small>${s.discussion_grouping===false?'دون تقسيم':'مجموعة مباحثة'}</small></div></div><div class="card-footer"><span>${s.is_active?'مرحلة نشطة':'مرحلة مؤرشفة'}</span><span>عرض التفاصيل ←</span></div></button>`).join('')}</div>`:empty('لا توجد بيانات لهذا الموسم','اختر موسمًا آخر أو أضف المرحلة الأولى.')));
+    (stages.length?`<div class="cards">${stages.map(s=>`<div class="stage-card-shell ${s.registration_visible===false?'registration-hidden':''}"><button class="stage-card" data-action="stage" data-id="${s.id}"><div><h2>${esc(s.name)}</h2><small>${esc(s.season_name||'لا يوجد موسم نشط')}</small></div><div class="stats"><div><span class="metric">${s.student_count}</span><small>طالب</small></div><div><span class="metric">${s.subject_count}</span><small>مادة</small></div><div><span class="metric">${s.discussion_grouping===false?'—':s.group_count}</span><small>${s.discussion_grouping===false?'دون تقسيم':'مجموعة مباحثة'}</small></div></div><div class="card-footer"><span>${s.is_active?'مرحلة نشطة':'مرحلة مؤرشفة'}</span><span>${s.registration_visible===false?'🚫 محجوبة عن الطلبة الجدد':'👁️ ظاهرة للطلبة الجدد'}</span><span>عرض التفاصيل ←</span></div></button>${!historical&&s.is_active?button(s.registration_visible===false?'👁️ إظهار للطلبة الجدد':'🚫 حجب عن الطلبة الجدد','stage-registration-toggle',`data-id="${s.id}" data-name="${esc(s.name)}" data-visible="${s.registration_visible!==false}"`,s.registration_visible===false?'':'danger'):''}</div>`).join('')}</div>`:empty('لا توجد بيانات لهذا الموسم','اختر موسمًا آخر أو أضف المرحلة الأولى.')));
 }
 let attendanceStageId='',attendanceFilters={q:'',status:'all'};
 async function attendanceHome(){
@@ -422,6 +422,18 @@ document.addEventListener('click',async event=>{
     if(a==='home')await home();
     else if(a==='lesson-attendance'){page=0;await attendanceHome();}
     else if(a==='stage')await openStage(target.dataset.id);
+    else if(a==='stage-registration-toggle'){
+      const currentlyVisible=target.dataset.visible==='true';
+      const name=target.dataset.name||'هذه المرحلة';
+      const question=currentlyVisible
+        ? `حجب «${name}» عن الطلبة الذين يسجلون لأول مرة؟\n\nالطلبة الموجودون في المرحلة سيستمرون بشكل طبيعي ولن تتأثر دروسهم أو حضورهم.`
+        : `إظهار «${name}» مجددًا ضمن خيارات التسجيل للطلبة الجدد؟`;
+      if(!confirm(question))return;
+      busy=true;
+      await api('/stages/'+target.dataset.id+'/registration-visibility',{visible:!currentlyVisible},'PATCH');
+      await home();
+      notify(currentlyVisible?'حُجبت المرحلة عن التسجيل الجديد فقط. الطلبة الحاليون لم يتأثروا.':'أصبحت المرحلة ظاهرة مجددًا للطلبة الذين يسجلون لأول مرة.');
+    }
     else if(a==='tab'){tab=target.dataset.tab;page=0;await renderStage();}
     else if(a==='prev'||a==='next'){page+=a==='next'?1:-1;await refresh();}
     else if(a==='all-leaves'){page=0;await allLeaves();}
@@ -478,7 +490,7 @@ document.addEventListener('click',async event=>{
       if(!response.ok)throw Error('تعذر تنزيل الملف. أعد فتح اللوحة إذا انتهت جلسة الدخول.');
       const url=URL.createObjectURL(await response.blob());const link=document.createElement('a');link.href=url;link.download=`attendance-${season}-${target.dataset.kind}.md`;link.click();setTimeout(()=>URL.revokeObjectURL(url),10000);notify('تم تجهيز ملف MD.');
     }else if(a==='audit'){
-      view='audit';setNav('audit');$('#breadcrumb').textContent='المعهد / سجل التعديلات';const id=++sequence;const rows=await api('/audit');if(id===sequence)setContent(head('سجل التعديلات','آخر 25 عملية مسجلة')+table(['التاريخ','المسؤول','العملية','السجل','التفاصيل'],rows.map(r=>[stamp(r.created_at),esc(r.actor_id),esc(actionLabels[r.action]||r.action),`${esc(entityLabels[r.entity_type]||r.entity_type)} #${r.entity_id}`,r.action==='correct_lesson_subject'?`${esc(r.before_data?.subject_name)} ← ${esc(r.after_data?.subject_name)}`:r.action==='late_lesson_attendance'?`${esc(r.after_data?.subject_name)} · الطلبة: ${esc(r.after_data?.student_ids?.join('، '))} · ${esc(r.after_data?.note||'')}`:r.action==='reopen_student_exam'?`الطالب #${esc(r.after_data?.student_id)} · ${stamp(r.after_data?.opens_at)} ← ${stamp(r.after_data?.closes_at)} · ${esc(r.after_data?.note||'')}`:'—'])));
+      view='audit';setNav('audit');$('#breadcrumb').textContent='المعهد / سجل التعديلات';const id=++sequence;const rows=await api('/audit');if(id===sequence)setContent(head('سجل التعديلات','آخر 25 عملية مسجلة')+table(['التاريخ','المسؤول','العملية','السجل','التفاصيل'],rows.map(r=>[stamp(r.created_at),esc(r.actor_id),esc(actionLabels[r.action]||r.action),`${esc(entityLabels[r.entity_type]||r.entity_type)} #${r.entity_id}`,r.action==='correct_lesson_subject'?`${esc(r.before_data?.subject_name)} ← ${esc(r.after_data?.subject_name)}`:r.action==='late_lesson_attendance'?`${esc(r.after_data?.subject_name)} · الطلبة: ${esc(r.after_data?.student_ids?.join('، '))} · ${esc(r.after_data?.note||'')}`:r.action==='reopen_student_exam'?`الطالب #${esc(r.after_data?.student_id)} · ${stamp(r.after_data?.opens_at)} ← ${stamp(r.after_data?.closes_at)} · ${esc(r.after_data?.note||'')}`:r.action==='toggle_stage_registration_visibility'?(r.after_data?.registration_visible?'أصبحت ظاهرة للطلبة الجدد':'حُجبت عن الطلبة الجدد فقط'):'—'])));
     }else if(a==='notifications'){
       view='notifications';setNav('notifications');$('#breadcrumb').textContent='المعهد / حالة الإشعارات';const id=++sequence;const rows=await api('/notifications');if(id===sequence)setContent(head('حالة الإشعارات','الإشعارات المجدولة المحفوظة؛ المحاولات المؤقتة يعاد إرسالها تلقائيًا.')+table(['الحالة','العدد'],rows.map(r=>[esc(labels[r.status]||r.status),esc(r.count)])));
      }else if(a==='matrix-add'){
