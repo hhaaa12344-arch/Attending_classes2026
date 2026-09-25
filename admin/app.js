@@ -146,7 +146,15 @@ async function loadStats(){view='stats';currentStage=null;setNav('stats');$('#br
   const maxTotal=Math.max(1,...rows.map(r=>r.total));
   const legend=`<div class="toolbar" style="gap:1.4rem"><span><span class="matrix-check" style="background:#1f6f66;color:#fff;width:14px;height:14px;display:inline-block;border-radius:3px;vertical-align:middle"></span> مستمر</span><span><span style="background:#a5680f;width:14px;height:14px;display:inline-block;border-radius:3px;vertical-align:middle"></span> متلكئ</span><span><span style="background:#a52f2f;width:14px;height:14px;display:inline-block;border-radius:3px;vertical-align:middle"></span> تارك</span></div>`;
   const chart=rows.map(r=>`<div style="margin-bottom:.9rem"><div style="display:flex;justify-content:space-between;font-size:.85rem;margin-bottom:.25rem"><b>${esc(r.stage_name)}</b><span class="subtle">${r.total} طالب</span></div>${statBar([{label:'مستمر',value:r.continuing,color:'#1f6f66'},{label:'متلكئ',value:r.lagging,color:'#a5680f'},{label:'تارك',value:r.dropped,color:'#a52f2f'}],r.total,maxTotal)}</div>`).join('');
-  const table1=table(['المرحلة','الإجمالي','مستمر','متلكئ','تارك'],rows.map(r=>[esc(r.stage_name),esc(r.total),esc(r.continuing),esc(r.lagging),esc(r.dropped)]));
+  const totals=rows.reduce((sum,r)=>({
+    total:sum.total+Number(r.total||0),
+    continuing:sum.continuing+Number(r.continuing||0),
+    lagging:sum.lagging+Number(r.lagging||0),
+    dropped:sum.dropped+Number(r.dropped||0),
+  }),{total:0,continuing:0,lagging:0,dropped:0});
+  const statRows=rows.map(r=>[esc(r.stage_name),esc(r.total),esc(r.continuing),esc(r.lagging),esc(r.dropped)]);
+  statRows.push(['<strong>المجموع الكلي</strong>',`<strong>${esc(totals.total)}</strong>`,`<strong>${esc(totals.continuing)}</strong>`,`<strong>${esc(totals.lagging)}</strong>`,`<strong>${esc(totals.dropped)}</strong>`]);
+  const table1=table(['المرحلة','الإجمالي','مستمر','متلكئ','تارك'],statRows);
   setContent(head('الإحصائيات','مقارنة استمرار الطلبة بين المراحل. «متلكؤ» يعني غيابًا متتاليًا 3 أيام فأكثر دون بلوغ حد التوقف؛ «تارك» يعني موسمًا 10 أيام غياب متتالية أو أرشفة صريحة.')+
     (rows.length?legend+`<div class="table-wrap" style="padding:1.2rem 1.3rem;margin-bottom:1.3rem">${chart}</div>`+table1:empty('لا توجد بيانات بعد')));
 }
