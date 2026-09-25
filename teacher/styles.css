@@ -42,3 +42,34 @@ svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
 /* Exam builder — mobile-first */
 .form-stack{display:grid;gap:13px}.form-actions{display:grid;grid-template-columns:1fr 1fr;gap:9px}.form-hint{margin:0;color:var(--muted);font-size:12px;line-height:1.7}.text-control,.text-area{width:100%;border:1px solid var(--border);background:var(--card);color:var(--text);border-radius:14px;padding:11px 13px;outline:none;font:inherit}.text-control{min-height:48px}.text-area{resize:vertical;min-height:110px;line-height:1.65}.text-control:focus,.text-area:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--soft)}.wide-button{width:100%;margin-bottom:12px}.exam-list{display:grid;gap:10px}.exam-card+.exam-card{margin-top:0}.exam-editor-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0}.exam-editor-actions .primary-button{grid-column:1/-1}.compact-head{margin-top:14px}.question-list{display:grid;gap:9px;margin-bottom:12px}.question-card{display:grid;grid-template-columns:auto 1fr;gap:10px;border:1px solid var(--border);background:var(--card);border-radius:15px;padding:12px}.question-number{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:10px;background:var(--soft);color:var(--accent);font-weight:800}.question-card h4{margin:0;font-size:14px;line-height:1.7}.question-card p{margin:5px 0;color:var(--muted);font-size:12px;line-height:1.6}.question-card small{color:var(--muted);font-size:11px}.exam-summary{margin-bottom:0}
 @media (max-width:380px){.form-actions,.exam-editor-actions{grid-template-columns:1fr}.exam-editor-actions .primary-button{grid-column:auto}}
+
+/* تسلسل السجلات وتحسين العرض على الهاتف */
+html,body{max-width:100%;overflow-x:hidden}
+.app-shell,.main-content,.view,.sheet,.sheet-body,.list-card,.subject-card,.schedule-card,.report-student-card,.report-item{min-width:0}
+.list-card-head>div,.subject-head>div,.schedule-head>div,.numbered-record-body{min-width:0;overflow-wrap:anywhere;word-break:break-word}
+.numbered-record{position:relative}
+.sequence-badge{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-width:30px;height:30px;padding:0 8px;border-radius:10px;background:var(--soft);color:var(--accent);font-weight:800;font-size:12px;line-height:1}
+.numbered-record-body{min-width:0}
+.attendance-row.numbered-record{grid-template-columns:auto minmax(0,1fr) auto}
+.report-student-card.numbered-record{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center}
+.report-item.numbered-record{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:start}
+.contact-student-button.numbered-record{display:flex;align-items:center;gap:10px}
+select,input,textarea,button{max-width:100%}
+
+@media (max-width:480px){
+  .topbar{padding:10px 12px}.topbar h1{font-size:18px}.eyebrow{font-size:10px}
+  .main-content{padding:12px}.welcome-card{align-items:flex-start}.welcome-card h2{font-size:19px}.teacher-mark{width:50px;height:50px;border-radius:15px}
+  .stats-grid{grid-template-columns:1fr 1fr;gap:8px}.stat-card{min-height:96px;padding:10px;column-gap:8px}.stat-card strong{font-size:21px}
+  .list-card,.subject-card,.schedule-card,.report-student-card,.report-item{padding:11px;border-radius:15px}
+  .list-card-head,.subject-head,.schedule-head{gap:8px;flex-wrap:wrap}.badge{white-space:normal;text-align:center}
+  .card-actions,.form-actions{display:grid;grid-template-columns:1fr;width:100%}.card-actions>button,.form-actions>button,.card-actions>a{width:100%}
+  .tool-grid{grid-template-columns:1fr 1fr}.tool-card{min-height:112px;padding:11px}
+  .sheet{width:100%;max-height:92%;padding:7px 12px calc(16px + env(safe-area-inset-bottom));border-radius:20px 20px 0 0}
+  .sheet-head h2{font-size:17px}.detail-grid{grid-template-columns:1fr 1fr}
+  .score-row{grid-template-columns:1fr}.score-save{width:100%}
+  .attendance-row.numbered-record{grid-template-columns:auto minmax(0,1fr)}.attendance-row .attendance-ratio{grid-column:2;justify-self:start}
+  .report-student-card.numbered-record{grid-template-columns:auto minmax(0,1fr)}.report-student-card .report-count{grid-column:2;min-width:0;text-align:right;margin-top:4px}
+  .report-item.numbered-record{grid-template-columns:auto minmax(0,1fr)}
+  .bottom-nav{grid-template-columns:repeat(5,minmax(0,1fr));padding-left:3px;padding-right:3px}.nav-item{min-width:0;padding:4px 1px}.nav-item span:last-child{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+}
+@media (max-width:340px){.main-content{padding:9px}.topbar{padding:9px}.stats-grid{grid-template-columns:1fr}.tool-grid{grid-template-columns:1fr}.detail-grid{grid-template-columns:1fr}.bottom-nav .nav-item{font-size:8px}.sequence-badge{min-width:27px;height:27px;padding:0 6px}}

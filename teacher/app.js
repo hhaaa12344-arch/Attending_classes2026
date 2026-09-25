@@ -175,7 +175,7 @@
       sheetBody.innerHTML=`<label class="field-label">المادة<select id="contactSubject" class="select-control">${subjects.map(s=>`<option value="${n(s.subject_id)}" ${n(s.subject_id)===subjectId?'selected':''}>${esc(s.subject_name)} — ${esc(s.stage_name)}</option>`).join('')}</select></label>
         <form id="contactSearch"><label class="field-label">اسم الطالب<input name="q" class="select-control" maxlength="150" value="${esc(q)}" placeholder="الاسم أو جزء منه"></label><button class="primary-button" type="submit">بحث</button></form>
         <p class="form-hint">${result.total} طالب · الصفحة ${page+1}</p>
-        ${result.rows.length?result.rows.map(st=>`<button class="list-card contact-student-button" type="button" data-contact-student="${n(st.id)}" data-name="${esc(st.full_name)}" data-telegram="${esc(st.telegram_id||'')}">${esc(st.full_name)}</button>`).join(''):empty('لا يوجد طالب مطابق في هذه المادة.')}
+        ${result.rows.length?result.rows.map((st,i)=>`<button class="list-card contact-student-button numbered-record" type="button" data-contact-student="${n(st.id)}" data-name="${esc(st.full_name)}" data-telegram="${esc(st.telegram_id||'')}"><span class="sequence-badge">${n(result.offset)+i+1}</span><span class="numbered-record-body">${esc(st.full_name)}</span></button>`).join(''):empty('لا يوجد طالب مطابق في هذه المادة.')}
         <div class="card-actions">${page>0?'<button type="button" data-contact-page="'+(page-1)+'">السابق</button>':''}${(page+1)*20<result.total?'<button type="button" data-contact-page="'+(page+1)+'">التالي</button>':''}</div>`;
       $('#contactSubject',sheetBody).addEventListener('change',e=>openContactSearch(n(e.target.value),'',0));
       $('#contactSearch',sheetBody).addEventListener('submit',e=>{e.preventDefault();openContactSearch(n($('#contactSubject',sheetBody).value),new FormData(e.target).get('q').trim(),0);});
@@ -209,10 +209,10 @@
       const rows=await api(`/api/teacher/attendance?subjectId=${n(sub.subject_id)}&seasonId=${n(sub.stage_season_id)}`);
       if(!rows.length){sheetBody.innerHTML=empty('لا يوجد طلبة في نمط المباحثات لهذه المادة.');return;}
       const groups=new Map();for(const row of rows){const key=String(row.group_id||0);if(!groups.has(key))groups.set(key,{title:row.group_title||'بلا مجموعة',rows:[]});groups.get(key).rows.push(row);}
-      const renderStudent=r=>{const eligible=n(r.eligible_sessions),attended=n(r.attended_sessions),incomplete=n(r.incomplete_sessions),ratio=eligible?Math.round(attended/eligible*100):0,cls=ratio>=90?'good':ratio>=70?'warn':'bad';return `<div class="attendance-row"><div><h4>${esc(r.full_name)}</h4><small>${r.mode==='report'?`${n(r.report_count)} تقرير`:`${attended} من ${eligible} مباحثة مكتملة${incomplete?` · ${incomplete} حضور بداية بلا نهاية`:''}`}</small></div>${r.mode==='report'?'':`<span class="attendance-ratio ${cls}">${attended}/${eligible}</span>`}</div>`;};
+      const renderStudent=(r,i)=>{const eligible=n(r.eligible_sessions),attended=n(r.attended_sessions),incomplete=n(r.incomplete_sessions),ratio=eligible?Math.round(attended/eligible*100):0,cls=ratio>=90?'good':ratio>=70?'warn':'bad';return `<div class="attendance-row numbered-record"><span class="sequence-badge">${i+1}</span><div class="numbered-record-body"><h4>${esc(r.full_name)}</h4><small>${r.mode==='report'?`${n(r.report_count)} تقرير`:`${attended} من ${eligible} مباحثة مكتملة${incomplete?` · ${incomplete} حضور بداية بلا نهاية`:''}`}</small></div>${r.mode==='report'?'':`<span class="attendance-ratio ${cls}">${attended}/${eligible}</span>`}</div>`;};
       sheetBody.innerHTML=`<p class="form-hint">المباحثة مكتملة عند تسجيل حضور البداية والنهاية. طلبة التقارير ظاهرون في قسم مستقل لكل مجموعة.</p>`+
-        [...groups.values()].map(group=>`<section class="list-card"><h3>${esc(group.title)}</h3><h4>المباحثات (${group.rows.filter(r=>r.mode!=='report').length})</h4>${group.rows.filter(r=>r.mode!=='report').map(renderStudent).join('')||empty('لا يوجد طلبة مباحثات.')}
-          <h4>التقارير (${group.rows.filter(r=>r.mode==='report').length})</h4>${group.rows.filter(r=>r.mode==='report').map(renderStudent).join('')||empty('لا يوجد طلبة تقارير.')}</section>`).join('');
+        [...groups.values()].map(group=>`<section class="list-card"><h3>${esc(group.title)}</h3><h4>المباحثات (${group.rows.filter(r=>r.mode!=='report').length})</h4>${group.rows.filter(r=>r.mode!=='report').map((r,i)=>renderStudent(r,i)).join('')||empty('لا يوجد طلبة مباحثات.')}
+          <h4>التقارير (${group.rows.filter(r=>r.mode==='report').length})</h4>${group.rows.filter(r=>r.mode==='report').map((r,i)=>renderStudent(r,i)).join('')||empty('لا يوجد طلبة تقارير.')}</section>`).join('');
     }catch(err){sheetBody.innerHTML=empty(err.message);}
   }
 
@@ -358,9 +358,10 @@
     const [subjectId,seasonId]=select.value.split(':').map(Number);root.innerHTML=empty('جاري تحميل الطلبة…');
     try{
       const rows=await api(`/api/teacher/reports/students?subjectId=${subjectId}&seasonId=${seasonId}&onlyUngraded=0`);
-      root.innerHTML=rows.length?rows.map(r=>`
-        <article class="report-student-card ${n(r.pending_report_count)>0?'pending':''}" data-report-student="${n(r.student_id)}" data-subject="${subjectId}" data-season="${seasonId}" data-group="${r.group_id? n(r.group_id):''}">
-          <div><h4>${esc(r.full_name)}</h4><p>${esc(r.group_title||'المرحلة كاملة')} · ${r.report_score==null?'الدرجة النهائية غير معتمدة':`الدرجة ${esc(r.report_score)}`}</p></div>
+      root.innerHTML=rows.length?rows.map((r,i)=>`
+        <article class="report-student-card numbered-record ${n(r.pending_report_count)>0?'pending':''}" data-report-student="${n(r.student_id)}" data-subject="${subjectId}" data-season="${seasonId}" data-group="${r.group_id? n(r.group_id):''}">
+          <span class="sequence-badge">${i+1}</span>
+          <div class="numbered-record-body"><h4>${esc(r.full_name)}</h4><p>${esc(r.group_title||'المرحلة كاملة')} · ${r.report_score==null?'الدرجة النهائية غير معتمدة':`الدرجة ${esc(r.report_score)}`}</p></div>
           <div class="report-count"><strong>${n(r.report_count)} تقرير</strong>${n(r.pending_report_count)>0?`<span class="report-pending">${n(r.pending_report_count)} ينتظر التقييم</span>`:'<span class="report-done">مقيّمة</span>'}</div>
         </article>`).join(''):empty('لا يوجد طلبة تقارير لهذه المادة.');
       $$('[data-report-student]',root).forEach(card=>card.addEventListener('click',()=>openStudentReports(n(card.dataset.reportStudent),subjectId,seasonId,card.dataset.group?Number(card.dataset.group):null,card.querySelector('h4').textContent)));
@@ -374,12 +375,13 @@
       const [rows,summary]=await Promise.all([api(`/api/teacher/reports?${query}`),api(`/api/teacher/reports/summary?${query}`)]);
       if(!rows.length){sheetBody.innerHTML=empty('لا توجد تقارير لهذا الطالب.');return;}
       const total=n(summary.total),graded=n(summary.graded),average=summary.average==null?null:n(summary.average);
-      sheetBody.innerHTML=`<p class="form-hint">قيّم كل تقرير أولًا. بعد اكتمال التقييمات، اعتمد متوسطها ليصبح درجة التقارير المحفوظة للطالب في هذه المادة.</p><div class="detail-grid"><div class="detail-box"><span>التقارير المقيمة</span><strong>${graded}/${total}</strong></div><div class="detail-box"><span>المتوسط</span><strong>${average==null?'—':average+'/15'}</strong></div></div>${total>0&&graded===total?'<button id="applyReportAverage" class="primary-button wide-button" type="button">اعتماد المتوسط كدرجة التقارير</button>':''}`+rows.map(r=>`
-        <article class="report-item ${r.score==null?'pending':'graded'}" data-report-id="${n(r.id)}">
-          <h4>تقرير ${esc(r.group_title_snapshot||'الطالب')} ${r.score==null?'<span class="report-pending">بانتظار التقييم</span>':'<span class="report-done">تم التقييم</span>'}</h4>
+      sheetBody.innerHTML=`<p class="form-hint">قيّم كل تقرير أولًا. بعد اكتمال التقييمات، اعتمد متوسطها ليصبح درجة التقارير المحفوظة للطالب في هذه المادة.</p><div class="detail-grid"><div class="detail-box"><span>التقارير المقيمة</span><strong>${graded}/${total}</strong></div><div class="detail-box"><span>المتوسط</span><strong>${average==null?'—':average+'/15'}</strong></div></div>${total>0&&graded===total?'<button id="applyReportAverage" class="primary-button wide-button" type="button">اعتماد المتوسط كدرجة التقارير</button>':''}`+rows.map((r,i)=>`
+        <article class="report-item numbered-record ${r.score==null?'pending':'graded'}" data-report-id="${n(r.id)}">
+          <span class="sequence-badge">${page*30+i+1}</span>
+          <div class="numbered-record-body"><h4>تقرير ${esc(r.group_title_snapshot||'الطالب')} ${r.score==null?'<span class="report-pending">بانتظار التقييم</span>':'<span class="report-done">تم التقييم</span>'}</h4>
           <p>${r.note?esc(r.note):r.file_kind?`تقرير محفوظ كـ ${esc(r.file_kind)} في البوت.`:'تقرير محفوظ في النظام.'}<br>تاريخ الإرسال: ${esc(dateTime(r.submitted_at))}</p>
           <div class="score-row"><label><span class="field-label">الدرجة من 15</span><input class="score-input" type="number" min="0" max="15" step="0.25" value="${r.score==null?'':esc(r.score)}" inputmode="decimal"></label><button class="primary-button score-save" type="button">حفظ التقييم</button></div>
-          <button class="secondary-button report-contact" type="button">💬 الرد على هذا التقرير</button>
+          <button class="secondary-button report-contact" type="button">💬 الرد على هذا التقرير</button></div>
         </article>`).join('')+`<div class="form-actions">${page>0?'<button id="previousReportsPage" class="secondary-button" type="button">التقارير السابقة</button>':''}${(page+1)*30<n(rows[0].total_count)?'<button id="nextReportsPage" class="secondary-button" type="button">التقارير التالية</button>':''}</div>`;
       $('#previousReportsPage')?.addEventListener('click',()=>openStudentReports(studentId,subjectId,seasonId,groupId,name,page-1));
       $('#nextReportsPage')?.addEventListener('click',()=>openStudentReports(studentId,subjectId,seasonId,groupId,name,page+1));
