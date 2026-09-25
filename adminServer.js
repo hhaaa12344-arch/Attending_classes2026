@@ -18,6 +18,8 @@ async function readJson(req) {
 function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,origin}) {
   const overrides=require('./adminOverrides').createAdminOverrides(db.pool);
   const studentContact=require('./studentContact').createStudentContact(db.pool);
+  const oneTimeCohortMove=require('./oneTimeCohortMove').createOneTimeCohortMove(db.pool);
+  const scheduleBatchImport=require('./scheduleBatchImport').createScheduleBatchImport(db.pool);
   const sessions=createSessions();const authLimits=new Map();let active=0;
   const teacherWeb=require('./teacherWeb').createTeacherWeb({db,studies,scheduler,botToken,origin,readJson});
   const json=(res,code,value)=>{res.writeHead(code,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
@@ -55,7 +57,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
       const actor=sessions.get(token);
       if(!actor||!adminIds.includes(actor.id))throw appError('أعد فتح لوحة الإدارة من البوت.','UNAUTHORIZED',401);
       const route=url.pathname.slice('/api/admin'.length);const q=Object.fromEntries(url.searchParams);
-      let result;
+      let result,m;
       if(req.method==='POST'&&route==='/logout'){sessions.revoke(token);return json(res,200,{ok:true});}
       if(req.method==='GET'){
         if(route==='/stages')result=await adminData.stages(q.seasonId?positiveInt(q.seasonId):null);
@@ -72,6 +74,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(route==='/session-management')result=await adminData.managedItems('sessions',q);
         else if(route==='/lesson-attendance')result=await adminData.lessonAttendance(q);
         else if(route==='/students')result=await adminData.students(q);
+        else if(route==='/one-time-cohort-move')result=await oneTimeCohortMove.status();
         else if(route==='/student-contact')result=await studentContact.search({actorId:actor.id,role:'admin',q:q.q||'',page:q.page||0});
         else if(/^\/student-contact\/\d+$/.test(route))result=await studentContact.history({actorId:actor.id,role:'admin',studentId:positiveInt(route.split('/')[2])});
         else if(/^\/students\/\d+$/.test(route))result=await adminData.student(positiveInt(route.split('/')[2]));
@@ -79,6 +82,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(route==='/reports')result=await adminData.reports(q);
         else if(route==='/sessions')result=await adminData.sessions(positiveInt(q.seasonId));
         else if(route==='/schedule')result=await studies.listStageSeasonSlots(positiveInt(q.seasonId));
+        else if(route==='/schedule-batch-import')result=await scheduleBatchImport.status();
         else if(route==='/lesson-schedule')result=await db.getLessonSchedule(positiveInt(q.stageSeasonId));
         else if(/^\/exams\/\d+$/.test(route)){
           const id=positiveInt(route.split('/')[2]);const exam=await studies.getExamById(id);
@@ -106,6 +110,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(route==='/audit'){const p=pageOptions(q.page||0,25);result=(await db.pool.query('SELECT * FROM admin_audit_log ORDER BY id DESC LIMIT $1 OFFSET $2',[p.size,p.offset])).rows;}
         else if(route==='/notifications')result=(await db.pool.query('SELECT status,COUNT(*) AS count FROM notification_outbox GROUP BY status')).rows;
         else if(route==='/lessons')result=await db.getRecentLessonsForStage(positiveInt(q.stageId),q.limit?positiveInt(q.limit):15);
+        else if((m=/^\/lessons\/(\d+)\/attendance$/.exec(route)))result=await overrides.lessonAttendance(positiveInt(m[1]),q);
         else if(route==='/channel-diagnostics'){
           const [alerts,channels,deep]=await Promise.all([
             db.listUnlinkedChannelAlerts(),db.listChannelsWithStage(),db.getDeepChannelDiagnostics()
@@ -130,8 +135,9 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         }
         else throw appError('الصفحة غير موجودة.','NOT_FOUND',404);
       } else if(req.method==='POST'||req.method==='PATCH') {
-        const body=await readJson(req);let m;
+        const body=await readJson(req);
         if(route==='/student-contact'&&req.method==='POST')result=await studentContact.send({...body,actorId:actor.id,role:'admin'});
+        else if(route==='/one-time-cohort-move'&&req.method==='POST')result=await oneTimeCohortMove.execute(body.studentIds,actor.id);
         else if((m=/^\/students\/(\d+)$/.exec(route))&&req.method==='PATCH')result=await adminData.updateStudent(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/stage-seasons\/(\d+)\/participation-settings$/.exec(route))&&req.method==='PATCH')result=await adminData.saveParticipationSettings(positiveInt(m[1]),body,actor.id);
         else if(route==='/teachers'&&req.method==='POST'){
@@ -188,6 +194,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           result=await studies.addScheduleSlot(positiveInt(body.groupId),{dayOfWeek:body.dayOfWeek,hour:body.hour,minute:body.minute,teacherId:positiveInt(body.teacherId)});
           await audit(actor.id,'create_slot','slot',result.slot.id,null,result.slot);
         }
+        else if(route==='/schedule-batch-import'&&req.method==='POST')result=await scheduleBatchImport.execute(actor.id);
         else if((m=/^\/schedule\/(\d+)\/remove$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]);result={removed:await studies.removeScheduleSlot(id)};
           if(result.removed)await audit(actor.id,'remove_slot','slot',id,null,result);
@@ -215,6 +222,16 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if((m=/^\/questions\/(\d+)\/remove$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]);result={removed:await studies.deleteExamQuestion(id)};
           if(result.removed)await audit(actor.id,'remove_question','question',id,null,result);
+        }
+        else if((m=/^\/exams\/(\d+)\/(update|delete)$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]),before=await studies.getExamById(id);
+          result=m[2]==='update'?await studies.updateExam(id,body):await studies.deleteExam(id);
+          await audit(actor.id,m[2]+'_exam','exam',id,before,result);
+        }
+        else if((m=/^\/questions\/(\d+)\/update$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]),before=await studies.getQuestionById(id);
+          result=await studies.updateExamQuestion(id,body);
+          await audit(actor.id,'update_question','question',id,before,result);
         }
         else if((m=/^\/leaves\/(\d+)\/decision$/.exec(route))&&req.method==='POST'){
           if(typeof body.approve!=='boolean')throw appError('حدد الموافقة أو الرفض.');
@@ -267,6 +284,8 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         }
         else if((m=/^\/lessons\/(\d+)\/subject$/.exec(route))&&req.method==='PATCH')result=await overrides.correctSubject(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/lessons\/(\d+)\/late-attendance$/.exec(route))&&req.method==='POST')result=await overrides.lateAttendance(positiveInt(m[1]),body,actor.id);
+        else if((m=/^\/lessons\/(\d+)\/attendance\/(\d+)\/remove$/.exec(route))&&req.method==='POST')
+          result=await overrides.removeLessonAttendance(positiveInt(m[1]),positiveInt(m[2]),actor.id);
         else if((m=/^\/exams\/(\d+)\/student-window$/.exec(route))&&req.method==='POST')result=await overrides.reopenExam(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/lessons\/(\d+)\/reopen$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]);

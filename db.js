@@ -1378,18 +1378,21 @@ const listSubjectTeachers = (subjectId) =>
 const getSubjectAttendanceForTeacher = (subjectId, stageSeasonId) =>
   pool
     .query(
-      `SELECT st.id AS student_id, st.full_name,
+      `SELECT st.id AS student_id, st.full_name,pm.mode,gm.group_id,
+              discussion_group_label(gm.group_id) AS group_title,
               COUNT(l.id) AS total_lessons,
               -- يُحتسب الحضور المؤشَّر ضمن مهلة الدرس فقط، كما في تقريري الطالب والأدمن
               COUNT(a.id) FILTER (WHERE (a.listened_at <= l.active_until OR a.marking_kind='admin_late')) AS attended_lessons
        FROM enrollments e
        JOIN students st ON st.id=e.student_id
+       LEFT JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=$1 AND pm.stage_season_id=$2
+       LEFT JOIN group_memberships gm ON gm.student_id=st.id AND gm.subject_id=$1 AND gm.stage_season_id=$2
        LEFT JOIN lessons l ON l.subject_id=$1 AND l.stage_season_id=$2
             AND l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
        LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=st.id
        WHERE e.stage_season_id=$2 AND e.status='active'
-       GROUP BY st.id, st.full_name
-       ORDER BY st.full_name`,
+       GROUP BY st.id, st.full_name,pm.mode,gm.group_id
+       ORDER BY gm.group_id,st.full_name`,
       [subjectId, stageSeasonId]
     )
     .then((r) => r.rows);

@@ -74,6 +74,17 @@ async function initIntegritySchema(pool) {
       recipient_count INTEGER NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    CREATE TABLE IF NOT EXISTS approved_group_chats (
+      chat_id BIGINT PRIMARY KEY,
+      title TEXT,
+      requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      approved_at TIMESTAMPTZ,
+      approved_by BIGINT
+    );
+    INSERT INTO approved_group_chats(chat_id,title,approved_at)
+      SELECT DISTINCT telegram_chat_id,title,now() FROM mubahatha_groups
+      WHERE telegram_chat_id IS NOT NULL
+      ON CONFLICT(chat_id) DO NOTHING;
     CREATE TABLE IF NOT EXISTS student_contact_messages (
       id BIGSERIAL PRIMARY KEY,
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -92,6 +103,8 @@ async function initIntegritySchema(pool) {
     CREATE INDEX IF NOT EXISTS idx_outbox_due ON notification_outbox(available_at, priority, id)
       WHERE status IN ('pending','sending');
     ALTER TABLE notification_outbox ADD COLUMN IF NOT EXISTS delivery_mark JSONB;
+    ALTER TABLE notification_outbox ADD COLUMN IF NOT EXISTS telegram_message_id BIGINT;
+    ALTER TABLE notification_outbox ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
     -- Existing historical sessions must NOT be broadcast on migration.
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS start_notifications_queued BOOLEAN NOT NULL DEFAULT true;
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_notifications_queued BOOLEAN NOT NULL DEFAULT true;

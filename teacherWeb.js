@@ -143,6 +143,10 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
         const {subjectId,seasonId}=await requireOwnedSubject(actor,q.subjectId,q.seasonId);
         result=await studies.listStudentReports(studentId,subjectId,seasonId,{page:Number(q.page||0),size:30,groupId:q.groupId?positiveInt(q.groupId):null});
       }
+      else if(route==='/reports/summary'){
+        const {subjectId,seasonId}=await requireOwnedSubject(actor,q.subjectId,q.seasonId);
+        result=await studies.getReportGradingSummary(positiveInt(q.studentId),subjectId,seasonId);
+      }
       else if(route==='/exams'){
         const {subjectId,seasonId}=await requireOwnedSubject(actor,q.subjectId,q.seasonId);
         result=await studies.listExamsForSubject(subjectId,seasonId);
@@ -180,6 +184,14 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
         if(!report)throw appError('التقرير غير موجود أو ليس ضمن موادك.','FORBIDDEN',403);
         result=await studies.setReportItemScore(reportId,validScore(body.score,15),actor.id);
       }
+      else if(route==='/reports/average'){
+        const studentId=positiveInt(body.studentId);
+        const {subjectId,seasonId}=await requireOwnedSubject(actor,body.subjectId,body.seasonId);
+        const enrolled=(await db.pool.query(`SELECT 1 FROM enrollments WHERE student_id=$1 AND stage_season_id=$2 AND status='active'`,
+          [studentId,seasonId])).rowCount;
+        if(!enrolled)throw appError('الطالب غير مسجّل في هذا الموسم.','FORBIDDEN',403);
+        result=await studies.applyReportAverage(studentId,subjectId,seasonId);
+      }
       else if(route==='/exams'){
         const {subjectId,seasonId}=await requireOwnedSubject(actor,body.subjectId,body.seasonId);
         const examNumber=positiveInt(body.examNumber,'رقم الامتحان');
@@ -202,6 +214,17 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
          const exam=await requireOwnedExam(actor,m[1]);
          result=await studies.cancelExam(exam.id,actor.id,body.reason);
        }
+      else if((m=/^\/exams\/(\d+)\/(update|delete)$/.exec(route))){
+        const exam=await requireOwnedExam(actor,m[1]);
+        result=m[2]==='update'?await studies.updateExam(exam.id,body):await studies.deleteExam(exam.id);
+      }
+      else if((m=/^\/questions\/(\d+)\/(update|delete)$/.exec(route))){
+        const questionId=positiveInt(m[1]);
+        const question=await studies.getQuestionById(questionId);
+        if(!question)throw appError('السؤال غير موجود.','NOT_FOUND',404);
+        await requireOwnedExam(actor,question.exam_id);
+        result=m[2]==='update'?await studies.updateExamQuestion(questionId,body):{removed:await studies.deleteExamQuestion(questionId)};
+      }
       else throw appError('العملية غير متاحة في لوحة الأستاذ.','NOT_FOUND',404);
       json(res,200,result??null);return true;
     }
