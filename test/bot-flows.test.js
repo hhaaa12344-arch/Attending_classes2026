@@ -215,10 +215,11 @@ test('bot: teacher attendance matches discussion sessions rather than published 
   assert.ok(!messages.some(m=>m.method==='sendDocument'));
   await send(83000,'',`teacher_att_group:${subject.id}:${ss}:${group.id}`);
   const doc=messages.find(m=>m.method==='sendDocument');
-  const {JSDOM}=require('jsdom'),html=new JSDOM(doc.document.source.toString('utf8')).window.document;
-  assert.equal(html.querySelector('table').dir,'rtl');
-  const cells=[...html.querySelectorAll('tbody tr')].find(tr=>tr.textContent.includes(attendee.full_name)).querySelectorAll('td');
-  assert.deepEqual([...cells].map(td=>td.textContent),[attendee.full_name,'مباحثات','1','2','1','0']);
+  const markdown=doc.document.source.toString('utf8');
+  assert.ok(!/<\/?[a-z][^>]*>/i.test(markdown),'MD must not contain HTML markup');
+  assert.ok(markdown.includes('| التقارير المرسلة | بداية بلا نهاية | الجلسات المؤهلة | الحضور المكتمل | نمط المشاركة | الطالب |'));
+  assert.ok(markdown.includes('| ---: | ---: | ---: | ---: | ---: | ---: |'));
+  assert.ok(markdown.includes(`| 0 | 1 | 2 | 1 | مباحثات | ${attendee.full_name} |`));
   assert.ok(!doc.document.source.toString('utf8').includes('إجمالي الدروس'));
   assert.equal(messages.filter(m=>m.method==='sendDocument').length,1);
   app.previewMode.set(42,{role:'teacher',id:teacher.id,name:teacher.full_name});
@@ -246,7 +247,10 @@ test('bot: admin attendance button opens stages while the same student button st
   await send(42,'',`admin_report_stage:${stage.id}`);
   await send(42,'',`admin_report_season:${ss}`);
   assert.ok(messages.some(m=>m.method==='sendDocument'&&m.document.filename.endsWith('.md')));
-  assert.ok(messages.find(m=>m.method==='sendDocument').document.source.toString('utf8').includes('<table dir="rtl">'));
+  const markdown=messages.find(m=>m.method==='sendDocument').document.source.toString('utf8');
+  assert.ok(markdown.startsWith('# '));
+  assert.ok(markdown.includes('| ---: |'));
+  assert.ok(!/<\/?[a-z][^>]*>/i.test(markdown));
   await send(student.telegram_id,'📊 تقرير الحضور');
   assert.ok(messages.some(m=>m.text?.includes(student.full_name)));
   assert.ok(!messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data?.startsWith('admin_report_'))));
@@ -259,9 +263,13 @@ test('bot: an 88-slot admin schedule is sent as one RTL MD file within Telegram 
   try{
     await send(42,'🗓️ جدول المباحثات');
     const docs=messages.filter(m=>m.method==='sendDocument');assert.equal(docs.length,1);
-    const {JSDOM}=require('jsdom'),html=new JSDOM(docs[0].document.source.toString('utf8')).window.document;
-    assert.equal(html.querySelectorAll('tbody tr').length,88);assert.equal(html.querySelector('table').dir,'rtl');
-    assert.equal(html.querySelector('script'),null);assert.ok(html.body.textContent.includes('<script>اسم مادة</script> | اختبار'));
+    const markdown=docs[0].document.source.toString('utf8');
+    const tableLines=markdown.split('\n').filter(line=>line.startsWith('| '));
+    assert.equal(tableLines.length,90); // header, separator, and all 88 appointments
+    assert.equal(tableLines[0],'| الساعة | اليوم | الأستاذ | المجموعة | المادة | المرحلة |');
+    assert.ok(tableLines.slice(2).every(line=>line.split(/(?<!\\)\|/).length===8),'escaped pipes must not create extra columns');
+    assert.ok(!/<\/?[a-z][^>]*>/i.test(markdown));
+    assert.ok(markdown.includes('&lt;script&gt;اسم مادة&lt;/script&gt; \\| اختبار'));
     assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='ts_add')));
   }finally{studies.listAllSlots=original;}
 });
