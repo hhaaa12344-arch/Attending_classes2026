@@ -816,40 +816,39 @@ function denyUnauthorized(ctx) {
   return ctx.callbackQuery ? ctx.answerCbQuery('غير مصرح.') : ctx.reply('هذا الخيار متاح للأدمن فقط.');
 }
 
-// يبني جدول Markdown من ترويسة وصفوف. اخترنا md بدل csv لأنه يُقرأ مباشرة
-// على الهاتف وفي تليجرام دون برنامج جداول، ويحافظ على اتجاه النص العربي.
+// جدول Markdown نصي؛ طريقة عرضه واتجاه الصفحة يعتمدان على القارئ.
 function mdCell(value) {
   return String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/\|/g, '\\|')   // الشرطة العمودية تكسر أعمدة الجدول
     .replace(/\r?\n/g, ' ');
 }
 
-function buildMarkdownTable(header, rows) {
+function buildMarkdownTable(header, rows, { alignRight = false } = {}) {
   const head = `| ${header.map(mdCell).join(' | ')} |`;
-  const sep = `| ${header.map(() => '---').join(' | ')} |`;
+  const sep = `| ${header.map(() => alignRight ? '---:' : '---').join(' | ')} |`;
   const body = rows.map((r) => `| ${r.map(mdCell).join(' | ')} |`);
   return [head, sep, ...body].join('\n');
 }
 
 // يُنشئ مستند Markdown بعنوان وسطر تاريخ ثم جدول
-function buildMarkdownDoc(title, header, rows, note = '') {
+function buildMarkdownDoc(title, header, rows, note = '', options = {}) {
   const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
   return (
     `# ${title}\n\n` +
     `_تاريخ التوليد: ${stamp}_\n\n` +
     (note ? `${note}\n\n` : '') +
-    buildMarkdownTable(header, rows) +
+    buildMarkdownTable(header, rows, options) +
     '\n'
   );
 }
 
 function buildRtlMarkdownDoc(title, header, rows, note = '') {
-  const html = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  return `<div dir="rtl" lang="ar">\n<h1>${html(title)}</h1>\n` +
-    (note ? `<p>${html(note)}</p>\n` : '') +
-    `<table dir="rtl">\n<thead><tr>${header.map(h=>`<th align="right">${html(h)}</th>`).join('')}</tr></thead>\n<tbody>\n` +
-    rows.map(row=>`<tr>${row.map(cell=>`<td align="right">${html(cell)}</td>`).join('')}</tr>`).join('\n') +
-    '\n</tbody>\n</table>\n</div>\n';
+  // Markdown لا يفرض اتجاه الصفحة؛ نعكس نسخ الأعمدة ليكون الحقل الأول يمينًا
+  // في قارئ الجداول المعتاد، ونستخدم محاذاة Markdown دون وسوم HTML.
+  return buildMarkdownDoc(mdCell(title), [...header].reverse(),
+    rows.map(row => [...row].reverse()), mdCell(note), { alignRight: true });
 }
 
 function sendMarkdownDoc(ctx, filename, content, extra = {}) {
