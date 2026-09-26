@@ -4655,7 +4655,8 @@ bot.hears('🗓️ جدولي', async (ctx) => {
     byDay.get(s.day_of_week).push(s);
   }
   const lines = [];
-  for (let d = 0; d < 7; d += 1) {
+  // ترتيب العرض الدراسي يبدأ من السبت، مع إبقاء day_of_week بصيغة PostgreSQL/JS (الأحد=0، السبت=6).
+  for (const d of [6, 0, 1, 2, 3, 4, 5]) {
     if (!byDay.has(d)) continue;
     lines.push(`\n📅 ${studies.DAY_NAMES[d]}`);
     for (const s of byDay.get(d)) {

@@ -1182,7 +1182,7 @@ const listStudentSlots = (studentId) =>
        JOIN subjects sub ON sub.id=sl.subject_id
        WHERE m.student_id=$1 AND participation_enabled(m.subject_id,m.stage_season_id)
          AND EXISTS(SELECT 1 FROM enrollments e JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true WHERE e.student_id=m.student_id AND e.stage_season_id=m.stage_season_id AND e.status='active')
-       ORDER BY sl.day_of_week, sl.hour, sl.minute`,
+       ORDER BY CASE WHEN sl.day_of_week=6 THEN 0 ELSE sl.day_of_week+1 END, sl.hour, sl.minute`,
       [studentId]
     )
     .then((r) => r.rows);
@@ -1628,7 +1628,7 @@ const removeScheduleSlot = (slotId) =>
 
 const listGroupSlots = (groupId) =>
   pool
-    .query('SELECT * FROM schedule_slots WHERE group_id=$1 AND is_active=true ORDER BY day_of_week, hour, minute', [groupId])
+    .query('SELECT * FROM schedule_slots WHERE group_id=$1 AND is_active=true ORDER BY CASE WHEN day_of_week=6 THEN 0 ELSE day_of_week+1 END, hour, minute', [groupId])
     .then((r) => r.rows);
 
 const listTeacherSlots = (teacherId) =>
@@ -1642,7 +1642,7 @@ const listTeacherSlots = (teacherId) =>
        JOIN stage_seasons ss ON ss.id=s.stage_season_id AND ss.is_active=true
        JOIN stages sg ON sg.id=ss.stage_id
        WHERE s.teacher_id=$1 AND s.is_active=true AND participation_enabled(s.subject_id,s.stage_season_id)
-       ORDER BY s.day_of_week, s.hour, s.minute`,
+       ORDER BY CASE WHEN s.day_of_week=6 THEN 0 ELSE s.day_of_week+1 END, s.hour, s.minute`,
       [teacherId]
     )
     .then((r) => r.rows);
@@ -1661,7 +1661,7 @@ const listAllSlots = () =>
        JOIN stages sg ON sg.id=ss.stage_id
        LEFT JOIN teachers t ON t.id=s.teacher_id
        WHERE s.is_active=true
-       ORDER BY sg.sort_order NULLS LAST, s.day_of_week, s.hour, s.minute`
+       ORDER BY sg.sort_order NULLS LAST, CASE WHEN s.day_of_week=6 THEN 0 ELSE s.day_of_week+1 END, s.hour, s.minute`
     )
     .then((r) => r.rows);
 
@@ -1675,7 +1675,7 @@ const listStageSeasonSlots = (stageSeasonId) =>
        JOIN mubahatha_groups g ON g.id=s.group_id
        LEFT JOIN teachers t ON t.id=s.teacher_id
        WHERE s.stage_season_id=$1 AND s.is_active=true AND participation_enabled(s.subject_id,s.stage_season_id)
-       ORDER BY s.day_of_week, s.hour, s.minute`,
+       ORDER BY CASE WHEN s.day_of_week=6 THEN 0 ELSE s.day_of_week+1 END, s.hour, s.minute`,
       [stageSeasonId]
     )
     .then((r) => r.rows);
