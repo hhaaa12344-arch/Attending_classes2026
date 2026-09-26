@@ -222,7 +222,7 @@ const TEACHER_MENU_BUTTONS = new Set([
   '💬 التواصل مع طالب معين',
   '🔗 روابط المعهد',
   '🚪 الخروج من المعاينة',
-  '📚 موادي', '📊 حضور موادي', '👥 المجموعات',
+  '📚 المواد الدراسية', '📊 حضور المباحثات', '👥 المجموعات',
   '🗓️ جدول المباحثات', '📝 الامتحانات', '🏁 إنهاء الموسم', '✏️ تحرير الدرجات',
   '📄 تقارير الطلبة', '🔗 روابط المجموعات',
   '🖥️ فتح لوحة الأستاذ', TEACHER_MENU_SPACER,
@@ -387,7 +387,7 @@ async function sendOfficialConfirmationPrompt(ctx) {
 
 function teacherMainMenu() {
   return Markup.keyboard([
-    [replyButton('📚 موادي'), replyButton('📊 حضور موادي')],
+    [replyButton('📚 المواد الدراسية'), replyButton('📊 حضور المباحثات')],
     [replyButton('👥 المجموعات'), replyButton('🗓️ جدول المباحثات')],
     [replyButton('📝 الامتحانات'), replyButton('🏁 إنهاء الموسم')],
     [replyButton('✏️ تحرير الدرجات'), replyButton('📄 تقارير الطلبة')],
