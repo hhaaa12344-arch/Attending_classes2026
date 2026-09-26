@@ -7,6 +7,7 @@ const baghdadIso=value=>{const d=new Date(value);return Number.isNaN(d.getTime()
 const labels={pending:'بانتظار القرار',approved:'معتمدة',rejected:'مرفوضة',ended:'منتهية',cancelled:'ملغاة',sent:'أُرسلت',sending:'قيد الإرسال',failed:'تعذّر إرسالها',expired:'انتهت المهلة',draft:'مسودة',published:'منشور'};
 const actionLabels={change_participation_mode:'تغيير متابعة مادة للطالب',participation_settings:'إعدادات المباحثات والتقارير',update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',update_group:'تعديل مجموعة',assign_teacher:'إسناد أستاذ',unassign_teacher:'إلغاء إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',set_lesson_schedule:'إضافة موعد نشر في جدول الدروس',remove_lesson_schedule:'إزالة موعد نشر من جدول الدروس',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',exam_cancel:'إلغاء امتحان وإشعار الطلبة',remove_question:'حذف سؤال',create_teacher:'إضافة أستاذ',update_teacher:'تعديل أستاذ',toggle_teacher:'تفعيل/إيقاف أستاذ',regenerate_code:'توليد كود ربط',reopen_lesson:'إعادة فتح درس',mark_all_present:'تحضير جميع الطلبة',cancel_lesson:'إلغاء تفعيل درس',unlink_channel:'فكّ ربط قناة',reopen_session:'إعادة فتح مباحثة','mark-all_session':'تحضير طلبة مباحثة',cancel_session:'حذف مباحثة'};
 const entityLabels={student:'طالب',stage:'مرحلة',subject:'مادة',group:'مجموعة',leave:'إجازة',report:'تقرير',session:'مباحثة',slot:'موعد',exam:'امتحان',question:'سؤال',teacher:'أستاذ',assignment:'إسناد',lesson_schedule:'جدول الدروس',lesson:'درس',channel:'قناة'};
+actionLabels['retry-notifications_session']='إعادة محاولة إشعار المباحثة';
 const DAY_NAMES=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
 const DAY_ORDER=[6,0,1,2,3,4,5];
 let token='',stages=[],teachers=[],seasons=[],currentSeasonId='',currentStage=null,currentStudent=null,currentExam=null,currentTeacher=null,matrixStageId=null,matrixDay=new Date().getDay(),matrixEligible=[],tab='students',page=0,view='home',sequence=0,dialogSequence=0,busy=false;
@@ -419,9 +420,28 @@ async function sessionManagementContent(stage,ro){
         `<div style="margin-top:.35rem">الحضور الثاني: ${x.end_opened_at?'بدأ '+stamp(x.end_opened_at):'يفتح عند إنهاء الأستاذ أو تلقائيًا '+stamp(autoEnd)}</div><div>ويبقى حتى ${stamp(lastMinute)}</div>`,esc(x.complete_count),
       ...(ro?[]:[(canEnd?button('إنهاء وفتح الحضور الثاني','end-session',`data-id="${x.id}"`):'')+
         (x.can_reopen?button('إعادة فتح الحضور 10 دقائق','session-reopen',`data-id="${x.id}"`):`<span class="subtle">${new Date(x.attendance_reopen_until)>new Date()?'الفرصة الإضافية مفتوحة':'إعادة الفتح غير متاحة الآن'}</span>`)+
+        button('حالة إشعارات إعادة الفتح','session-notifications',`data-id="${x.id}"`)+
         button('تحضير طلبة المجموعة','session-markall',`data-id="${x.id}"`)+button('حذف المباحثة','session-cancel',`data-id="${x.id}"`,'danger')])];
     }))+
     managementPager(data,'sessions')+'</section>';
+}
+function sessionNoticeSummary(n){
+  if(!n)return 'يمكنك متابعة الإرسال من حالة إشعارات إعادة الفتح.';
+  const c=n.counts;
+  if(!c.total)return 'لم يُجهّز أي إشعار؛ راجع حالة الإشعارات لمعرفة سبب استبعاد الطلبة.';
+  return `جُهّز ${c.total} إشعارًا؛ أُرسل ${c.sent}، بانتظار الإرسال ${c.pending+c.sending}، تعذّر ${c.failed}، وانتهت مهلة ${c.expired}.`;
+}
+async function showSessionNotifications(id){
+  const n=await api('/sessions/'+id+'/notifications'),c=n.counts;
+  const reasons={eligible:'مؤهل لتلقي الإشعار',inactive:'حساب الطالب غير نشط',not_enrolled:'غير مسجل في الموسم الحالي',not_mubahatha:'المادة بنظام التقارير أو لم يُحدد اختيارها',joined_group_later:'نُقل إلى المجموعة بعد موعد المباحثة الأصلي',joined_mode_later:'بدأ نظام المباحثات بعد الموعد الأصلي أو تاريخه غير مسجل'};
+  const errors={'403':'تليجرام رفض الإرسال: قد يكون البوت محظورًا لدى الطالب أو بلا صلاحية للإرسال.','400':'تليجرام رفض الطلب أو المحادثة غير متاحة.','429':'حد الإرسال في تليجرام؛ تُعاد المحاولة تلقائيًا.'};
+  dialog('إشعارات إعادة فتح المباحثة',`<p>${esc(sessionNoticeSummary(n))}</p><p>الإشعار يصل إلى محادثة الطالب الخاصة مع البوت. «أُرسل» يعني أن تليجرام قبل الرسالة، وليس أن الطالب قرأها.</p><p>نهاية الفرصة: ${stamp(n.until)} — ${n.windowOpen?'مفتوحة':'مغلقة'}</p>`+
+    table(['حالة الإرسال','العدد'],[['أُرسلت',c.sent],['بانتظار الإرسال',c.pending],['قيد الإرسال',c.sending],['تعذّر الإرسال',c.failed],['انتهت المهلة',c.expired]].map(x=>x.map(esc)))+
+    '<h3>أهلية الطلبة الحاليين في المجموعة</h3>'+table(['الحالة','العدد'],n.audience.map(x=>[esc(reasons[x.reason]||x.reason),esc(x.count)]))+
+    (!n.audience.length?'<p>لا يوجد طلبة في هذه المجموعة.</p>':'')+
+    (n.errors.length?table(['سبب تعذّر الإرسال','العدد'],n.errors.map(x=>[esc(errors[x.code]||('خطأ الإرسال: '+x.code)),esc(x.count)])):'')+
+    '<div class="form-actions">'+button('تحديث الحالة','session-notifications',`data-id="${id}"`)+
+    (n.windowOpen?button('إعادة محاولة إرسال الإشعارات','session-retry-notifications',`data-id="${id}"`):'')+'</div>');
 }
 async function loadChannels(){
   view='channels';currentStage=null;setNav('channels');$('#breadcrumb').textContent='المعهد / القنوات';const n=++sequence;
@@ -552,13 +572,19 @@ document.addEventListener('click',async event=>{
       if(target.dataset.kind==='lessons'){mgtPage=Number(target.dataset.page);await loadLessonManagement();}
       else{sessionPage=Number(target.dataset.page);await renderStage();}
     }
+    else if(a==='session-notifications')await showSessionNotifications(target.dataset.id);
+    else if(a==='session-retry-notifications'){
+      if(!await confirmAction('إعادة محاولة إرسال الإشعارات غير المرسلة للطلبة المؤهلين؟ تبقى نهاية الفرصة كما هي ولا تتكرر الرسائل المرسلة.'))return;
+      busy=true;const r=await api('/sessions/'+target.dataset.id+'/retry-notifications',{},'POST');
+      await showSessionNotifications(target.dataset.id);notify(sessionNoticeSummary(r.notifications),!r.notifications.counts.total);
+    }
     else if(['session-reopen','session-markall','session-cancel'].includes(a)){
       const action=a==='session-markall'?'mark-all':a.slice('session-'.length);
       const messages={reopen:'إعادة فتح حضور بداية ونهاية هذه المباحثة لمدة 10 دقائق من الآن؟ يبقى موعد المباحثة والحضور السابق محفوظين.',
         'mark-all':'تسجيل البداية والنهاية لطلبة المجموعة النشطين المؤهلين لهذه المباحثة؟',cancel:'حذف المباحثة نهائيًا مع حضورها؟ لن يعيد الجدول إنشاءها تلقائيًا لهذا الموعد. لا يمكن التراجع.'};
       if(!await confirmAction(messages[action]))return;
       busy=true;const r=await api('/sessions/'+target.dataset.id+'/'+action,{},'POST');await renderStage();
-      notify(action==='mark-all'?`اكتمل حضور ${r.added} طالبًا؛ أضيف ${r.records} تسجيلًا جديدًا.`:action==='cancel'?'حُذفت المباحثة وحضورها.':`أُعيد فتح حضور البداية والنهاية حتى ${stamp(r.attendance_reopen_until)} (10 دقائق من إعادة الفتح).`);
+      notify(action==='mark-all'?`اكتمل حضور ${r.added} طالبًا؛ أضيف ${r.records} تسجيلًا جديدًا.`:action==='cancel'?'حُذفت المباحثة وحضورها.':`أُعيد فتح حضور البداية والنهاية حتى ${stamp(r.attendance_reopen_until)} (10 دقائق من إعادة الفتح). ${sessionNoticeSummary(r.notifications)}`,action==='reopen'&&r.notifications?.counts.total===0);
     }
     else if(a==='lesson-reopen'){
       if(!await confirmAction(`إعادة فتح درس «${target.dataset.subject}» للوقت المتبقي من 24 ساعة منذ النشر الأصلي، مع حفظ الحضور السابق؟`))return;
