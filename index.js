@@ -363,7 +363,7 @@ function studentMainMenu(student = null) {
     [replyButton('🌴 طلب إجازة'), replyButton(STUDENT_ACTIVITY_BUTTON)],
   ];
   if (!lessonsOnly) {
-    rows.push([replyButton('🗓️ جدولي'), replyButton('📝 الامتحانات الشهرية')]);
+    rows.push([replyButton('🗓️ جدول المباحثات'), replyButton('📝 الامتحانات الشهرية')]);
     rows.push([replyButton('🎯 درجات المباحثات والتقارير'), replyButton('📖 المباحثات والتقارير')]);
     rows.push([replyButton('📄 إرسال تقرير')]);
   }
