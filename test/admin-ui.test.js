@@ -5,7 +5,7 @@ const stage={id:1,name:'المرحلة التمهيدية',is_active:true,stage_
 async function setup({authorized=true}={}){
   const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../admin/index.html'),'utf8'),{url:'https://institute.example/admin/',runScripts:'outside-only'});
   const w=dom.window;w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};w.confirm=()=>true;
-  w.Telegram={WebApp:{ready(){},expand(){},initData:authorized?'signed-test-data':''}};
+  w.Telegram={WebApp:{showConfirm(message,done){done(w.confirm(message));},ready(){},expand(){},initData:authorized?'signed-test-data':''}};
   const requests=[];let slots=[];
   const subjects=[{subject_id:1,stage_season_id:1,subject_name:'الفقه',mode:'report',participation_enabled:true},{subject_id:2,stage_season_id:1,subject_name:'العقائد',mode:'mubahatha',participation_enabled:true}];
   w.fetch=async(url,options={})=>{
@@ -79,12 +79,90 @@ test('admin DOM: each subject has its own confirmation and switch; the other row
     assert.equal(w.document.querySelector(other).textContent,'تحويل إلى تقارير');
     w.confirm=()=>false;click(selector);
     assert.equal(requests.filter(r=>r.url.endsWith('/participation')).length,0);
+    await new Promise(resolve=>setTimeout(resolve,0));
     let confirmation;w.confirm=text=>{confirmation=text;return true;};click(selector);
     await until(()=>w.document.querySelector(selector)?.textContent==='تحويل إلى تقارير');
     assert.match(confirmation,/الفقه/);assert.match(confirmation,/بقية مواده/);
     const writes=requests.filter(r=>r.url.endsWith('/participation'));assert.equal(writes.length,1);
     assert.equal(writes[0].options.method,'PATCH');assert.deepEqual(JSON.parse(writes[0].options.body),{seasonId:1,mode:'mubahatha',expectedMode:'report'});
     assert.equal(w.document.querySelector(other).textContent,'تحويل إلى تقارير');
+  }finally{dom.window.close();}
+});
+
+test('admin save uses a non-blocking Telegram confirmation and repeated save/cancel keeps controls usable',async()=>{
+  const {dom,w,requests,until,click}=await setup();try{
+    await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
+    click('[data-action="student"]');await until(()=>w.document.querySelector('[data-action="student-participation"]'));
+    w.confirm=()=>{throw Error('Blocking browser confirmation must never run');};
+    let decide;w.Telegram.WebApp.showConfirm=(message,done)=>{decide=done;};
+    const selector='[data-action="student-participation"][data-subject="1"]';
+    click(selector);assert.ok(decide);assert.equal(requests.filter(r=>r.url.endsWith('/participation')).length,0);
+    decide(false);await new Promise(r=>setTimeout(r,0));
+    click(selector);decide(true);await until(()=>w.document.querySelector(selector)?.textContent==='تحويل إلى تقارير');
+    click(selector);decide(true);await until(()=>w.document.querySelector(selector)?.textContent==='تحويل إلى مباحثات');
+    assert.equal(requests.filter(r=>r.url.endsWith('/participation')).length,2);
+    click('[data-action="close-dialog"]');assert.equal(w.document.querySelector('#detail').open,false);
+    const select=w.document.querySelector('[name="status"]');select.value='all';
+    w.document.querySelector('#search').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+    await until(()=>requests.some(r=>r.url.includes('status=all')));
+    await until(()=>w.document.querySelector('[name="status"]').value==='all');
+    await new Promise(r=>setTimeout(r,0));
+    click('[data-action="home"]');await until(()=>w.document.querySelector('.stage-card'));
+  }finally{dom.window.close();}
+});
+
+test('admin confirmation falls back inside the page when Telegram cannot show its popup',async()=>{
+  const {dom,w,requests,until,click}=await setup();try{
+    await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
+    click('[data-action="student"]');await until(()=>w.document.querySelector('[data-action="student-participation"]'));
+    w.Telegram.WebApp.showConfirm=()=>{throw Error('Unsupported');};w.confirm=()=>{throw Error('Must not block');};
+    const selector='[data-action="student-participation"][data-subject="1"]';
+    click(selector);await until(()=>w.document.querySelector('[role="alertdialog"]'));
+    w.document.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    await until(()=>!w.document.querySelector('[role="alertdialog"]'));
+    await new Promise(r=>setTimeout(r,0));assert.equal(requests.filter(r=>r.url.endsWith('/participation')).length,0);
+    click(selector);await until(()=>w.document.querySelector('[data-confirm-choice="yes"]'));click('[data-confirm-choice="yes"]');
+    await until(()=>w.document.querySelector(selector)?.textContent==='تحويل إلى تقارير');
+    assert.equal(w.document.querySelector('[role="alertdialog"]'),null);
+    click('[data-action="close-dialog"]');assert.equal(w.document.querySelector('#detail').open,false);
+  }finally{dom.window.close();}
+});
+
+for(const stalled of ['fetch','body'])test(`admin ${stalled} timeout releases save and close controls even when abort is ignored`,async()=>{
+  const {dom,w,requests,until,click}=await setup();try{
+    await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
+    click('[data-action="student"]');await until(()=>w.document.querySelector('#edit-student'));
+    const original=w.fetch;let resolveLate,signal;
+    w.fetch=(url,options={})=>{
+      if(url.endsWith('/students/1')&&options.method==='PATCH'){
+        signal=options.signal;const pending=new Promise(resolve=>{resolveLate=resolve;});
+        return stalled==='fetch'?pending:Promise.resolve({ok:true,json:()=>pending});
+      }return original(url,options);
+    };
+    const schedule=w.setTimeout.bind(w);w.setTimeout=(fn,ms,...args)=>schedule(fn,ms===20000?40:ms,...args);
+    const form=w.document.querySelector('#edit-student');form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+    assert.equal(form.querySelector('button').disabled,true);
+    click('[data-action="close-dialog"]');assert.equal(w.document.querySelector('#detail').open,false,'closing does not wait for the save');
+    await until(()=>w.document.querySelector('#notice').textContent.includes('تأخر رد الخادم'));
+    assert.equal(signal.aborted,true);assert.equal(form.querySelector('button').disabled,false);
+    click('[data-action="home"]');await until(()=>w.document.querySelector('.stage-card'));
+    resolveLate(stalled==='fetch'?{ok:true,json:async()=>({})}:{});await new Promise(r=>setTimeout(r,0));
+    assert.equal(w.document.querySelector('#detail').open,false,'late responses do not reopen the form');
+  }finally{dom.window.close();}
+});
+
+test('admin: a slow successful save cannot reopen a dialog the user has dismissed',async()=>{
+  const {dom,w,until,click}=await setup();try{
+    await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
+    click('[data-action="student"]');await until(()=>w.document.querySelector('[data-action="student-participation"]'));
+    const original=w.fetch;let release;
+    w.fetch=async(url,options)=>{if(url.endsWith('/participation'))await new Promise(r=>{release=r;});return original(url,options);};
+    click('[data-action="student-participation"][data-subject="1"]');await until(()=>release);
+    click('[data-action="close-dialog"]');assert.equal(w.document.querySelector('#detail').open,false);
+    release();await until(()=>w.document.querySelector('#notice').textContent.includes('حُفظ نوع المتابعة'));
+    assert.equal(w.document.querySelector('#detail').open,false);
+    click('[data-action="student"]');await until(()=>w.document.querySelector('#detail').open);
+    assert.equal(w.document.querySelector('[data-subject="1"][data-action="student-participation"]').textContent,'تحويل إلى تقارير');
   }finally{dom.window.close();}
 });
 

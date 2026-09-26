@@ -4,7 +4,7 @@ const {JSDOM}=require('jsdom');
 async function setup(){
   const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../admin/index.html'),'utf8'),{url:'https://test.example/admin/',runScripts:'outside-only'}),w=dom.window;
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};w.confirm=()=>true;
-  w.Telegram={WebApp:{ready(){},expand(){},initData:'signed'}};
+  w.Telegram={WebApp:{showConfirm(message,done){done(w.confirm(message));},ready(){},expand(){},initData:'signed'}};
   const requests=[];let windows=[],contactHistory=[];
   const stage={id:1,name:'المرحلة',stage_season_id:1,season_name:'الموسم',subjects:[{id:1,name:'العقائد'},{id:2,name:'الفقه'}],groups:[],teachers:[]};
   const item={id:71,subject_id:1,subject_name:'العقائد',stage_season_id:1,source_type:'channel_schedule',activated_at:'2026-01-01T12:00:00Z',active_until:'2026-01-02T12:00:00Z'};
