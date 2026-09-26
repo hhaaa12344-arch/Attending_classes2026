@@ -147,7 +147,7 @@
     const root=$('#scheduleList');let rows=state.schedule;
     if(state.scheduleFilter!=='all')rows=rows.filter(r=>String(r.subject_id)===state.scheduleFilter);
     if(!rows.length){root.innerHTML=empty('لا توجد مواعيد مباحثات ضمن هذا الاختيار.');return;}
-    rows=[...rows].sort((a,b)=>n(a.day_of_week)-n(b.day_of_week)||n(a.hour)-n(b.hour)||n(a.minute)-n(b.minute));
+    rows=[...rows].sort((a,b)=>((n(a.day_of_week)+1)%7)-((n(b.day_of_week)+1)%7)||n(a.hour)-n(b.hour)||n(a.minute)-n(b.minute));
     root.innerHTML=rows.map(s=>`
       <article class="schedule-card">
         <div class="time-box">${esc(timeText(s.hour,s.minute))}</div>
