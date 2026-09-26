@@ -179,6 +179,29 @@ async function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_lesson_schedule_stage_season_date
       ON lesson_schedule_entries(stage_season_id, lesson_date);
 
+    -- ملفات الدروس التي وصلت من القناة قبل إدخال جدول ذلك اليوم.
+    -- تُحفظ مؤقتًا ثم تُطابق تلقائيًا مع المواد المجدولة بعد استقرار إدخال الجدول،
+    -- بدل أن يضيع المنشور ويضطر الأدمن إلى التفعيل اليدوي.
+    CREATE TABLE IF NOT EXISTS pending_channel_lesson_posts (
+      id BIGSERIAL PRIMARY KEY,
+      telegram_chat_id BIGINT NOT NULL,
+      source_message_id BIGINT NOT NULL,
+      stage_id INTEGER NOT NULL REFERENCES stages(id) ON DELETE CASCADE,
+      stage_season_id INTEGER NOT NULL REFERENCES stage_seasons(id) ON DELETE CASCADE,
+      lesson_date DATE NOT NULL,
+      source_url TEXT,
+      content_kind TEXT,
+      received_at TIMESTAMP NOT NULL DEFAULT now(),
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','activated','duplicate')),
+      lesson_id INTEGER REFERENCES lessons(id) ON DELETE SET NULL,
+      resolved_subject_id INTEGER REFERENCES subjects(id) ON DELETE SET NULL,
+      resolved_at TIMESTAMP,
+      UNIQUE(telegram_chat_id, source_message_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_channel_lessons_lookup
+      ON pending_channel_lesson_posts(stage_season_id, lesson_date, status, received_at, id);
+
     CREATE TABLE IF NOT EXISTS enrollments (
       id SERIAL PRIMARY KEY,
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -1672,8 +1695,14 @@ const getDeepChannelDiagnostics = async () => {
 
     const outcome = row.last_outcome;
     if (outcome === 'processing_error') problems.push({ severity:'error', code:'last_processing_error', text:'آخر منشور وصل للبوت انتهى بخطأ أثناء المعالجة.' });
-    else if (['hashtag_no_match','schedule_no_match','unlinked','season_inactive'].includes(outcome))
-      problems.push({ severity:'warn', code:'last_post_not_activated', text:'آخر منشور وصل للبوت لكنه لم يفعّل درسًا.' });
+    else if (['hashtag_no_match','schedule_no_match','schedule_pending','unlinked','season_inactive'].includes(outcome))
+      problems.push({
+        severity:'warn',
+        code:'last_post_not_activated',
+        text: outcome === 'schedule_pending'
+          ? 'آخر منشور محفوظ مؤقتًا بانتظار اكتمال جدول اليوم وسيعاد فحصه تلقائيًا.'
+          : 'آخر منشور وصل للبوت لكنه لم يفعّل درسًا.'
+      });
 
     let health = 'ok';
     if (problems.some((p)=>p.severity==='error')) health='error';
@@ -1691,7 +1720,8 @@ const activateLesson = (
   sourceType = 'manual',
   sourceUrl = null,
   sourceChatId = null,
-  sourceMessageId = null
+  sourceMessageId = null,
+  activatedAt = null
 ) =>
   pool
     .query(
@@ -1699,7 +1729,10 @@ const activateLesson = (
          subject_id, stage_season_id, activated_at, active_until, source_type, source_url,
          source_chat_id, source_message_id
        )
-       SELECT sub.id, ss.id, now(), now() + ($2 || ' hours')::interval, $3, $4, $5, $6
+       SELECT sub.id, ss.id,
+              COALESCE($7::timestamp, now()),
+              COALESCE($7::timestamp, now()) + ($2 || ' hours')::interval,
+              $3, $4, $5, $6
        FROM subjects sub
        JOIN stages st ON st.id=sub.stage_id AND st.is_active=true
        JOIN stage_seasons ss ON ss.stage_id=sub.stage_id AND ss.is_active=true
@@ -1708,7 +1741,7 @@ const activateLesson = (
          WHERE source_chat_id IS NOT NULL AND source_message_id IS NOT NULL
        DO UPDATE SET source_url=COALESCE(EXCLUDED.source_url, lessons.source_url)
        RETURNING *`,
-      [subjectId, hours, sourceType, sourceUrl, sourceChatId, sourceMessageId]
+      [subjectId, hours, sourceType, sourceUrl, sourceChatId, sourceMessageId, activatedAt]
     )
     .then((r) => r.rows[0]);
 
@@ -2593,6 +2626,102 @@ const getStudentSeasonReport = (studentId, stageSeasonId = null, timeZone = 'Asi
     .then((r) => r.rows);
 };
 
+// ---------------- منشورات القنوات المعلقة بانتظار الجدول ----------------
+async function queuePendingChannelLessonPost({
+  chatId,
+  messageId,
+  stageId,
+  stageSeasonId,
+  lessonDate,
+  sourceUrl = null,
+  contentKind = null,
+}) {
+  if (!Number.isFinite(Number(chatId)) || !Number.isFinite(Number(messageId))) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return null;
+  return (
+    await pool.query(
+      `INSERT INTO pending_channel_lesson_posts(
+         telegram_chat_id,source_message_id,stage_id,stage_season_id,lesson_date,source_url,content_kind
+       ) VALUES($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT(telegram_chat_id,source_message_id) DO UPDATE SET
+         source_url=COALESCE(EXCLUDED.source_url,pending_channel_lesson_posts.source_url),
+         content_kind=COALESCE(EXCLUDED.content_kind,pending_channel_lesson_posts.content_kind)
+       RETURNING *`,
+      [chatId,messageId,stageId,stageSeasonId,lessonDate,sourceUrl,contentKind]
+    )
+  ).rows[0] || null;
+}
+
+async function getPendingChannelLessonPosts(stageSeasonId, lessonDate) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return [];
+  return (
+    await pool.query(
+      `SELECT p.*,c.title AS channel_title
+       FROM pending_channel_lesson_posts p
+       LEFT JOIN channels c ON c.telegram_chat_id=p.telegram_chat_id
+       WHERE p.stage_season_id=$1 AND p.lesson_date=$2::date AND p.status='pending'
+       ORDER BY p.received_at,p.source_message_id,p.id`,
+      [stageSeasonId,lessonDate]
+    )
+  ).rows;
+}
+
+async function getPendingChannelLessonStageSeasonsForDate(lessonDate) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return [];
+  return (
+    await pool.query(
+      `SELECT DISTINCT p.stage_season_id
+       FROM pending_channel_lesson_posts p
+       JOIN stage_seasons ss ON ss.id=p.stage_season_id AND ss.is_active=true
+       JOIN stages st ON st.id=ss.stage_id AND st.is_active=true
+       WHERE p.lesson_date=$1::date AND p.status='pending'
+       ORDER BY p.stage_season_id`,
+      [lessonDate]
+    )
+  ).rows.map((row)=>Number(row.stage_season_id));
+}
+
+async function getLessonScheduleRecoveryState(stageSeasonId, lessonDate) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) {
+    return { scheduled_count:0, latest_schedule_change:null };
+  }
+  const row = (
+    await pool.query(
+      `SELECT COUNT(*)::int AS scheduled_count,MAX(created_at) AS latest_schedule_change
+       FROM lesson_schedule_entries
+       WHERE stage_season_id=$1 AND lesson_date=$2::date`,
+      [stageSeasonId,lessonDate]
+    )
+  ).rows[0];
+  return row || { scheduled_count:0, latest_schedule_change:null };
+}
+
+async function resolvePendingChannelLessonPost(id, lessonId, subjectId, status='activated') {
+  if (!['activated','duplicate'].includes(status)) throw new Error('حالة معالجة المنشور المعلق غير صالحة.');
+  return (
+    await pool.query(
+      `UPDATE pending_channel_lesson_posts
+       SET status=$4,lesson_id=$2,resolved_subject_id=$3,resolved_at=now()
+       WHERE id=$1 AND status='pending'
+       RETURNING *`,
+      [id,lessonId,subjectId,status]
+    )
+  ).rows[0] || null;
+}
+
+async function resolvePendingChannelLessonPostBySource(chatId, messageId, lessonId, subjectId, status='activated') {
+  if (!['activated','duplicate'].includes(status)) throw new Error('حالة معالجة المنشور المعلق غير صالحة.');
+  return (
+    await pool.query(
+      `UPDATE pending_channel_lesson_posts
+       SET status=$5,lesson_id=$3,resolved_subject_id=$4,resolved_at=now()
+       WHERE telegram_chat_id=$1 AND source_message_id=$2 AND status='pending'
+       RETURNING *`,
+      [chatId,messageId,lessonId,subjectId,status]
+    )
+  ).rows[0] || null;
+}
+
 // ---------------- جدول الدروس الدراسي ----------------
 function addMonthsIso(dateIso, months) {
   const d = new Date(`${dateIso}T00:00:00Z`);
@@ -2742,6 +2871,12 @@ module.exports = {
   getLessonSchedule,
   getScheduledSubjectsForDate,
   getPendingScheduledSubjectsForDate,
+  queuePendingChannelLessonPost,
+  getPendingChannelLessonPosts,
+  getPendingChannelLessonStageSeasonsForDate,
+  getLessonScheduleRecoveryState,
+  resolvePendingChannelLessonPost,
+  resolvePendingChannelLessonPostBySource,
   setLessonScheduleEntry,
   listStudentSeasons,
   startSeasonForStages,

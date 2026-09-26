@@ -15,7 +15,6 @@ const {
   extractHashtags,
   formatSeasonLabel,
   hasLessonContent,
-  looksLikeLessonMedia,
   normalizeHashtag,
   telegramMessageLink,
 } = require('./utils');
@@ -1239,13 +1238,8 @@ async function deliverReportToTeachers(student, subjectId, subjectName, payload)
     await new Promise((r) => setTimeout(r, 40));
   }
 
-  // إن لم يكن للمادة أستاذ مرتبط بحساب، يُبلَّغ الأدمن حتى لا يضيع التقرير
-  if (recipients.length === 0) {
-    await notifyAdmins(
-      `⚠️ وصل تقرير من «${student.full_name}» في مادة «${subjectName}»، ` +
-        'لكن لا يوجد أستاذ مرتبط بحساب تليجرام لهذه المادة. التقرير محفوظ في النظام.'
-    );
-  }
+  // لا نرسل للأدمن إشعارًا عند وصول التقرير؛ التقرير محفوظ ويمكن متابعته من اللوحة التفاعلية.
+  // إذا لم يكن للمادة أستاذ مرتبط بحساب، يبقى التقرير محفوظًا بانتظار الإسناد/التقييم.
   return { delivered, total: recipients.length };
 }
 
@@ -5994,7 +5988,7 @@ bot.action(/admin_unlink_channel_confirm:(\d+)/, async (ctx) => {
 });
 
 // ---------------------------------------------------------------------------
-// تنبيه فوري (مع تهدئة) عندما يصل منشور درس من قناة غير مفعّلة، بدل الصمت التام
+// تسجيل منشور درس من قناة غير مفعّلة في التشخيص فقط، من دون تنبيه تليجرام للأدمن
 // ---------------------------------------------------------------------------
 async function reportUnlinkedChannelPost(message, chatId) {
   try {
@@ -6004,22 +5998,12 @@ async function reportUnlinkedChannelPost(message, chatId) {
     const reason = !status
       ? 'never_linked'
       : status.season_is_active
-      ? 'unknown' // نظريًا لا يحدث: getChannelByChatId يوافق نفس شرط الموسم النشط
+      ? 'unknown'
       : 'season_inactive';
-    const shouldNotify = await db.recordUnlinkedChannelPost(chatId, title, username, reason);
-    if (!shouldNotify) return;
-
-    const idLine = `\nمعرّف القناة: ${chatId}${username ? ` (${username})` : ''}`;
-    const text =
-      reason === 'season_inactive'
-        ? `⚠️ وصل منشور درس من قناة «${title}» المرتبطة بمرحلة «${status.stage_name}»، لكن موسم هذه المرحلة لم يعد نشطًا (انتهى أو أُوقف الربط).\n` +
-          'لن يُفعَّل أي درس ولن يصل أي إشعار للطلبة حتى تُربط قناة هذا الموسم من «🔗 ربط قناة بمرحلة».' + idLine
-        : `⚠️ وصل منشور درس من قناة «${title}» غير مرتبطة بأي مرحلة إطلاقًا.\n` +
-          'لن يُفعَّل أي درس ولن يصل أي إشعار للطلبة حتى تربطها من «🔗 ربط قناة بمرحلة».' + idLine +
-          '\n\nإذا كانت هذه القناة قد رُبطت سابقًا ثم فُكّ ربطها، فهذا هو سبب توقف الدروس.';
-    await notifyAdmins(text);
+    // يُحفظ التشخيص في قاعدة البيانات واللوحة التفاعلية فقط، من دون إغراق الأدمن برسائل تليجرام.
+    await db.recordUnlinkedChannelPost(chatId, title, username, reason);
   } catch (err) {
-    console.error('تعذر تسجيل/تنبيه قناة غير مرتبطة:', err.message);
+    console.error('تعذر تسجيل قناة غير مرتبطة:', err.message);
   }
 }
 
@@ -6050,6 +6034,161 @@ function channelPostContentKind(message, standaloneHashtag = false) {
   if (extractFirstUrl(message)) return 'link';
   if (message.text || message.caption) return 'text';
   return 'other';
+}
+
+// تفعيل درس قناة مع إرسال إشعار «دروس اليوم» للطلبة فقط.
+// إشعارات الأدمن الخاصة بالتفعيل/الفشل ألغيت؛ التفاصيل تبقى متاحة في اللوحة التفاعلية.
+async function activateChannelLesson({
+  channel,
+  subject,
+  sourceType,
+  sourceUrl,
+  chatId,
+  messageId,
+  notificationDate,
+  activatedAt = null,
+  activityMessageId = messageId,
+}) {
+  const activated = await db.activateLesson(
+    subject.id,
+    LESSON_ACTIVE_HOURS,
+    sourceType,
+    sourceUrl,
+    chatId,
+    messageId,
+    activatedAt
+  );
+  if (!activated) throw new Error('المرحلة مؤرشفة أو لا يوجد لها موسم نشط.');
+
+  const lesson = await db.getLessonById(activated.id);
+  await db.resolvePendingChannelLessonPostBySource(
+    chatId,
+    messageId,
+    lesson.id,
+    subject.id,
+    'activated'
+  );
+
+  await db.setChannelPostActivityOutcome(
+    chatId,
+    activityMessageId,
+    sourceType === 'channel_schedule_recovered' ? 'activated_after_schedule' : 'activated',
+    sourceType === 'channel_schedule_recovered'
+      ? `فُعّل «${subject.name}» تلقائيًا بعد إدخال جدول اليوم — الدرس رقم ${Number(lesson.lesson_number)}.`
+      : `فُعّل «${subject.name}» — الدرس رقم ${Number(lesson.lesson_number)}.`,
+    { stageId: channel.stage_id, stageSeasonId: channel.stage_season_id, lessonId: lesson.id }
+  );
+
+  await notifyReturningFromLeave(channel.stage_id);
+  const hasChannelLink = Boolean(channelEntryUrl(sourceUrl));
+  const delivery = await sendToStageStudents(
+    channel.stage_id,
+    dailyLessonNotificationText(hasChannelLink),
+    dailyLessonNotificationKeyboard(lesson),
+    {
+      skipOnLeave: true,
+      dailyLessonNotificationDate: notificationDate,
+      dailyLessonExpiresAt: lesson.active_until,
+    }
+  );
+  return { lesson, delivery };
+}
+
+let pendingLessonRecoveryRunning = false;
+
+// إذا وصلت ملفات الدرس قبل أن يضيف الأدمن جدول اليوم، نحفظها ثم نعيد مطابقتها لاحقًا.
+// ننتظر قليلًا بعد آخر تعديل للجدول كي لا نطابق أول ملف مع مادة خاطئة أثناء إدخال عدة مواد متتابعة.
+async function recoverPendingChannelLessonsForDate(lessonDate) {
+  if (pendingLessonRecoveryRunning) return { recovered: 0 };
+  pendingLessonRecoveryRunning = true;
+  let recovered = 0;
+  try {
+    const stageSeasonIds = await db.getPendingChannelLessonStageSeasonsForDate(lessonDate);
+    for (const stageSeasonId of stageSeasonIds) {
+      let posts = await db.getPendingChannelLessonPosts(stageSeasonId, lessonDate);
+      if (!posts.length) continue;
+
+      // نظف أي منشور أصبح له درس بالفعل (مثلاً بعد تعديل المنشور أو تفعيل آخر متزامن).
+      for (const post of posts) {
+        const existing = await db.getLessonBySource(post.telegram_chat_id, post.source_message_id);
+        if (!existing) continue;
+        const existingLesson = await db.getLessonById(existing.id);
+        await db.resolvePendingChannelLessonPost(
+          post.id,
+          existing.id,
+          existingLesson?.subject_id || existing.subject_id,
+          'duplicate'
+        );
+      }
+
+      posts = await db.getPendingChannelLessonPosts(stageSeasonId, lessonDate);
+      if (!posts.length) continue;
+
+      const scheduled = await db.getPendingScheduledSubjectsForDate(stageSeasonId, lessonDate);
+      if (!scheduled.length) continue;
+
+      const state = await db.getLessonScheduleRecoveryState(stageSeasonId, lessonDate);
+      const latestChangeMs = state.latest_schedule_change
+        ? new Date(state.latest_schedule_change).getTime()
+        : 0;
+      const scheduleStable = latestChangeMs > 0 && Date.now() - latestChangeMs >= 20 * 1000;
+      if (!scheduleStable) continue;
+
+      // إذا ما زال عدد المواد المُدخلة أقل من عدد الملفات، نعطي الأدمن مهلة لإكمال الجدول.
+      // بعد دقيقتين من آخر تعديل نعالج ما أمكن ونترك الباقي معلّقًا بدل أن يضيع.
+      const enoughSubjects = scheduled.length >= posts.length;
+      const longStable = Date.now() - latestChangeMs >= 2 * 60 * 1000;
+      if (!enoughSubjects && !longStable) continue;
+
+      const pairCount = Math.min(posts.length, scheduled.length);
+      for (let i = 0; i < pairCount; i += 1) {
+        const post = posts[i];
+        const subject = scheduled[i];
+        const channel = await db.getChannelByChatId(post.telegram_chat_id);
+        if (!channel || Number(channel.stage_season_id) !== Number(stageSeasonId)) continue;
+
+        // لا نُنشئ درسًا انتهت مهلته أصلًا؛ يبقى المنشور معلّقًا ويمكن للأدمن معالجته يدويًا.
+        const receivedAt = post.received_at ? new Date(post.received_at) : null;
+        if (!receivedAt || Number.isNaN(receivedAt.getTime())) continue;
+        if (Date.now() - receivedAt.getTime() >= LESSON_ACTIVE_HOURS * 60 * 60 * 1000) continue;
+
+        const result = await activateChannelLesson({
+          channel,
+          subject,
+          sourceType: 'channel_schedule_recovered',
+          sourceUrl: post.source_url || null,
+          chatId: Number(post.telegram_chat_id),
+          messageId: Number(post.source_message_id),
+          notificationDate: lessonDate,
+          activatedAt: receivedAt,
+          activityMessageId: Number(post.source_message_id),
+        });
+        await db.resolvePendingChannelLessonPost(
+          post.id,
+          result.lesson.id,
+          subject.id,
+          'activated'
+        );
+        recovered += 1;
+        console.log(
+          `تم استرجاع درس معلق بعد إدخال الجدول: موسم ${stageSeasonId}، مادة ${subject.id}، منشور ${post.source_message_id}`
+        );
+      }
+    }
+    return { recovered };
+  } finally {
+    pendingLessonRecoveryRunning = false;
+  }
+}
+
+async function recoverPendingChannelLessonsToday() {
+  const today = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
+  try {
+    return await recoverPendingChannelLessonsForDate(today);
+  } catch (err) {
+    console.error('تعذر مطابقة الملفات المعلقة مع جدول اليوم:', err.message);
+    return { recovered: 0, error: err.message };
+  }
 }
 
 async function handleChannelLesson(ctx) {
@@ -6117,6 +6256,10 @@ async function handleChannelLesson(ctx) {
     }
 
     const currentDate = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
+    const postLink = telegramMessageLink(message);
+    const externalUrl = extractFirstUrl(message);
+    // وجهة الطالب هي منشور الدرس نفسه داخل قناة مرحلته، حتى إن احتوى المنشور رابطًا خارجيًا.
+    const sourceUrl = postLink || externalUrl;
 
     // الهاشتاغ والجدول الدراسي يعملان داخل مسار اكتشاف واحد للدرس:
     // 1) إذا وُجد هاشتاغ صحيح، فهو تعريف صريح للمادة ويأخذ الأولوية.
@@ -6134,10 +6277,18 @@ async function handleChannelLesson(ctx) {
     }
 
     if (!subject && hashtags.length === 0) {
-      const pendingScheduled = await db.getPendingScheduledSubjectsForDate(
+      // إذا كان لهذه المرحلة ملفات أقدم معلّقة بانتظار الجدول، لا نتجاوزها بمنشور أحدث؛
+      // نحافظ على ترتيب النشر ثم تعالجها عملية الاسترجاع بالتسلسل.
+      const pendingBacklog = await db.getPendingChannelLessonPosts(
         channel.stage_season_id,
         currentDate
       );
+      const pendingScheduled = pendingBacklog.length
+        ? []
+        : await db.getPendingScheduledSubjectsForDate(
+            channel.stage_season_id,
+            currentDate
+          );
       if (pendingScheduled.length > 0) {
         // أولًا نحاول التعرف على اسم المادة إذا كان مذكورًا في عنوان/وصف المنشور
         // حتى لو لم يُستخدم هاشتاغ. وإذا لم يُذكر الاسم، نستخدم ترتيب أعمدة الجدول.
@@ -6163,21 +6314,23 @@ async function handleChannelLesson(ctx) {
           `وصل المنشور، لكن الهاشتاغات (${hashtags.map((tag)=>`#${tag}`).join('، ')}) لا تطابق مواد المرحلة رقم ${channel.stage_id}.`,
           { stageId: activityStageId, stageSeasonId: activityStageSeasonId }
         );
-        await notifyAdmins(
-          `⚠️ لم يُفعّل منشور في قناة «${channel.title || chatId}». الهاشتاغات الموجودة (${hashtags
-            .map((tag) => `#${tag}`)
-            .join('، ')}) لا تطابق مواد المرحلة.`
-        );
-      } else if (looksLikeLessonMedia(message)) {
+      } else if (lessonContent) {
+        // إذا نُشر الملف قبل إدخال الجدول لا نضيّعه: نحفظه بانتظار جدول هذا اليوم.
+        await db.queuePendingChannelLessonPost({
+          chatId,
+          messageId: activityMessageId,
+          stageId: channel.stage_id,
+          stageSeasonId: channel.stage_season_id,
+          lessonDate: currentDate,
+          sourceUrl,
+          contentKind: channelPostContentKind(message, standaloneHashtag),
+        });
         await db.setChannelPostActivityOutcome(
           chatId,
           activityMessageId,
-          'schedule_no_match',
-          `وصل ملف الدرس للبوت، لكن لا توجد مادة مجدولة غير مُفعّلة متبقية في ${currentDate}.`,
+          'schedule_pending',
+          `وصل ملف الدرس قبل توفر مادة مجدولة غير مُفعّلة في ${currentDate}؛ حُفظ وسيُعاد فحصه تلقائيًا بعد إدخال الجدول.`,
           { stageId: activityStageId, stageSeasonId: activityStageSeasonId }
-        );
-        await notifyAdmins(
-          `⚠️ لم يُفعّل منشور في قناة «${channel.title || chatId}» لأنه لا يحتوي هاشتاغًا ولا توجد مادة مجدولة غير مُفعّلة متبقية في ${currentDate}.`
         );
       } else {
         await db.setChannelPostActivityOutcome(
@@ -6195,6 +6348,14 @@ async function handleChannelLesson(ctx) {
     const existing = await db.getLessonBySource(chatId, message.message_id);
     if (existing) {
       activityLessonId = existing.id;
+      const existingLesson = await db.getLessonById(existing.id);
+      await db.resolvePendingChannelLessonPostBySource(
+        chatId,
+        message.message_id,
+        existing.id,
+        existingLesson?.subject_id || existing.subject_id,
+        'duplicate'
+      );
       await db.setChannelPostActivityOutcome(
         chatId,
         activityMessageId,
@@ -6205,49 +6366,17 @@ async function handleChannelLesson(ctx) {
       return;
     }
 
-    const postLink = telegramMessageLink(message);
-    const externalUrl = extractFirstUrl(message);
-    // وجهة الطالب هي منشور الدرس نفسه داخل قناة مرحلته، حتى إن احتوى المنشور رابطًا خارجيًا.
-    const sourceUrl = postLink || externalUrl;
-    const activated = await db.activateLesson(
-      subject.id,
-      LESSON_ACTIVE_HOURS,
-      activationSourceType,
+    const result = await activateChannelLesson({
+      channel,
+      subject,
+      sourceType: activationSourceType,
       sourceUrl,
       chatId,
-      message.message_id
-    );
-    if (!activated) throw new Error('المرحلة مؤرشفة أو لا يوجد لها موسم نشط.');
-    activityLessonId = activated.id;
-    const lesson = await db.getLessonById(activated.id);
-
-    await db.setChannelPostActivityOutcome(
-      chatId,
+      messageId: message.message_id,
+      notificationDate: currentDate,
       activityMessageId,
-      'activated',
-      `فُعّل «${subject.name}» — الدرس رقم ${Number(lesson.lesson_number)}.`,
-      { stageId: activityStageId, stageSeasonId: activityStageSeasonId, lessonId: activityLessonId }
-    );
-
-    // نبّه أولًا من انتهت إجازتهم توًّا (أول درس بعد الإجازة) بضرورة متابعة الدروس الفائتة.
-    await notifyReturningFromLeave(channel.stage_id);
-
-    const notificationDate = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
-    const hasChannelLink = Boolean(channelEntryUrl(sourceUrl));
-    const delivery = await sendToStageStudents(
-      channel.stage_id,
-      dailyLessonNotificationText(hasChannelLink),
-      dailyLessonNotificationKeyboard(lesson),
-      { skipOnLeave: true, dailyLessonNotificationDate: notificationDate, dailyLessonExpiresAt: lesson.active_until }
-    );
-
-    await notifyAdmins(
-      `✅ فُعّل تلقائيًا الدرس رقم ${Number(lesson.lesson_number)} لمادة «${subject.name}» من قناة «${
-        channel.title || chatId
-      }» عبر ${activationSourceType === 'channel_schedule' ? 'جدول الدروس' : standaloneHashtag ? 'رسالة هاشتاغ مستقلة' : 'الهاشتاغ'}. حُفظ تنبيه دروس اليوم للإرسال إلى ${delivery.queued ?? delivery.delivered} طالب` +
-        (delivery.alreadyNotifiedToday ? `، وسبق تنبيه ${delivery.alreadyNotifiedToday} اليوم` : '') +
-        (delivery.skippedOnLeave ? ` (تُخطّي ${delivery.skippedOnLeave} في إجازة).` : '.')
-    );
+    });
+    activityLessonId = result.lesson.id;
   } catch (err) {
     if (activityChatId != null) {
       try {
@@ -6263,7 +6392,7 @@ async function handleChannelLesson(ctx) {
       }
     }
     console.error('خطأ أثناء معالجة منشور القناة:', err);
-    await notifyAdmins(`❌ حدث خطأ أثناء معالجة منشور قناة: ${err.message || 'خطأ غير معروف'}`);
+    // الخطأ مسجل في تشخيص القنوات داخل اللوحة التفاعلية؛ لا نرسله للأدمن على تليجرام.
   }
 }
 
@@ -6358,6 +6487,8 @@ async function main() {
   timers.push(setInterval(checkReminders, 10 * 60 * 1000));
   timers.push(setInterval(checkConsecutiveAbsence, 10 * 60 * 1000));
   timers.push(setInterval(()=>runScheduleTick().catch(err=>console.error('Schedule failed:',err.message)), 30 * 1000));
+  // إعادة فحص الملفات التي وصلت قبل إدخال جدول اليوم.
+  timers.push(setInterval(()=>recoverPendingChannelLessonsToday(), 15 * 1000));
   // تنظيف الذاكرة كل خمس دقائق: حالات إدخال منتهية، وسجلات مجموعات قديمة
   timers.push(setInterval(cleanupMemory, 5 * 60 * 1000));
   const tick=()=>runScheduleTick().catch(err=>console.error('Schedule failed:',err.message));
@@ -6366,6 +6497,7 @@ async function main() {
   tick();
   checkReminders();
   checkConsecutiveAbsence();
+  recoverPendingChannelLessonsToday();
   await launchBotWithRetry();
 }
 
