@@ -139,6 +139,10 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         if(route==='/student-contact'&&req.method==='POST')result=await studentContact.send({...body,actorId:actor.id,role:'admin'});
         else if(route==='/one-time-cohort-move'&&req.method==='POST')result=await oneTimeCohortMove.execute(body.studentIds,actor.id);
         else if((m=/^\/students\/(\d+)$/.exec(route))&&req.method==='PATCH')result=await adminData.updateStudent(positiveInt(m[1]),body,actor.id);
+        else if((m=/^\/students\/(\d+)\/subjects\/(\d+)\/participation$/.exec(route))&&req.method==='PATCH'){
+          if(!Object.prototype.hasOwnProperty.call(body,'expectedMode'))throw appError('أعد تحميل نوع المتابعة الحالي.');
+          result=await studies.changeParticipationMode(positiveInt(m[1]),positiveInt(m[2]),positiveInt(body.seasonId),body.mode,{actorId:actor.id,expectedMode:body.expectedMode});
+        }
         else if((m=/^\/stage-seasons\/(\d+)\/participation-settings$/.exec(route))&&req.method==='PATCH')result=await adminData.saveParticipationSettings(positiveInt(m[1]),body,actor.id);
         else if(route==='/teachers'&&req.method==='POST'){
           if(typeof body.fullName!=='string'||body.fullName.trim().length<3||body.fullName.length>200)throw appError('اسم الأستاذ غير صالح.');

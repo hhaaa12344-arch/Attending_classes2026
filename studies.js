@@ -277,6 +277,46 @@ async function initStudiesSchema() {
     CREATE INDEX IF NOT EXISTS idx_exam_answers_attempt ON exam_answers(attempt_id);
     CREATE INDEX IF NOT EXISTS idx_reports_subject ON student_reports(subject_id, stage_season_id);
   `);
+  // Keep closed participation periods; existing per-subject choices are the fallback.
+  // No backfill changes a student's choice or invents one for undecided students.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS participation_mode_history (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+      stage_season_id INTEGER NOT NULL REFERENCES stage_seasons(id) ON DELETE CASCADE,
+      mode TEXT NOT NULL CHECK(mode IN ('report','mubahatha')),
+      started_at TIMESTAMP NOT NULL,
+      ended_at TIMESTAMP NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_participation_history_lookup
+      ON participation_mode_history(student_id,subject_id,stage_season_id,started_at,ended_at);
+    CREATE OR REPLACE FUNCTION preserve_participation_period() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF OLD.mode IS DISTINCT FROM NEW.mode OR
+        (OLD.mode='mubahatha' AND OLD.joined_mubahatha_at IS DISTINCT FROM NEW.joined_mubahatha_at) THEN
+        INSERT INTO participation_mode_history(student_id,subject_id,stage_season_id,mode,started_at,ended_at)
+        VALUES(OLD.student_id,OLD.subject_id,OLD.stage_season_id,OLD.mode,
+          CASE WHEN OLD.mode='mubahatha' THEN COALESCE(OLD.joined_mubahatha_at,OLD.chosen_at)
+            ELSE COALESCE(OLD.switched_at,OLD.chosen_at) END,
+          CASE WHEN OLD.mode IS DISTINCT FROM NEW.mode THEN COALESCE(NEW.switched_at,now())
+            ELSE COALESCE(NEW.joined_mubahatha_at,now()) END);
+      END IF;
+      RETURN NEW;
+    END $$;
+    DROP TRIGGER IF EXISTS participation_period_changed ON participation_modes;
+    CREATE TRIGGER participation_period_changed BEFORE UPDATE ON participation_modes
+      FOR EACH ROW EXECUTE FUNCTION preserve_participation_period();
+    CREATE OR REPLACE FUNCTION was_in_mubahatha(stid INTEGER,sid INTEGER,ssid INTEGER,at_time TIMESTAMP)
+      RETURNS BOOLEAN LANGUAGE SQL STABLE AS $$
+      SELECT EXISTS(SELECT 1 FROM participation_mode_history h
+        WHERE h.student_id=stid AND h.subject_id=sid AND h.stage_season_id=ssid AND h.mode='mubahatha'
+          AND at_time>=h.started_at AND at_time<h.ended_at)
+      OR EXISTS(SELECT 1 FROM participation_modes pm
+        WHERE pm.student_id=stid AND pm.subject_id=sid AND pm.stage_season_id=ssid AND pm.mode='mubahatha'
+          AND at_time>=COALESCE(pm.joined_mubahatha_at,pm.chosen_at))
+    $$;
+  `);
   await require('./groupAllocation').initGroupAllocation(pool);
   await require('./participationSettings').initParticipationSettings(pool);
 }
@@ -284,18 +324,10 @@ async function initStudiesSchema() {
 // ---------------------------------------------------------------------------
 // أنماط المشاركة
 // ---------------------------------------------------------------------------
-const setParticipationMode = (studentId, subjectId, stageSeasonId, mode) =>
-  pool
-    .query(
-      `INSERT INTO participation_modes(student_id, subject_id, stage_season_id, mode, joined_mubahatha_at)
-       SELECT $1,$2,$3,$4, CASE WHEN $4='mubahatha' THEN now() ELSE NULL END
-       WHERE participation_enabled($2,$3) AND EXISTS(SELECT 1 FROM enrollments e JOIN students st ON st.id=e.student_id
-         JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
-         WHERE e.student_id=$1 AND e.stage_season_id=$3 AND e.status='active' AND st.is_active=true)
-       ON CONFLICT (student_id, subject_id, stage_season_id) DO NOTHING RETURNING *`,
-      [studentId, subjectId, stageSeasonId, mode]
-    )
-    .then((r) => r.rows[0]);
+async function setParticipationMode(studentId,subjectId,stageSeasonId,mode) {
+  try {return await changeParticipationMode(studentId,subjectId,stageSeasonId,mode,{expectedMode:null});}
+  catch(e){if(e.code==='CONFLICT')return undefined;throw e;}
+}
 
 const getParticipationMode = (studentId, subjectId, stageSeasonId) =>
   pool
@@ -307,16 +339,52 @@ const getParticipationMode = (studentId, subjectId, stageSeasonId) =>
 
 // التحويل من التقارير إلى المباحثات: الجلسات السابقة لا تُحسب عليه إطلاقًا،
 // وتقاريره المُسلَّمة تبقى وتُضاف درجتها لاحقًا عند احتساب الدرجة.
-const switchToMubahatha = (studentId, subjectId, stageSeasonId) =>
-  pool
-    .query(
-      `UPDATE participation_modes
-       SET mode='mubahatha', switched_at=now(), joined_mubahatha_at=now()
-       WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3 AND mode='report' AND participation_enabled($2,$3)
-       RETURNING *`,
-      [studentId, subjectId, stageSeasonId]
-    )
-    .then((r) => r.rows[0]);
+async function changeParticipationMode(studentId, subjectId, stageSeasonId, mode, {actorId=null,expectedMode}={}) {
+  [studentId,subjectId,stageSeasonId].forEach(positiveInt);
+  if(!['report','mubahatha'].includes(mode))throw appError('نوع المتابعة غير صالح.');
+  const c=await pool.connect();
+  try {
+    await c.query('BEGIN');
+    // Match the lock order used by group allocation and stage transfers.
+    await c.query('SELECT id FROM stage_seasons WHERE id=$1 FOR SHARE',[stageSeasonId]);
+    await c.query('SELECT id FROM students WHERE id=$1 FOR UPDATE',[studentId]);
+    const eligible=(await c.query(`SELECT sub.name AS subject_name FROM students st
+      JOIN enrollments e ON e.student_id=st.id AND e.status='active'
+      JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+      JOIN subjects sub ON sub.stage_id=ss.stage_id
+      WHERE st.id=$1 AND st.is_active=true AND st.stage_id=ss.stage_id AND sub.id=$2 AND ss.id=$3
+        AND participation_enabled(sub.id,ss.id)`,[studentId,subjectId,stageSeasonId])).rows[0];
+    if(!eligible)throw appError('الطالب غير نشط أو المادة ليست ضمن مواد موسمه المتاحة.','CONFLICT',409);
+    const before=(await c.query(`SELECT * FROM participation_modes
+      WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3 FOR UPDATE`,[studentId,subjectId,stageSeasonId])).rows[0];
+    if(expectedMode!==undefined && (before?.mode??null)!==expectedMode)
+      throw appError('تغيّر نوع المتابعة. أعد فتح ملف الطالب ثم حاول مجددًا.','CONFLICT',409);
+    if(before?.mode===mode){await c.query('COMMIT');return before;}
+    const after=(await c.query(`INSERT INTO participation_modes(student_id,subject_id,stage_season_id,mode,chosen_at,joined_mubahatha_at)
+      VALUES($1,$2,$3,$4,clock_timestamp(),CASE WHEN $4='mubahatha' THEN clock_timestamp() END)
+      ON CONFLICT(student_id,subject_id,stage_season_id) DO UPDATE
+      SET mode=EXCLUDED.mode,switched_at=EXCLUDED.chosen_at,
+        joined_mubahatha_at=CASE WHEN EXCLUDED.mode='mubahatha' THEN EXCLUDED.chosen_at ELSE participation_modes.joined_mubahatha_at END
+      RETURNING *`,[studentId,subjectId,stageSeasonId,mode])).rows[0];
+    if(mode==='report')await c.query(`UPDATE notification_outbox n SET status='expired',lease_until=NULL
+      WHERE n.status='pending' AND n.chat_id=(SELECT telegram_id FROM students WHERE id=$1)
+        AND (EXISTS(SELECT 1 FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id
+          WHERE g.subject_id=$2 AND g.stage_season_id=$3
+            AND (n.dedupe_key LIKE 'session:'||s.id||':start:%' OR n.dedupe_key LIKE 'session:'||s.id||':end:%'
+              OR n.dedupe_key LIKE 'session:'||s.id||':reopen:%'))
+          OR EXISTS(SELECT 1 FROM schedule_slots sl WHERE sl.subject_id=$2 AND sl.stage_season_id=$3
+            AND n.dedupe_key LIKE 'slot:'||sl.id||':%'))`,[studentId,subjectId,stageSeasonId]);
+    if(actorId!==null)await c.query(`INSERT INTO admin_audit_log(actor_id,action,entity_type,entity_id,before_data,after_data)
+      VALUES($1,'change_participation_mode','student',$2,$3::jsonb,$4::jsonb)`,
+      [actorId,studentId,JSON.stringify(before||{student_id:studentId,subject_id:subjectId,stage_season_id:stageSeasonId,mode:null}),JSON.stringify({...after,subject_name:eligible.subject_name})]);
+    await c.query('COMMIT');return after;
+  } catch(e){await c.query('ROLLBACK');throw e;} finally {c.release();}
+}
+
+async function switchToMubahatha(studentId,subjectId,stageSeasonId) {
+  try {return await changeParticipationMode(studentId,subjectId,stageSeasonId,'mubahatha',{expectedMode:'report'});}
+  catch(e){if(e.code==='CONFLICT')return undefined;throw e;}
+}
 
 const countParticipationBySubject = (subjectId, stageSeasonId) =>
   pool
@@ -535,7 +603,7 @@ const listDiscussionAttendanceForTeacher = (subjectId, stageSeasonId) =>
       AND gm.stage_season_id=pm.stage_season_id
     LEFT JOIN mubahatha_sessions ms ON ms.group_id=gm.group_id
       AND ms.opened_at>=gm.assigned_at AND (gm.ended_at IS NULL OR ms.opened_at<gm.ended_at)
-      AND (pm.joined_mubahatha_at IS NULL OR ms.opened_at>=pm.joined_mubahatha_at)
+      AND was_in_mubahatha(pm.student_id,pm.subject_id,pm.stage_season_id,ms.opened_at)
     LEFT JOIN mubahatha_attendance start_att ON start_att.session_id=ms.id
       AND start_att.student_id=pm.student_id AND start_att.phase='start'
     LEFT JOIN mubahatha_attendance end_att ON end_att.session_id=ms.id
@@ -1108,6 +1176,8 @@ const listStudentSlots = (studentId) =>
       `SELECT sl.*, sub.name AS subject_name, discussion_group_label(g.id) AS group_title
        FROM group_memberships m
        JOIN mubahatha_groups g ON g.id=m.group_id
+       JOIN participation_modes pm ON pm.student_id=m.student_id AND pm.subject_id=m.subject_id
+         AND pm.stage_season_id=m.stage_season_id AND pm.mode='mubahatha'
        JOIN schedule_slots sl ON sl.group_id=g.id AND sl.is_active=true
        JOIN subjects sub ON sub.id=sl.subject_id
        WHERE m.student_id=$1 AND participation_enabled(m.subject_id,m.stage_season_id)
@@ -1118,13 +1188,13 @@ const listStudentSlots = (studentId) =>
     .then((r) => r.rows);
 
 // مواد الطالب في موسمه النشط مع نمط مشاركته ومجموعته إن وُجدت.
-const listStudentSubjects = (studentId) =>
+const listStudentSubjects = (studentId, {includeDisabled=false}={}) =>
   pool
     .query(
       `SELECT sub.id AS subject_id, sub.name AS subject_name,
               ss.id AS stage_season_id,
               COALESCE(ss.stage_name_snapshot, sg.name) AS stage_name,
-              pm.mode, pm.switched_at,
+              pm.mode, pm.switched_at, participation_enabled(sub.id,ss.id) AS participation_enabled,
               g.id AS group_id, CASE WHEN ss.discussion_grouping THEN g.title ELSE 'المرحلة كاملة' END AS group_title,
               CASE WHEN ss.discussion_grouping THEN g.group_number END AS group_number, ss.discussion_grouping, g.invite_link,
               (SELECT COUNT(*) FROM student_reports r
@@ -1138,9 +1208,9 @@ const listStudentSubjects = (studentId) =>
        LEFT JOIN group_memberships m
               ON m.student_id=$1 AND m.subject_id=sub.id AND m.stage_season_id=ss.id
        LEFT JOIN mubahatha_groups g ON g.id=m.group_id
-       WHERE e.student_id=$1 AND e.status='active' AND participation_enabled(sub.id,ss.id)
+       WHERE e.student_id=$1 AND e.status='active' AND ($2::boolean OR participation_enabled(sub.id,ss.id))
        ORDER BY sub.name`,
-      [studentId]
+      [studentId,includeDisabled]
     )
     .then((r) => r.rows);
 
@@ -1388,7 +1458,7 @@ const listReportStudentsForGrading = (subjectId, stageSeasonId, { groupId = null
        LEFT JOIN final_grades fg
               ON fg.student_id=st.id AND fg.subject_id=pm.subject_id AND fg.stage_season_id=pm.stage_season_id
        WHERE pm.subject_id=$1 AND pm.stage_season_id=$2
-         AND (pm.mode='report' OR pm.switched_at IS NOT NULL)
+         AND (pm.mode='report' OR r.id IS NOT NULL)
          AND ($3::int IS NULL OR gm.group_id=$3 OR discussion_group_root(r.group_id)=$3)
          AND (NOT $6::boolean OR EXISTS (
            SELECT 1 FROM student_reports pending
@@ -1885,7 +1955,7 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
        ) gm ON gm.student_id=pm.student_id AND gm.subject_id=pm.subject_id AND gm.stage_season_id=pm.stage_season_id
        LEFT JOIN mubahatha_sessions s ON s.group_id=gm.group_id
              AND s.opened_at>=gm.assigned_at AND (gm.ended_at IS NULL OR s.opened_at<gm.ended_at)
-             AND (pm.joined_mubahatha_at IS NULL OR s.opened_at >= pm.joined_mubahatha_at)
+             AND was_in_mubahatha(pm.student_id,pm.subject_id,pm.stage_season_id,s.opened_at)
        LEFT JOIN mubahatha_attendance start_att
               ON start_att.session_id=s.id AND start_att.student_id=pm.student_id
              AND start_att.phase='start'
@@ -2004,6 +2074,7 @@ module.exports = {
   setParticipationMode,
   getParticipationMode,
   switchToMubahatha,
+  changeParticipationMode,
   countParticipationBySubject,
   createMubahathaGroup,
   listGroups,
