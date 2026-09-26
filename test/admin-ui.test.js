@@ -7,6 +7,7 @@ async function setup({authorized=true}={}){
   const w=dom.window;w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};w.confirm=()=>true;
   w.Telegram={WebApp:{ready(){},expand(){},initData:authorized?'signed-test-data':''}};
   const requests=[];let slots=[];
+  const subjects=[{subject_id:1,stage_season_id:1,subject_name:'الفقه',mode:'report',participation_enabled:true},{subject_id:2,stage_season_id:1,subject_name:'العقائد',mode:'mubahatha',participation_enabled:true}];
   w.fetch=async(url,options={})=>{
     requests.push({url,options});const u=new URL(url,'https://institute.example');let data,status=200;
     if(u.pathname.endsWith('/auth'))data={token:'a'.repeat(64),user:{name:'إدارة الاختبار'}};
@@ -23,9 +24,10 @@ async function setup({authorized=true}={}){
     else if(u.pathname.endsWith('/lessons/71/attendance/1/remove'))data={removed:true};
     else if(u.pathname.endsWith('/participation-settings'))data={grouped:false,pausedSlots:0};
     else if(u.pathname.endsWith('/stages'))data=[stage];else if(u.pathname.endsWith('/stages/1'))data=stage;
+    else if(u.pathname.endsWith('/students/1/subjects/1/participation')){subjects[0].mode=JSON.parse(options.body).mode;data=subjects[0];}
     else if(u.pathname.endsWith('/students/1')){
       if(options.method==='PATCH'){data={error:'أدخل اسمًا رباعيًا'};status=400;}
-      else data={id:1,full_name:'طالب <img src=x> اختبار اسم',stage_id:1,stage_name:stage.name,is_active:true,official_confirmed_at:'2026-09-01',activity:{stageSeasonId:1,approvedLeaveDays:4,warnings:[]},groups:[],attendance:[],leaves:[]};
+      else data={id:1,full_name:'طالب <img src=x> اختبار اسم',stage_id:1,stage_name:stage.name,is_active:true,official_confirmed_at:'2026-09-01',activity:{stageSeasonId:1,approvedLeaveDays:4,warnings:[]},subjects,groups:[],attendance:[],leaves:[]};
     }else if(u.pathname.endsWith('/students')){const p=Number(u.searchParams.get('page'));data={rows:[{id:1,full_name:'طالب <img src=x> اختبار اسم',groups:[],is_active:true}],total:35,page:p,size:25};}
     else if(u.pathname.endsWith('/exams'))data=[{id:1,subject_name:'الفقه',title:'الشهري الأول',status:'draft'}];
     else if(u.pathname.endsWith('/exams/1'))data={id:1,title:'الشهري الأول',subject_name:'الفقه',status:'draft',questions:[{id:3,prompt:'سؤال <script>bad()</script>',question_type:'tf',correct_answer:'صح'}]};
@@ -67,6 +69,25 @@ test('admin DOM: Telegram entry, stages, pagination, escaped names and visible m
     assert.ok(!w.document.querySelector('#content').textContent.includes('طالب <img'));
   }finally{dom.window.close();}
 });
+test('admin DOM: each subject has its own confirmation and switch; the other row stays unchanged',async()=>{
+  const {dom,w,requests,until,click}=await setup();try{
+    await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
+    click('[data-action="student"]');await until(()=>w.document.querySelector('[data-action="student-participation"]'));
+    const selector='[data-action="student-participation"][data-subject="1"]';
+    const other='[data-action="student-participation"][data-subject="2"]';
+    assert.equal(w.document.querySelector(selector).textContent,'تحويل إلى مباحثات');
+    assert.equal(w.document.querySelector(other).textContent,'تحويل إلى تقارير');
+    w.confirm=()=>false;click(selector);
+    assert.equal(requests.filter(r=>r.url.endsWith('/participation')).length,0);
+    let confirmation;w.confirm=text=>{confirmation=text;return true;};click(selector);
+    await until(()=>w.document.querySelector(selector)?.textContent==='تحويل إلى تقارير');
+    assert.match(confirmation,/الفقه/);assert.match(confirmation,/بقية مواده/);
+    const writes=requests.filter(r=>r.url.endsWith('/participation'));assert.equal(writes.length,1);
+    assert.equal(writes[0].options.method,'PATCH');assert.deepEqual(JSON.parse(writes[0].options.body),{seasonId:1,mode:'mubahatha',expectedMode:'report'});
+    assert.equal(w.document.querySelector(other).textContent,'تحويل إلى تقارير');
+  }finally{dom.window.close();}
+});
+
 test('admin DOM: opening a bare link never requests student data',async()=>{
   const {dom,w,requests}=await setup({authorized:false});try{assert.equal(requests.length,0);assert.match(w.document.querySelector('#content').textContent,/افتح اللوحة من البوت/);}finally{dom.window.close();}
 });

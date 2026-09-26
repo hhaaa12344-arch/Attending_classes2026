@@ -191,6 +191,31 @@ test('bot: student screens identify the student and report upload explains its w
   assert.ok(messages.some(m=>m.text?.includes(heading)&&m.text.includes('مرة واحدة أسبوعيًا، وليس يوميًا')));
 });
 
+test('bot: mixed subject routes stay visible and stale buttons follow a single-subject admin switch',async()=>{
+  const st=await db.addStage('مرحلة مسارات مختلطة'),season=(await db.listStageSeasons(st.id))[0].id;
+  const a=await db.addSubject(st.id,'مادة ألف','mixed_a'),b=await db.addSubject(st.id,'مادة باء','mixed_b');
+  const person=await db.createStudent(991234,'طالب مواد مختلفة للمراجعة',st.id);
+  await send(person.telegram_id,'','confirm_official_student');
+  await studies.createMubahathaGroup(a.id,season,{title:'ألف'});await studies.createMubahathaGroup(b.id,season,{title:'باء'});
+  await studies.setParticipationMode(person.id,a.id,season,'report');await studies.setParticipationMode(person.id,b.id,season,'mubahatha');
+  await studies.assignStudentToGroup(person.id,a.id,season);await studies.assignStudentToGroup(person.id,b.id,season);
+  const buttons=()=>messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]).map(b=>b.callback_data);
+  await send(person.telegram_id,'📖 المباحثات والتقارير');
+  assert.ok(buttons().includes(`pm_subj:${a.id}:${season}`));assert.ok(buttons().includes(`pm_subj:${b.id}:${season}`));
+  await send(person.telegram_id,'',`pm_subj:${a.id}:${season}`);assert.ok(buttons().includes(`rep_send:${a.id}:${season}`));assert.ok(!buttons().includes(`pm_join:${a.id}:${season}`));
+  await send(person.telegram_id,'',`pm_subj:${b.id}:${season}`);assert.ok(buttons().includes(`pm_join:${b.id}:${season}`));assert.ok(!buttons().includes(`rep_send:${b.id}:${season}`));
+  await send(person.telegram_id,'',`rep_send:${a.id}:${season}`);
+  await studies.changeParticipationMode(person.id,a.id,season,'mubahatha',{actorId:42,expectedMode:'report'});
+  await send(person.telegram_id,'نص تقرير أرسل بعد تغيير متابعة المادة إلى مباحثات');
+  assert.equal((await studies.listStudentReports(person.id,a.id,season)).length,0);
+  await send(person.telegram_id,'',`rep_send:${a.id}:${season}`);
+  assert.ok(messages.some(m=>m.method==='answerCallbackQuery'&&m.text?.includes('لست في نظام التقارير')));
+  await studies.changeParticipationMode(person.id,a.id,season,'report',{actorId:42,expectedMode:'mubahatha'});
+  await send(person.telegram_id,'',`pm_join:${a.id}:${season}`);assert.ok(messages.some(m=>m.text?.includes('لست في نظام المباحثات')));
+  await send(person.telegram_id,'📖 المباحثات والتقارير');assert.ok(buttons().includes(`pm_subj:${b.id}:${season}`));
+  assert.equal((await studies.getParticipationMode(person.id,b.id,season)).mode,'mubahatha');
+});
+
 test('bot: teacher attendance matches discussion sessions rather than published lessons',async()=>{
   const teacher=(await db.pool.query("INSERT INTO teachers(full_name,telegram_id) VALUES('أستاذ حضور المباحثات',83000) RETURNING *")).rows[0];
   await db.pool.query('INSERT INTO teaching_assignments(teacher_id,subject_id,stage_season_id) VALUES($1,$2,$3)',[teacher.id,subject.id,ss]);
@@ -266,8 +291,8 @@ test('bot: an 88-slot admin schedule is sent as one RTL MD file within Telegram 
     const markdown=docs[0].document.source.toString('utf8');
     const tableLines=markdown.split('\n').filter(line=>line.startsWith('| '));
     assert.equal(tableLines.length,90); // header, separator, and all 88 appointments
-    assert.equal(tableLines[0],'| الساعة | اليوم | الأستاذ | المجموعة | المادة | المرحلة |');
-    assert.ok(tableLines.slice(2).every(line=>line.split(/(?<!\\)\|/).length===8),'escaped pipes must not create extra columns');
+    assert.equal(tableLines[0],'| الساعة | اليوم | الأستاذ | المجموعة | المادة | المرحلة | تسلسل |');
+    assert.ok(tableLines.slice(2).every(line=>line.split(/(?<!\\)\|/).length===9),'escaped pipes must not create extra columns');
     assert.ok(!/<\/?[a-z][^>]*>/i.test(markdown));
     assert.ok(markdown.includes('&lt;script&gt;اسم مادة&lt;/script&gt; \\| اختبار'));
     assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='ts_add')));
