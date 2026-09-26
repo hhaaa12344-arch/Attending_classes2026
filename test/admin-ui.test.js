@@ -19,7 +19,7 @@ async function setup({authorized=true}={}){
       data={season:{is_active:true},subjects:[{id:1,name:'الفقه',total:26,open_count:1}],total:subject?1:26,page,size:25,
         rows:[{id:71,item_number:page?1:26,subject_name:'الفقه',title:'جلسة <img src=x>',group_title:'الأولى',activated_at:'2026-09-22T12:00:00Z',opened_at:'2026-09-22T12:00:00Z',active_until:'2026-09-23T12:00:00Z',closes_at:'2026-09-23T12:00:00Z',can_reopen:true,is_active:true,attended_count:3,enrolled_count:5,complete_count:3}]};
     }
-    else if(/\/(lessons|sessions)\/71\/(reopen|cancel|mark-all)$/.test(u.pathname))data={ok:true,added:2,records:4};
+    else if(/\/(lessons|sessions)\/71\/(reopen|cancel|mark-all)$/.test(u.pathname))data={ok:true,added:2,records:4,attendance_reopen_until:new Date(Date.now()+600000).toISOString()};
     else if(u.pathname.endsWith('/lessons/71/attendance'))data={lesson:{id:71,subject_name:'الفقه',activated_at:'2026-09-22T12:00:00Z'},rows:[{student_id:1,full_name:'طالب اختبار اسم رباعي',listened_at:'2026-09-22T13:00:00Z',marking_kind:'student'}],total:1,page:0,size:25};
     else if(u.pathname.endsWith('/lessons/71/attendance/1/remove'))data={removed:true};
     else if(u.pathname.endsWith('/participation-settings'))data={grouped:false,pausedSlots:0};
@@ -248,7 +248,11 @@ test('admin DOM: discussion management exposes numbered sessions, complete atten
   await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
   click('[data-action="tab"][data-tab="schedule"]');await until(()=>w.document.querySelector('[data-action="session-reopen"]'));
   assert.match(w.document.querySelector('#content').textContent,/رقم المباحثة/);assert.equal(w.document.querySelector('#content img'),null);
+  assert.match(w.document.querySelector('#content').textContent,/10 دقائق من لحظة إعادة الفتح/);
+  assert.doesNotMatch(w.document.querySelector('#content').textContent,/24 ساعة/);
+  let confirmation='';w.confirm=message=>{confirmation=message;return true;};
   click('[data-action="session-reopen"]');await until(()=>requests.some(r=>r.url.endsWith('/sessions/71/reopen')));
+  assert.match(confirmation,/10 دقائق من الآن/);assert.doesNotMatch(confirmation,/24 ساعة|النشر الأصلي/);
   await until(()=>w.document.querySelector('#notice').textContent.includes('أُعيد فتح'));
   click('[data-action="session-markall"]');await until(()=>w.document.querySelector('#notice').textContent.includes('اكتمل حضور 2'));
   assert.ok(requests.some(r=>r.url.endsWith('/sessions/71/mark-all')));

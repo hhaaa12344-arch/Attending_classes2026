@@ -109,7 +109,7 @@ test('admin HTTP: exam editor, edits before attempts, postponement and logout',a
   assert.equal((await request('/logout',{})).status,200);assert.equal((await request('/students')).status,401);
 });
 
-test('admin HTTP: management filters, MD download and fixed-deadline mutation routes',async()=>{
+test('admin HTTP: lesson deadline and independent ten-minute discussion recovery',async()=>{
  token=(await (await request('/auth',{initData:signed()},'POST',null)).json()).token;
  const l=await db.activateLesson(subject.id,1);
  let response=await request('/lessons/'+l.id+'/reopen',{hours:999});assert.equal(response.status,200);
@@ -119,11 +119,14 @@ test('admin HTTP: management filters, MD download and fixed-deadline mutation ro
  assert.match(response.headers.get('content-type'),/text\/markdown/);assert.match(await response.text(),/إجمالي الحضور/);
  const session=await studies.openSession(group.id,teacher.id,'إدارة',1);
  response=await request('/sessions/'+session.id+'/reopen',{});assert.equal(response.status,200);
+ const recovery=await response.json();assert.equal(new Date(recovery.attendance_reopen_until)-new Date(recovery.attendance_reopened_at),600000);
+ assert.equal(new Date(recovery.closes_at).getTime(),session.closes_at.getTime());
  response=await request('/session-management?stageId='+stage.id);assert.equal(response.status,200);assert.equal((await response.json()).total,1);
  assert.equal((await request('/sessions/'+session.id+'/mark-all',{},'POST',null)).status,401);
  assert.equal((await request('/sessions/'+session.id+'/mark-all',{})).status,200);
  await db.pool.query("UPDATE mubahatha_sessions SET opened_at=now()-interval '25 hours' WHERE id=$1",[session.id]);
- assert.equal((await request('/sessions/'+session.id+'/reopen',{})).status,409);
+ response=await request('/sessions/'+session.id+'/reopen',{});assert.equal(response.status,200);
+ assert.equal((await response.json()).attendance_reopen_until,recovery.attendance_reopen_until);
  assert.equal((await request('/sessions/'+session.id+'/cancel',{})).status,200);
  assert.equal((await request('/sessions/'+session.id+'/cancel',{})).status,404);
  await db.pool.query("UPDATE lessons SET activated_at=now()-interval '25 hours' WHERE id=$1",[l.id]);
@@ -182,4 +185,23 @@ test('admin and teacher HTTP: cancelling exams requires ownership and queues not
  const key=(await auth.json()).token;
  assert.equal((await teacherRequest('/exams/'+replacement.id+'/cancel',{reason:'سبب الأستاذ'},key)).status,200);
  assert.equal((await studies.getExamById(replacement.id)).status,'cancelled');
+});
+
+test('teacher dashboard shows the independent recovery window only while it is open',async()=>{
+ const auth=await fetch(base+'/api/teacher/auth',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:signed(780002)})});
+ assert.equal(auth.status,200);const key=(await auth.json()).token;
+ async function dashboard(){const r=await fetch(base+'/api/teacher/dashboard',{headers:{Authorization:'Bearer '+key}});assert.equal(r.status,200);return r.json();}
+ const old=(await db.pool.query("INSERT INTO mubahatha_sessions(group_id,teacher_id,title,opened_at,closes_at,is_closed) VALUES($1,$2,'استعادة قديمة',now()-interval '2 days',now()-interval '47 hours',true) RETURNING *",[group.id,teacher.id])).rows[0];
+ assert.ok(!(await dashboard()).activeSessions.some(s=>s.id===old.id));
+ const response=await request('/sessions/'+old.id+'/reopen',{});assert.equal(response.status,200);const recovery=await response.json();
+ const visible=(await dashboard()).activeSessions.find(s=>s.id===old.id);assert.ok(visible);
+ assert.equal(visible.attendance_reopen_until,recovery.attendance_reopen_until);
+ assert.equal(visible.opened_at,old.opened_at.toISOString());assert.equal(visible.closes_at,old.closes_at.toISOString());
+ await db.pool.query('UPDATE mubahatha_sessions SET attendance_reopen_until=now() WHERE id=$1',[old.id]);
+ assert.ok(!(await dashboard()).activeSessions.some(s=>s.id===old.id));
+ await db.pool.query('UPDATE stage_seasons SET is_active=false WHERE id=$1',[ss]);
+ try{assert.equal((await request('/sessions/'+old.id+'/reopen',{})).status,409);}
+ finally{await db.pool.query('UPDATE stage_seasons SET is_active=true WHERE id=$1',[ss]);}
+ const future=(await db.pool.query("INSERT INTO mubahatha_sessions(group_id,opened_at,closes_at) VALUES($1,now()+interval '1 hour',now()+interval '2 hours') RETURNING id",[group.id])).rows[0];
+ assert.equal((await request('/sessions/'+future.id+'/reopen',{})).status,409);
 });
