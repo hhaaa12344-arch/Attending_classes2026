@@ -93,12 +93,12 @@
 
     const active=d.activeSessions||[];$('#activeSection').classList.toggle('hidden',active.length===0);
     $('#activeSessions').innerHTML=active.map(s=>{
-      const canEnd=!s.is_closed&&!s.end_opened_at&&new Date(s.start_attendance_opens_at)<=new Date()&&new Date(s.closes_at)>new Date();
+      const canEnd=!s.attendance_reopened_at&&!s.is_closed&&!s.end_opened_at&&new Date(s.start_attendance_opens_at)<=new Date()&&new Date(s.closes_at)>new Date();
       return `
       <article class="list-card">
         <div class="list-card-head"><div><h4>${esc(s.subject_name)}</h4><p>${esc(s.group_title)} · بدأت ${esc(dateTime(s.opened_at))}</p></div><span class="badge live">مفتوحة</span></div>
         ${canEnd?`<div class="card-actions"><button class="danger-button" type="button" data-end-session="${n(s.id)}">إنهاء المباحثة وفتح حضور النهاية</button></div>`:
-          (!s.end_opened_at?`<p class="subtle">يظهر زر الإنهاء بعد فتح الحضور الأول عند ${esc(dateTime(s.start_attendance_opens_at))}.</p>`:'')}
+          (s.attendance_reopened_at?`<p class="subtle">فرصة حضور إضافية للبداية والنهاية حتى ${esc(dateTime(s.attendance_reopen_until))}.</p>`:!s.end_opened_at?`<p class="subtle">يظهر زر الإنهاء بعد فتح الحضور الأول عند ${esc(dateTime(s.start_attendance_opens_at))}.</p>`:'')}
       </article>`;
     }).join('');
     $$('[data-end-session]').forEach(b=>b.addEventListener('click',()=>endSession(n(b.dataset.endSession),b)));
