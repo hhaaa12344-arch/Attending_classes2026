@@ -148,15 +148,16 @@ function createAdminData(db, studies) {
         `SELECT s.*,g.subject_id AS item_subject_id,s.opened_at AS published_at,discussion_group_label(g.id) AS group_title
          FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id WHERE g.stage_season_id=$1`;
       const subjects=(await c.query(`WITH items AS (${source}) SELECT sub.id,sub.name,COUNT(i.id)::int AS total,
-        COUNT(i.id) FILTER (WHERE ${lesson?'i.active_until > now()':'((i.is_closed=false AND i.closes_at > now()) OR i.end_closes_at > now())'})::int AS open_count
+        COUNT(i.id) FILTER (WHERE ${lesson?'i.active_until > now()':`((i.attendance_reopened_at <= now() AND i.attendance_reopen_until > now()) OR
+          (i.attendance_reopened_at IS NULL AND ((i.is_closed=false AND i.closes_at > now()) OR i.end_closes_at > now())))`})::int AS open_count
         FROM subjects sub LEFT JOIN items i ON i.item_subject_id=sub.id WHERE sub.stage_id=$2
         GROUP BY sub.id ORDER BY sub.name,sub.id`,[season.id,stageId])).rows;
       if(subjectId&&!subjects.some(s=>s.id===subjectId))throw appError('المادة ليست ضمن المرحلة.');
       const total=subjects.filter(s=>!subjectId||s.id===subjectId).reduce((n,s)=>n+s.total,0);
       const rows=(await c.query(`WITH items AS (${source}), numbered AS (
         SELECT i.*,ROW_NUMBER() OVER (PARTITION BY item_subject_id ORDER BY published_at,id)::int AS item_number FROM items i)
-        SELECT i.*,sub.name AS subject_name,i.published_at + interval '24 hours' AS reopen_until,
-          (i.published_at <= now() AND i.published_at + interval '24 hours' > now() AND $5::boolean) AS can_reopen,
+        SELECT i.*,sub.name AS subject_name,${lesson?"i.published_at + interval '24 hours'":'i.attendance_reopen_until'} AS reopen_until,
+          (i.published_at <= now() AND ${lesson?"i.published_at + interval '24 hours' > now()":'(i.attendance_reopen_until IS NULL OR i.attendance_reopen_until <= now())'} AND $5::boolean) AS can_reopen,
           ${lesson?`(i.active_until > now()) AS is_active,
             (SELECT COUNT(*)::int FROM attendance a WHERE a.lesson_id=i.id) AS attended_count,
             (SELECT COUNT(*)::int FROM enrollments e WHERE e.stage_season_id=$1 AND e.status='active') AS enrolled_count`:
@@ -175,9 +176,12 @@ function createAdminData(db, studies) {
     try{
       await c.query('BEGIN');
       const session=(await c.query(`SELECT s.*,g.subject_id,g.stage_season_id,ss.is_active AS season_active,g.is_active AS group_active,
+        sub.name AS subject_name,discussion_group_label(g.id) AS group_title,
         participation_enabled(g.subject_id,g.stage_season_id) AS enabled,
-        (s.opened_at <= now() AND s.opened_at + interval '24 hours' > now()) AS can_reopen
+        (s.opened_at <= now()) AS can_reopen,
+        (s.attendance_reopened_at <= now() AND s.attendance_reopen_until > now()) AS recovery_open
         FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id JOIN stage_seasons ss ON ss.id=g.stage_season_id
+        JOIN subjects sub ON sub.id=g.subject_id
         WHERE s.id=$1 FOR UPDATE OF s FOR SHARE OF ss`,[id])).rows[0];
       if(!session)throw appError('المباحثة غير موجودة.','NOT_FOUND',404);
       if(!session.season_active)throw appError('لا يمكن تعديل مباحثة من موسم مؤرشف.','ARCHIVED',409);
@@ -188,16 +192,19 @@ function createAdminData(db, studies) {
         await c.query("UPDATE notification_outbox SET status='expired',expires_at=now() WHERE dedupe_key LIKE $1 AND status IN ('pending','sending')",['session:'+id+':%']);
         await c.query('DELETE FROM mubahatha_sessions WHERE id=$1',[id]);result={ok:true};
       }else if(action==='reopen'){
-        if(!session.can_reopen)throw appError('انتهت مهلة 24 ساعة من النشر الأصلي؛ لا يمكن إعادة فتح المباحثة.','EXPIRED',409);
+        if(!session.can_reopen)throw appError('لم يبدأ موعد المباحثة بعد.','NOT_STARTED',409);
         if(!session.group_active||!session.enabled)throw appError('المجموعة أو المادة غير مفعلة.');
-        result=(await c.query(`UPDATE mubahatha_sessions SET is_closed=false,closes_at=opened_at+interval '24 hours',
-          end_opened_at=COALESCE(end_opened_at,now()),end_closes_at=opened_at+interval '24 hours',end_prompt_sent=true
-          WHERE id=$1 RETURNING *`,[id])).rows[0];
+        // A repeated click cannot extend the active ten-minute window or resend its notice.
+        if(session.recovery_open){await c.query('COMMIT');return session;}
+        result=(await c.query(`UPDATE mubahatha_sessions SET attendance_reopened_at=now(),
+          attendance_reopen_until=now()+make_interval(mins=>$2::int),attendance_reopen_count=attendance_reopen_count+1
+          WHERE id=$1 RETURNING *`,[id,studies.DISCUSSION_REOPEN_MINUTES])).rows[0];
+        await c.query("UPDATE notification_outbox SET status='expired',expires_at=now() WHERE dedupe_key LIKE $1 AND status IN ('pending','sending')",['session:'+id+':%']);
         // Reopened attendance must be reachable even if the old Telegram buttons were consumed.
-        const payload=JSON.stringify(['أُعيد فتح تسجيل حضور المباحثة حتى '+new Date(result.closes_at).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad'})+'؛ يلزم تسجيل البداية والنهاية.',
+        const payload=JSON.stringify(['أُعيد فتح حضور مباحثة «'+session.subject_name+'» — '+session.group_title+' ('+session.title+') لمدة 10 دقائق من إعادة الفتح، حتى '+new Date(result.attendance_reopen_until).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad'})+'؛ استخدم الزرين لتسجيل البداية والنهاية. التسجيل السابق محفوظ.',
           {reply_markup:{inline_keyboard:[[{text:'حضرت البداية',callback_data:'mub_attend:'+id},{text:'حضرت النهاية',callback_data:'mub_end_attend:'+id}]]}}]);
         await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
-          SELECT 'session:'||s.id||':reopen:'||st.id,st.telegram_id,$2::jsonb,s.end_closes_at
+          SELECT 'session:'||s.id||':reopen:'||s.attendance_reopen_count||':'||st.id,st.telegram_id,$2::jsonb,s.attendance_reopen_until
           FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id
           JOIN group_memberships m ON m.group_id=g.id AND m.assigned_at <= s.opened_at
           JOIN students st ON st.id=m.student_id AND st.is_active=true

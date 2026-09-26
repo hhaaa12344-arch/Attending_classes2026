@@ -2455,7 +2455,7 @@ bot.action(/season_choice:(repeat|promote)/, async (ctx) => {
 
 bot.action('noop', (ctx) => ctx.answerCbQuery('تم تسجيل حضورك مسبقًا لهذا الدرس ✅'));
 
-bot.action(/attend:(\d+)/, async (ctx) => {
+bot.action(/^attend:(\d+)$/, async (ctx) => {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا عبر /start');
   const lessonId = Number(ctx.match[1]);
@@ -3768,14 +3768,14 @@ bot.action(/slot_no:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
   return ctx.editMessageText('🕓 أُوقف موعد مباحثة اليوم حتى لا تبدأ الجلسة.\nأرسل الآن سبب التأجيل برسالة نصية (مثال: ظرف طارئ)، وبعد حفظه سيصل إشعار للطلبة.');
 });
 
-bot.action(/mub_attend:(\d+)/, async (ctx) => {
+bot.action(/^mub_attend:(\d+)$/, async (ctx) => {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا عبر /start');
   const sessionId = Number(ctx.match[1]);
   const session = await studies.getSessionById(sessionId);
   if (!session) return ctx.answerCbQuery('الجلسة غير موجودة.');
   if (!(await studies.isStartAttendanceOpen(sessionId))) {
-    if (!session.is_closed && new Date(session.closes_at) > new Date()) {
+    if (!session.attendance_reopened_at && !session.is_closed && new Date(session.closes_at) > new Date()) {
       return ctx.answerCbQuery('لم يبدأ تسجيل حضور البداية بعد.');
     }
     return ctx.answerCbQuery('انتهى وقت تسجيل حضور بداية المباحثة.');
@@ -3786,16 +3786,19 @@ bot.action(/mub_attend:(\d+)/, async (ctx) => {
   const marked = await studies.markSessionAttendance(sessionId, student.id, 'start');
   if (!marked) return ctx.answerCbQuery('لم يُضف سجل جديد: سجّلت مسبقًا أو انتهت المهلة أو لست مؤهلًا لهذه الجلسة.');
   await ctx.answerCbQuery('تم تسجيل حضور البداية ✅');
+  const end=(await db.pool.query("SELECT 1 FROM mubahatha_attendance WHERE session_id=$1 AND student_id=$2 AND phase='end'",[sessionId,student.id])).rows[0];
   return ctx.editMessageText(
-    '✅ سُجّل حضورك في بداية المباحثة.\nلا تنسَ تسجيل حضور النهاية عند إغلاقها.',
-    await studies.isEndAttendanceOpen(sessionId)
+    end ? '✅ اكتمل حضورك بالبداية والنهاية، بارك الله فيك.' : session.attendance_reopened_at
+      ? '✅ سُجّل حضورك في بداية المباحثة.\nيمكنك إكمال حضور النهاية الآن قبل انتهاء الفرصة الإضافية.'
+      : '✅ سُجّل حضورك في بداية المباحثة.\nلا تنسَ تسجيل حضور النهاية عند إغلاقها.',
+    !end && await studies.isEndAttendanceOpen(sessionId)
       ? Markup.inlineKeyboard([[callbackButton('✅ حضرت نهاية المباحثة', `mub_end_attend:${sessionId}`)]])
       : {}
   );
 });
 
 // حضور النهاية — سجل مستقل عن البداية
-bot.action(/mub_end_attend:(\d+)/, async (ctx) => {
+bot.action(/^mub_end_attend:(\d+)$/, async (ctx) => {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا عبر /start');
   const sessionId = Number(ctx.match[1]);
@@ -3813,11 +3816,14 @@ bot.action(/mub_end_attend:(\d+)/, async (ctx) => {
   const start=(await db.pool.query("SELECT 1 FROM mubahatha_attendance WHERE session_id=$1 AND student_id=$2 AND phase='start'",[sessionId,student.id])).rows[0];
   return ctx.editMessageText(start
     ? '✅ سُجّل حضور النهاية. اكتمل حضورك بالبداية والنهاية، بارك الله فيك.'
-    : 'سُجّل حضور النهاية، لكن لم تسجّل حضور البداية؛ لذلك لا يُحسب حضور هذه المباحثة مكتملًا.');
+    : 'سُجّل حضور النهاية، لكن لم تسجّل حضور البداية؛ لذلك لا يُحسب حضور هذه المباحثة مكتملًا.',
+    !start && await studies.isStartAttendanceOpen(sessionId)
+      ? Markup.inlineKeyboard([[callbackButton('✅ حضرت بداية المباحثة', `mub_attend:${sessionId}`)]])
+      : {});
 });
 
 // الأستاذ ينهي المباحثة يدويًا فيفتح حضور النهاية فورًا
-bot.action(/mub_finish:(\d+)/, async (ctx) => {
+bot.action(/^mub_finish:(\d+)$/, async (ctx) => {
   const teacher = await effectiveTeacher(ctx);
   if (!teacher && !isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
   const sessionId = Number(ctx.match[1]);

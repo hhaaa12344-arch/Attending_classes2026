@@ -11,6 +11,8 @@ const SCHEDULE_TZ = process.env.SCHEDULE_TIMEZONE || 'Asia/Baghdad';
 const EXAM_START_HOUR = Number(process.env.EXAM_START_HOUR || 22);
 // لا يظهر حضور البداية فور بدء المباحثة؛ يفتح بعد عشر دقائق من الموعد الأصلي.
 const START_ATTENDANCE_DELAY_MINUTES = Number(process.env.START_ATTENDANCE_DELAY_MINUTES || 10);
+// Administrative attendance recovery never changes the original discussion schedule.
+const DISCUSSION_REOPEN_MINUTES = 10;
 if (!Number.isInteger(START_ATTENDANCE_DELAY_MINUTES) || START_ATTENDANCE_DELAY_MINUTES < 1 || START_ATTENDANCE_DELAY_MINUTES > 30) {
   throw new Error('START_ATTENDANCE_DELAY_MINUTES must be an integer from 1 to 30');
 }
@@ -109,6 +111,9 @@ async function initStudiesSchema() {
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_opened_at TIMESTAMP;
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_closes_at TIMESTAMP;
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS end_prompt_sent BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS attendance_reopened_at TIMESTAMP;
+    ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS attendance_reopen_until TIMESTAMP;
+    ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS attendance_reopen_count INTEGER NOT NULL DEFAULT 0;
 
     -- ---------- الامتحانات الشهرية ----------
     -- ثلاثة امتحانات في الموسم لكل مادة، كل امتحان 5 درجات مهما كان عدد أسئلته.
@@ -636,10 +641,11 @@ const markSessionAttendance = (sessionId, studentId, phase = 'start', markedBy =
          AND pm.stage_season_id=ss.id AND pm.mode='mubahatha'
        WHERE s.id=$1 AND participation_enabled(g.subject_id,g.stage_season_id) AND s.opened_at <= now() AND m.assigned_at <= s.opened_at
          AND pm.joined_mubahatha_at <= s.opened_at
-         AND (($3='start'
+         AND ((s.attendance_reopened_at <= now() AND s.attendance_reopen_until > now() AND $3 IN ('start','end'))
+           OR (s.attendance_reopened_at IS NULL AND (($3='start'
                AND s.opened_at + make_interval(mins => $5::int) <= now()
                AND s.closes_at > now())
-           OR ($3='end' AND s.end_opened_at <= now() AND s.end_closes_at > now()))
+           OR ($3='end' AND s.end_opened_at <= now() AND s.end_closes_at > now()))))
        ON CONFLICT (session_id, student_id, phase) DO NOTHING RETURNING *`,
       [sessionId, studentId, phase, markedBy, START_ATTENDANCE_DELAY_MINUTES]
     )
@@ -661,6 +667,7 @@ async function openEndAttendance(sessionId, automatic = false) {
          end_closes_at = closes_at,
          is_closed = true
      WHERE id=$1 AND end_opened_at IS NULL AND is_closed=false
+       AND attendance_reopened_at IS NULL
        AND start_notifications_queued=true
        AND opened_at + make_interval(mins => $4::int) <= now()
        AND closes_at > now()
@@ -678,8 +685,9 @@ const isStartAttendanceOpen = (sessionId) =>
     .query(
       `SELECT 1 FROM mubahatha_sessions
        WHERE id=$1
-         AND opened_at + make_interval(mins => $2::int) <= now()
-         AND closes_at > now()`,
+         AND ((attendance_reopened_at <= now() AND attendance_reopen_until > now())
+           OR (attendance_reopened_at IS NULL AND opened_at + make_interval(mins => $2::int) <= now()
+             AND closes_at > now()))`,
       [sessionId, START_ATTENDANCE_DELAY_MINUTES]
     )
     .then((r) => Boolean(r.rows[0]));
@@ -689,7 +697,8 @@ const isEndAttendanceOpen = (sessionId) =>
   pool
     .query(
       `SELECT 1 FROM mubahatha_sessions
-       WHERE id=$1 AND end_opened_at IS NOT NULL AND end_closes_at > now()`,
+       WHERE id=$1 AND ((attendance_reopened_at <= now() AND attendance_reopen_until > now())
+         OR (attendance_reopened_at IS NULL AND end_opened_at <= now() AND end_closes_at > now()))`,
       [sessionId]
     )
     .then((r) => Boolean(r.rows[0]));
@@ -706,6 +715,7 @@ const getSessionsNeedingEndPrompt = (leadMinutes = 10) =>
        JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
        LEFT JOIN teachers t ON t.id=s.teacher_id AND t.is_active=true
        WHERE s.is_closed=false AND s.end_prompt_sent=false
+         AND s.attendance_reopened_at IS NULL
          AND s.closes_at > now()
          AND s.closes_at - make_interval(mins => $1::int) <= now()`,
       [leadMinutes]
@@ -726,6 +736,7 @@ const getSessionsNeedingAutoEnd = () =>
        JOIN subjects sub ON sub.id=g.subject_id
        JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
        WHERE s.end_opened_at IS NULL AND s.is_closed=false AND s.start_notifications_queued=true AND g.is_active=true
+         AND s.attendance_reopened_at IS NULL
          AND s.closes_at - make_interval(mins => $1::int) <= now()
          AND s.closes_at > now()`,
       [END_ATTENDANCE_MINUTES]
@@ -2102,6 +2113,7 @@ module.exports = {
   getSessionsNeedingAutoEnd,
   closeExpiredSessionsWithoutEnd,
   START_ATTENDANCE_DELAY_MINUTES,
+  DISCUSSION_REOPEN_MINUTES,
   END_ATTENDANCE_MINUTES,
   createExam,
   addExamQuestion,

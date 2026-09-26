@@ -19,6 +19,7 @@ function createScheduler({ pool, studies }) {
         FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id
         JOIN subjects sub ON sub.id=g.subject_id JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
         WHERE s.id=$1 AND participation_enabled(g.subject_id,g.stage_season_id) AND s.${field}=false
+          AND s.attendance_reopened_at IS NULL
           ${phase === 'start' ? `AND s.opened_at + make_interval(mins => ${Number(studies.START_ATTENDANCE_DELAY_MINUTES)}) <= now()` : 'AND s.end_opened_at IS NOT NULL AND s.end_opened_at <= now()'}
         FOR UPDATE OF s`, [sessionId]);
       const s = r.rows[0];
@@ -159,9 +160,9 @@ function createScheduler({ pool, studies }) {
         }
       }
       const pending = await pool.query(`SELECT id FROM mubahatha_sessions
-        WHERE (start_notifications_queued=false AND closes_at > now()
+        WHERE attendance_reopened_at IS NULL AND ((start_notifications_queued=false AND closes_at > now()
                AND opened_at + make_interval(mins => $1::int) <= now())
-           OR (end_notifications_queued=false AND end_closes_at > now()) ORDER BY id LIMIT 100`,
+           OR (end_notifications_queued=false AND end_closes_at > now())) ORDER BY id LIMIT 100`,
         [studies.START_ATTENDANCE_DELAY_MINUTES]);
       for (const s of pending.rows) { await queueSession(s.id,'start'); await queueSession(s.id,'end'); }
       for (const s of await studies.getSessionsNeedingAutoEnd()) await openEnd(s.id,true);
