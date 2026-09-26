@@ -6487,7 +6487,8 @@ async function main() {
   backups.start();
   console.log('تم تجهيز قاعدة البيانات ✅');
   if(process.env.ADMIN_WEB_ENABLED==='true') {
-    adminServer=await require('./adminServer').startAdminServer({db,studies,adminData,scheduler,botToken:BOT_TOKEN,adminIds:ADMIN_IDS});
+    adminServer=await require('./adminServer').startAdminServer({db,studies,adminData,scheduler,botToken:BOT_TOKEN,adminIds:ADMIN_IDS,
+      wakeNotifications:()=>outboxWorker.tick({force:true})});
   }
 
   // مراجع المؤقتات لإيقافها عند الإغلاق المنظم

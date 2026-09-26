@@ -12,8 +12,8 @@ function createOutboxWorker(pool, queue, deleteMessage = null) {
   let stopped = false;
   let nextPoll = 0;
   let lastPrune = 0;
-  async function tick() {
-    if (running || stopped || Date.now()<nextPoll) return;
+  async function tick({force=false}={}) {
+    if (running || stopped || (!force && Date.now()<nextPoll)) return;
     running = true;
     try {
       if(Date.now()-lastPrune>86400000){

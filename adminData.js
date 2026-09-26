@@ -3,6 +3,38 @@ const { pageOptions, positiveInt, appError } = require('./integrity');
 
 function createAdminData(db, studies) {
   const pool = db.pool;
+  // The same audience powers delivery and diagnostics; reopening does not change historical eligibility.
+  const sessionAudienceSql=`SELECT st.id AS student_id,st.telegram_id,
+    CASE WHEN NOT st.is_active THEN 'inactive'
+      WHEN e.student_id IS NULL THEN 'not_enrolled'
+      WHEN pm.mode IS DISTINCT FROM 'mubahatha' THEN 'not_mubahatha'
+      WHEN m.assigned_at > s.opened_at THEN 'joined_group_later'
+      WHEN pm.joined_mubahatha_at IS NULL OR pm.joined_mubahatha_at > s.opened_at THEN 'joined_mode_later'
+      ELSE 'eligible' END AS reason
+    FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id
+    JOIN group_memberships m ON m.group_id=g.id JOIN students st ON st.id=m.student_id
+    LEFT JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=g.stage_season_id AND e.status='active'
+    LEFT JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=g.subject_id AND pm.stage_season_id=g.stage_season_id
+    WHERE s.id=$1`;
+  async function sessionNotifications(id,c=pool){
+    id=positiveInt(id);
+    const session=(await c.query(`SELECT id,attendance_reopen_count,attendance_reopen_until,
+      attendance_reopen_until>now() AS window_open FROM mubahatha_sessions WHERE id=$1`,[id])).rows[0];
+    if(!session)throw appError('المباحثة غير موجودة.','NOT_FOUND',404);
+    const audience=(await c.query(`WITH audience AS (${sessionAudienceSql}) SELECT reason,COUNT(*)::int AS count FROM audience GROUP BY reason`,[id])).rows;
+    const prefix='session:'+id+':reopen:'+session.attendance_reopen_count+':%';
+    const counts=(await c.query(`SELECT COUNT(*)::int AS total,
+      COUNT(*) FILTER(WHERE status='sent')::int AS sent,
+      COUNT(*) FILTER(WHERE status='pending' AND expires_at>now())::int AS pending,
+      COUNT(*) FILTER(WHERE status='sending' AND expires_at>now())::int AS sending,
+      COUNT(*) FILTER(WHERE status='failed')::int AS failed,
+      COUNT(*) FILTER(WHERE status='expired' OR (status IN ('pending','sending') AND expires_at<=now()))::int AS expired
+      FROM notification_outbox WHERE dedupe_key LIKE $1`,[prefix])).rows[0];
+    const errors=(await c.query(`SELECT last_error AS code,COUNT(*)::int AS count FROM notification_outbox
+      WHERE dedupe_key LIKE $1 AND status IN ('pending','sending','failed') AND last_error IS NOT NULL GROUP BY last_error`,[prefix])).rows;
+    return {sessionId:id,windowOpen:!!session.window_open,until:session.attendance_reopen_until,
+      eligible:audience.find(x=>x.reason==='eligible')?.count||0,audience,counts,errors};
+  }
   async function stages(seasonId = null) {
     if (seasonId != null) {
       positiveInt(seasonId);
@@ -191,27 +223,32 @@ function createAdminData(db, studies) {
         await c.query("UPDATE slot_decisions SET decision='postponed' WHERE session_id=$1",[id]);
         await c.query("UPDATE notification_outbox SET status='expired',expires_at=now() WHERE dedupe_key LIKE $1 AND status IN ('pending','sending')",['session:'+id+':%']);
         await c.query('DELETE FROM mubahatha_sessions WHERE id=$1',[id]);result={ok:true};
-      }else if(action==='reopen'){
+      }else if(action==='reopen'||action==='retry-notifications'){
         if(!session.can_reopen)throw appError('لم يبدأ موعد المباحثة بعد.','NOT_STARTED',409);
         if(!session.group_active||!session.enabled)throw appError('المجموعة أو المادة غير مفعلة.');
-        // A repeated click cannot extend the active ten-minute window or resend its notice.
-        if(session.recovery_open){await c.query('COMMIT');return session;}
-        result=(await c.query(`UPDATE mubahatha_sessions SET attendance_reopened_at=now(),
+        if(action==='retry-notifications'&&!session.recovery_open)throw appError('انتهت الفرصة؛ أعد فتح الحضور أولًا لمدة 10 دقائق.','EXPIRED',409);
+        // Reconcile missing notices on repeat without extending the window or duplicating sent notices.
+        result=session.recovery_open?session:(await c.query(`UPDATE mubahatha_sessions SET attendance_reopened_at=now(),
           attendance_reopen_until=now()+make_interval(mins=>$2::int),attendance_reopen_count=attendance_reopen_count+1
           WHERE id=$1 RETURNING *`,[id,studies.DISCUSSION_REOPEN_MINUTES])).rows[0];
-        await c.query("UPDATE notification_outbox SET status='expired',expires_at=now() WHERE dedupe_key LIKE $1 AND status IN ('pending','sending')",['session:'+id+':%']);
+        if(!session.recovery_open)await c.query("UPDATE notification_outbox SET status='expired',expires_at=now() WHERE dedupe_key LIKE $1 AND status IN ('pending','sending')",['session:'+id+':%']);
         // Reopened attendance must be reachable even if the old Telegram buttons were consumed.
         const payload=JSON.stringify(['أُعيد فتح حضور مباحثة «'+session.subject_name+'» — '+session.group_title+' ('+session.title+') لمدة 10 دقائق من إعادة الفتح، حتى '+new Date(result.attendance_reopen_until).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad'})+'؛ استخدم الزرين لتسجيل البداية والنهاية. التسجيل السابق محفوظ.',
           {reply_markup:{inline_keyboard:[[{text:'حضرت البداية',callback_data:'mub_attend:'+id},{text:'حضرت النهاية',callback_data:'mub_end_attend:'+id}]]}}]);
-        await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
-          SELECT 'session:'||s.id||':reopen:'||s.attendance_reopen_count||':'||st.id,st.telegram_id,$2::jsonb,s.attendance_reopen_until
-          FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id
-          JOIN group_memberships m ON m.group_id=g.id AND m.assigned_at <= s.opened_at
-          JOIN students st ON st.id=m.student_id AND st.is_active=true
-          JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=g.stage_season_id AND e.status='active'
-          JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=g.subject_id AND pm.stage_season_id=g.stage_season_id
-            AND pm.mode='mubahatha' AND pm.joined_mubahatha_at <= s.opened_at
-          WHERE s.id=$1 ON CONFLICT(dedupe_key) DO NOTHING`,[id,payload]);
+        const prefix='session:'+id+':reopen:'+result.attendance_reopen_count+':';
+        const queued=(await c.query(`WITH audience AS (${sessionAudienceSql})
+          INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at,priority)
+          SELECT $3||student_id,telegram_id,$2::jsonb,$4::timestamptz,2 FROM audience WHERE reason='eligible'
+          ON CONFLICT(dedupe_key) DO NOTHING RETURNING id`,[id,payload,prefix,result.attendance_reopen_until])).rows.length;
+        let retried=0;
+        if(action==='retry-notifications'){
+          retried=(await c.query(`WITH audience AS (${sessionAudienceSql})
+            UPDATE notification_outbox n SET status='pending',available_at=now(),lease_until=NULL,attempts=0,priority=2
+            FROM audience a WHERE a.reason='eligible' AND n.dedupe_key=$2||a.student_id
+              AND n.status IN ('failed','expired') AND n.expires_at>now() RETURNING n.id`,[id,prefix])).rows.length;
+        }
+        result={...result,queued,retried,notifications:await sessionNotifications(id,c)};
+        if(session.recovery_open&&action==='reopen'&&!queued){await c.query('COMMIT');return result;}
       }else if(action==='mark-all'){
         if(!session.group_active||!session.enabled)throw appError('المجموعة أو المادة غير مفعلة.');
         const added=(await c.query(`INSERT INTO mubahatha_attendance(session_id,student_id,phase,marked_by)
@@ -293,7 +330,7 @@ function createAdminData(db, studies) {
     }
     yield count?`\n**عدد تسجيلات الحضور:** ${count}\n`:'\nلا توجد تسجيلات حضور لهذا الموسم.\n';
   }
-  return {stages,stage,students,student,updateStudent,leaves,reports,sessions,attendanceCsv,attendanceMarkdown,managedItems,manageSession,
+  return {stages,stage,students,student,updateStudent,leaves,reports,sessions,attendanceCsv,attendanceMarkdown,managedItems,manageSession,sessionNotifications,
     lessonAttendanceMarkdown:require('./lessonAttendance').createLessonAttendance(pool).markdown,
     lessonAttendance:require('./lessonAttendance').createLessonAttendance(pool).matrix,
     saveParticipationSettings:require('./participationSettings').createParticipationSettings(pool).save};

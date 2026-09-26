@@ -15,7 +15,7 @@ async function readJson(req) {
   try{const result=JSON.parse(Buffer.concat(chunks).toString());if(!result||Array.isArray(result)||typeof result!=='object')throw Error();return result;}
   catch{throw appError('بيانات غير صالحة.');}
 }
-function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,origin}) {
+function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,origin,wakeNotifications}) {
   const overrides=require('./adminOverrides').createAdminOverrides(db.pool);
   const studentContact=require('./studentContact').createStudentContact(db.pool);
   const oneTimeCohortMove=require('./oneTimeCohortMove').createOneTimeCohortMove(db.pool);
@@ -109,6 +109,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         }
         else if(route==='/audit'){const p=pageOptions(q.page||0,25);result=(await db.pool.query('SELECT * FROM admin_audit_log ORDER BY id DESC LIMIT $1 OFFSET $2',[p.size,p.offset])).rows;}
         else if(route==='/notifications')result=(await db.pool.query('SELECT status,COUNT(*) AS count FROM notification_outbox GROUP BY status')).rows;
+        else if((m=/^\/sessions\/(\d+)\/notifications$/.exec(route)))result=await adminData.sessionNotifications(positiveInt(m[1]));
         else if(route==='/lessons')result=await db.getRecentLessonsForStage(positiveInt(q.stageId),q.limit?positiveInt(q.limit):15);
         else if((m=/^\/lessons\/(\d+)\/attendance$/.exec(route)))result=await overrides.lessonAttendance(positiveInt(m[1]),q);
         else if(route==='/channel-diagnostics'){
@@ -292,8 +293,11 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           result=await studies.createMubahathaGroup(positiveInt(body.subjectId),positiveInt(body.seasonId),{title:body.title,capacity:positiveInt(body.capacity),inviteLink:body.inviteLink||null});
           await audit(actor.id,'create_group','group',result.id,null,result);
         }
-        else if((m=/^\/sessions\/(\d+)\/(reopen|mark-all|cancel)$/.exec(route))&&req.method==='POST'){
+        else if((m=/^\/sessions\/(\d+)\/(reopen|retry-notifications|mark-all|cancel)$/.exec(route))&&req.method==='POST'){
           result=await adminData.manageSession(positiveInt(m[1]),m[2],actor.id);
+          if(wakeNotifications&&['reopen','retry-notifications'].includes(m[2])){
+            Promise.resolve().then(wakeNotifications).catch(err=>console.error('Reopened attendance delivery failed:',err.code||'DELIVERY_ERROR'));
+          }
         }
         else if((m=/^\/lessons\/(\d+)\/subject$/.exec(route))&&req.method==='PATCH')result=await overrides.correctSubject(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/lessons\/(\d+)\/late-attendance$/.exec(route))&&req.method==='POST')result=await overrides.lateAttendance(positiveInt(m[1]),body,actor.id);
