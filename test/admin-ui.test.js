@@ -2,11 +2,12 @@
 const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const {JSDOM}=require('jsdom');
 const stage={id:1,name:'المرحلة التمهيدية',is_active:true,stage_type:'full',stage_season_id:1,season_name:'الموسم الأول',student_count:35,subject_count:1,group_count:1,
   subjects:[{id:1,name:'الفقه',hashtag:'فقه',teacher_name:'الأستاذ الأول',teachers:[{id:1,name:'الأستاذ الأول'}]}],groups:[{id:1,title:'الأولى',subject_id:1,subject_name:'الفقه',member_count:35,reserved_count:38,capacity:40}],seasons:[{id:1,name:'الأول',is_active:true}]};
-async function setup({authorized=true}={}){
+async function setup({authorized=true,noticeState=null}={}){
   const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../admin/index.html'),'utf8'),{url:'https://institute.example/admin/',runScripts:'outside-only'});
   const w=dom.window;w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};w.confirm=()=>true;
   w.Telegram={WebApp:{showConfirm(message,done){done(w.confirm(message));},ready(){},expand(){},initData:authorized?'signed-test-data':''}};
   const requests=[];let slots=[];
+  const notifications=noticeState||{sessionId:71,windowOpen:true,until:new Date(Date.now()+600000).toISOString(),eligible:3,audience:[{reason:'eligible',count:3}],counts:{total:3,pending:3,sending:0,sent:0,failed:0,expired:0},errors:[]};
   const subjects=[{subject_id:1,stage_season_id:1,subject_name:'الفقه',mode:'report',participation_enabled:true},{subject_id:2,stage_season_id:1,subject_name:'العقائد',mode:'mubahatha',participation_enabled:true}];
   w.fetch=async(url,options={})=>{
     requests.push({url,options});const u=new URL(url,'https://institute.example');let data,status=200;
@@ -19,7 +20,8 @@ async function setup({authorized=true}={}){
       data={season:{is_active:true},subjects:[{id:1,name:'الفقه',total:26,open_count:1}],total:subject?1:26,page,size:25,
         rows:[{id:71,item_number:page?1:26,subject_name:'الفقه',title:'جلسة <img src=x>',group_title:'الأولى',activated_at:'2026-09-22T12:00:00Z',opened_at:'2026-09-22T12:00:00Z',active_until:'2026-09-23T12:00:00Z',closes_at:'2026-09-23T12:00:00Z',can_reopen:true,is_active:true,attended_count:3,enrolled_count:5,complete_count:3}]};
     }
-    else if(/\/(lessons|sessions)\/71\/(reopen|cancel|mark-all)$/.test(u.pathname))data={ok:true,added:2,records:4,attendance_reopen_until:new Date(Date.now()+600000).toISOString()};
+    else if(u.pathname.endsWith('/sessions/71/notifications'))data=notifications;
+    else if(/\/(lessons|sessions)\/71\/(reopen|retry-notifications|cancel|mark-all)$/.test(u.pathname))data={ok:true,added:2,records:4,attendance_reopen_until:notifications.until,notifications};
     else if(u.pathname.endsWith('/lessons/71/attendance'))data={lesson:{id:71,subject_name:'الفقه',activated_at:'2026-09-22T12:00:00Z'},rows:[{student_id:1,full_name:'طالب اختبار اسم رباعي',listened_at:'2026-09-22T13:00:00Z',marking_kind:'student'}],total:1,page:0,size:25};
     else if(u.pathname.endsWith('/lessons/71/attendance/1/remove'))data={removed:true};
     else if(u.pathname.endsWith('/participation-settings'))data={grouped:false,pausedSlots:0};
@@ -258,6 +260,22 @@ test('admin DOM: discussion management exposes numbered sessions, complete atten
   assert.ok(requests.some(r=>r.url.endsWith('/sessions/71/mark-all')));
   click('[data-action="session-cancel"]');await until(()=>w.document.querySelector('#notice').textContent.includes('حُذفت المباحثة'));
   assert.ok(requests.some(r=>r.url.endsWith('/sessions/71/cancel')));
+ }finally{dom.window.close();}
+});
+
+test('admin displays zero queued notices honestly and exposes recipient diagnostics and retry',async()=>{
+ const state={sessionId:71,windowOpen:true,until:new Date(Date.now()+600000).toISOString(),eligible:0,
+   audience:[{reason:'joined_group_later',count:1}],counts:{total:0,pending:0,sending:0,sent:0,failed:0,expired:0},errors:[]};
+ const {dom,w,requests,until,click}=await setup({noticeState:state});try{
+  await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
+  click('[data-action="tab"][data-tab="schedule"]');await until(()=>w.document.querySelector('[data-action="session-reopen"]'));
+  click('[data-action="session-reopen"]');await until(()=>w.document.querySelector('#notice').textContent.includes('لم يُجهّز أي إشعار'));
+  assert.equal(w.document.querySelector('#notice').className,'error');
+  click('[data-action="session-notifications"]');await until(()=>w.document.querySelector('#detail').open);
+  assert.match(w.document.querySelector('#dialog-body').textContent,/نُقل إلى المجموعة بعد موعد المباحثة الأصلي/);
+  click('[data-action="session-retry-notifications"]');await until(()=>requests.some(r=>r.url.endsWith('/sessions/71/retry-notifications')));
+  await until(()=>!w.document.querySelector('#dialog-notice').hidden);
+  assert.match(w.document.querySelector('#dialog-notice').textContent,/لم يُجهّز أي إشعار/);
  }finally{dom.window.close();}
 });
 test('admin controls remain responsive while lesson deletion is saving and after exam deletion',async()=>{

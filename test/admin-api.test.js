@@ -205,3 +205,17 @@ test('teacher dashboard shows the independent recovery window only while it is o
  const future=(await db.pool.query("INSERT INTO mubahatha_sessions(group_id,opened_at,closes_at) VALUES($1,now()+interval '1 hour',now()+interval '2 hours') RETURNING id",[group.id])).rows[0];
  assert.equal((await request('/sessions/'+future.id+'/reopen',{})).status,409);
 });
+
+test('discussion notification diagnostics and retries require an admin and preserve the original window',async()=>{
+ const s=await studies.openSession(group.id,teacher.id,'حالة الإشعارات',1);
+ const opened=await (await request('/sessions/'+s.id+'/reopen',{})).json();
+ assert.equal((await request('/sessions/'+s.id+'/notifications',null,'GET',null)).status,401);
+ assert.equal((await request('/sessions/'+s.id+'/retry-notifications',{},'POST',null)).status,401);
+ let r=await request('/sessions/'+s.id+'/notifications');assert.equal(r.status,200);
+ assert.equal((await r.json()).sessionId,s.id);
+ r=await request('/sessions/'+s.id+'/retry-notifications',{});assert.equal(r.status,200);
+ assert.equal((await r.json()).attendance_reopen_until,opened.attendance_reopen_until);
+ assert.equal((await request('/sessions/9999999/notifications')).status,404);
+ await db.pool.query('UPDATE mubahatha_sessions SET attendance_reopen_until=now() WHERE id=$1',[s.id]);
+ assert.equal((await request('/sessions/'+s.id+'/retry-notifications',{})).status,409);
+});
