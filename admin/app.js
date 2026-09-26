@@ -407,17 +407,18 @@ async function sessionManagementContent(stage,ro){
   if(data.total&&sessionPage>0&&!data.rows.length){sessionPage--;return sessionManagementContent(stage,ro);}
   const startDelay=Number(data.startAttendanceDelayMinutes||10),autoLead=Number(data.endAttendanceMinutes||10);
   const addMinutes=(value,mins)=>value?new Date(new Date(value).getTime()+mins*60000):null;
-  return '<section class="detail-section"><h2>المباحثات المفعّلة</h2><p>إعادة الفتح تتيح تسجيل البداية والنهاية حتى مرور 24 ساعة من النشر الأصلي، وتحفظ الحضور السابق. التحضير الإداري يكمل البداية والنهاية لطلبة المجموعة المؤهلين.</p>'+
+  return '<section class="detail-section"><h2>المباحثات المفعّلة</h2><p>إعادة الفتح تتيح تسجيل البداية والنهاية لمدة 10 دقائق من لحظة إعادة الفتح، وتحفظ موعد المباحثة والحضور السابق. يصل للطالب إشعار واحد بزرّي البداية والنهاية. التحضير الإداري يكمل البداية والنهاية لطلبة المجموعة المؤهلين.</p>'+
     managementSummary(data,'مباحثة')+subjectSelector(data,'session-mgt',sessionSubjectId)+
     table(['رقم المباحثة في المادة','المادة والمجموعة','موعد المباحثة','نوافذ تسجيل الحضور','الحضور المكتمل',...(ro?[]:['الإجراءات'])],data.rows.map(x=>{
       const firstOpen=addMinutes(x.opened_at,startDelay),autoEnd=addMinutes(x.closes_at,-autoLead),lastMinute=addMinutes(x.closes_at,-1);
-      const canEnd=!x.is_closed&&!x.end_opened_at&&x.start_notifications_queued&&new Date(x.closes_at)>new Date()&&firstOpen&&firstOpen<=new Date();
+      const canEnd=!x.attendance_reopened_at&&!x.is_closed&&!x.end_opened_at&&x.start_notifications_queued&&new Date(x.closes_at)>new Date()&&firstOpen&&firstOpen<=new Date();
       return [
       `${x.item_number}<div class="subtle">المعرف #${x.id}</div>`,`${esc(x.subject_name)}<div>${esc(x.group_title)}</div><div>${esc(x.title)}</div>`,stamp(x.opened_at),
-      `الحضور الأول: يبدأ ${stamp(firstOpen)}<div>ويبقى حتى ${stamp(lastMinute)}</div>`+
+      x.attendance_reopened_at?`فرصة إضافية للبداية والنهاية: من ${stamp(x.attendance_reopened_at)}<div>حتى ${stamp(x.attendance_reopen_until)}</div><div>${new Date(x.attendance_reopen_until)>new Date()?'مفتوحة':'انتهت الفرصة الإضافية'}</div>`:
+        `الحضور الأول: يبدأ ${stamp(firstOpen)}<div>ويبقى حتى ${stamp(lastMinute)}</div>`+
         `<div style="margin-top:.35rem">الحضور الثاني: ${x.end_opened_at?'بدأ '+stamp(x.end_opened_at):'يفتح عند إنهاء الأستاذ أو تلقائيًا '+stamp(autoEnd)}</div><div>ويبقى حتى ${stamp(lastMinute)}</div>`,esc(x.complete_count),
       ...(ro?[]:[(canEnd?button('إنهاء وفتح الحضور الثاني','end-session',`data-id="${x.id}"`):'')+
-        (x.can_reopen?button('إعادة فتح للوقت المتبقي','session-reopen',`data-id="${x.id}"`):'<span class="subtle">مضت مهلة إعادة الفتح</span>')+
+        (x.can_reopen?button('إعادة فتح الحضور 10 دقائق','session-reopen',`data-id="${x.id}"`):`<span class="subtle">${new Date(x.attendance_reopen_until)>new Date()?'الفرصة الإضافية مفتوحة':'إعادة الفتح غير متاحة الآن'}</span>`)+
         button('تحضير طلبة المجموعة','session-markall',`data-id="${x.id}"`)+button('حذف المباحثة','session-cancel',`data-id="${x.id}"`,'danger')])];
     }))+
     managementPager(data,'sessions')+'</section>';
@@ -553,11 +554,11 @@ document.addEventListener('click',async event=>{
     }
     else if(['session-reopen','session-markall','session-cancel'].includes(a)){
       const action=a==='session-markall'?'mark-all':a.slice('session-'.length);
-      const messages={reopen:'إعادة فتح تسجيل البداية والنهاية للوقت المتبقي من 24 ساعة منذ النشر الأصلي؟ يبقى الحضور السابق محفوظًا.',
+      const messages={reopen:'إعادة فتح حضور بداية ونهاية هذه المباحثة لمدة 10 دقائق من الآن؟ يبقى موعد المباحثة والحضور السابق محفوظين.',
         'mark-all':'تسجيل البداية والنهاية لطلبة المجموعة النشطين المؤهلين لهذه المباحثة؟',cancel:'حذف المباحثة نهائيًا مع حضورها؟ لن يعيد الجدول إنشاءها تلقائيًا لهذا الموعد. لا يمكن التراجع.'};
       if(!await confirmAction(messages[action]))return;
       busy=true;const r=await api('/sessions/'+target.dataset.id+'/'+action,{},'POST');await renderStage();
-      notify(action==='mark-all'?`اكتمل حضور ${r.added} طالبًا؛ أضيف ${r.records} تسجيلًا جديدًا.`:action==='cancel'?'حُذفت المباحثة وحضورها.':'أُعيد فتح الحضور للوقت المتبقي من المهلة الأصلية.');
+      notify(action==='mark-all'?`اكتمل حضور ${r.added} طالبًا؛ أضيف ${r.records} تسجيلًا جديدًا.`:action==='cancel'?'حُذفت المباحثة وحضورها.':`أُعيد فتح حضور البداية والنهاية حتى ${stamp(r.attendance_reopen_until)} (10 دقائق من إعادة الفتح).`);
     }
     else if(a==='lesson-reopen'){
       if(!await confirmAction(`إعادة فتح درس «${target.dataset.subject}» للوقت المتبقي من 24 ساعة منذ النشر الأصلي، مع حفظ الحضور السابق؟`))return;
