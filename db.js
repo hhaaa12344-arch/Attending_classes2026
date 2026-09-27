@@ -141,6 +141,8 @@ async function initSchema() {
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_chat_id BIGINT;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_message_id BIGINT;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS reminder_sent BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE lessons ADD COLUMN IF NOT EXISTS attendance_opened_at TIMESTAMP;
+    ALTER TABLE lessons ADD COLUMN IF NOT EXISTS schedule_date DATE;
     ALTER TABLE attendance ADD COLUMN IF NOT EXISTS marking_kind TEXT NOT NULL DEFAULT 'student'
       CHECK (marking_kind IN ('student','admin_late'));
     ALTER TABLE attendance ADD COLUMN IF NOT EXISTS marked_by BIGINT;
@@ -862,13 +864,13 @@ const getStudentById = (id) =>
 const updateStudentName = (id, name) =>
   pool.query('UPDATE students SET full_name=$1 WHERE id=$2', [name, id]);
 
-async function updateStudentStage(id, stageId) {
-  const client = await pool.connect();
+async function updateStudentStage(id, stageId, transactionClient = null) {
+  const client = transactionClient || await pool.connect();
   try {
-    await client.query('BEGIN');
+    if(!transactionClient)await client.query('BEGIN');
     const current=(await client.query('SELECT stage_id FROM students WHERE id=$1 FOR UPDATE',[id])).rows[0];
     if(!current)throw new Error('الطالب غير موجود.');
-    if(Number(current.stage_id)===Number(stageId)){await client.query('COMMIT');return;}
+    if(Number(current.stage_id)===Number(stageId)){if(!transactionClient)await client.query('COMMIT');return;}
     const target = await client.query(
       'SELECT ss.id FROM stage_seasons ss JOIN stages st ON st.id=ss.stage_id AND st.is_active=true WHERE ss.stage_id=$1 AND ss.is_active=true FOR UPDATE OF ss',
       [stageId]
@@ -905,12 +907,12 @@ async function updateStudentStage(id, stageId) {
        WHERE student_id=$1 AND status='pending'`,
       [id]
     );
-    await client.query('COMMIT');
+    if(!transactionClient)await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK');
+    if(!transactionClient)await client.query('ROLLBACK');
     throw err;
   } finally {
-    client.release();
+    if(!transactionClient)client.release();
   }
 }
 
@@ -1721,18 +1723,19 @@ const activateLesson = (
   sourceUrl = null,
   sourceChatId = null,
   sourceMessageId = null,
-  activatedAt = null
+  activatedAt = null,
+  options = {}
 ) =>
-  pool
+  (options.client || pool)
     .query(
       `INSERT INTO lessons(
          subject_id, stage_season_id, activated_at, active_until, source_type, source_url,
-         source_chat_id, source_message_id
+         source_chat_id, source_message_id, attendance_opened_at, schedule_date
        )
        SELECT sub.id, ss.id,
               COALESCE($7::timestamp, now()),
-              COALESCE($7::timestamp, now()) + ($2 || ' hours')::interval,
-              $3, $4, $5, $6
+              COALESCE($8::timestamp,$7::timestamp, now()) + ($2 || ' hours')::interval,
+              $3, $4, $5, $6, $8::timestamp, $9::date
        FROM subjects sub
        JOIN stages st ON st.id=sub.stage_id AND st.is_active=true
        JOIN stage_seasons ss ON ss.stage_id=sub.stage_id AND ss.is_active=true
@@ -1741,7 +1744,7 @@ const activateLesson = (
          WHERE source_chat_id IS NOT NULL AND source_message_id IS NOT NULL
        DO UPDATE SET source_url=COALESCE(EXCLUDED.source_url, lessons.source_url)
        RETURNING *`,
-      [subjectId, hours, sourceType, sourceUrl, sourceChatId, sourceMessageId, activatedAt]
+      [subjectId, hours, sourceType, sourceUrl, sourceChatId, sourceMessageId, activatedAt, options.attendanceOpenedAt||null,options.scheduleDate||null]
     )
     .then((r) => r.rows[0]);
 
@@ -1856,10 +1859,10 @@ const cancelLesson = (lessonId) =>
 
 // إعادة الفتح تحفظ النشر والحضور، وتنتهي بعد 24 ساعة من التفعيل الأصلي.
 const reopenLesson = (lessonId) =>
-  pool.query(`UPDATE lessons l SET active_until=l.activated_at + interval '24 hours'
+  pool.query(`UPDATE lessons l SET active_until=COALESCE(l.attendance_opened_at,l.activated_at) + interval '24 hours'
     FROM stage_seasons ss
     WHERE l.id=$1 AND ss.id=l.stage_season_id AND ss.is_active=true
-      AND l.activated_at <= now() AND l.activated_at + interval '24 hours' > now()
+      AND l.activated_at <= now() AND COALESCE(l.attendance_opened_at,l.activated_at) + interval '24 hours' > now()
     RETURNING l.*`,[lessonId]).then(r=>r.rows[0]);
 
 // تحضير جماعي لكل طلبة المرحلة النشطين ضمن موسم الدرس ممن لم يؤشّروا بعد؛
@@ -2635,19 +2638,20 @@ async function queuePendingChannelLessonPost({
   lessonDate,
   sourceUrl = null,
   contentKind = null,
+  receivedAt = null,
 }) {
   if (!Number.isFinite(Number(chatId)) || !Number.isFinite(Number(messageId))) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return null;
   return (
     await pool.query(
       `INSERT INTO pending_channel_lesson_posts(
-         telegram_chat_id,source_message_id,stage_id,stage_season_id,lesson_date,source_url,content_kind
-       ) VALUES($1,$2,$3,$4,$5,$6,$7)
+         telegram_chat_id,source_message_id,stage_id,stage_season_id,lesson_date,source_url,content_kind,received_at
+       ) VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamp,now()))
        ON CONFLICT(telegram_chat_id,source_message_id) DO UPDATE SET
          source_url=COALESCE(EXCLUDED.source_url,pending_channel_lesson_posts.source_url),
          content_kind=COALESCE(EXCLUDED.content_kind,pending_channel_lesson_posts.content_kind)
        RETURNING *`,
-      [chatId,messageId,stageId,stageSeasonId,lessonDate,sourceUrl,contentKind]
+      [chatId,messageId,stageId,stageSeasonId,lessonDate,sourceUrl,contentKind,receivedAt]
     )
   ).rows[0] || null;
 }
@@ -2659,7 +2663,7 @@ async function getPendingChannelLessonPosts(stageSeasonId, lessonDate) {
       `SELECT p.*,c.title AS channel_title
        FROM pending_channel_lesson_posts p
        LEFT JOIN channels c ON c.telegram_chat_id=p.telegram_chat_id
-       WHERE p.stage_season_id=$1 AND p.lesson_date=$2::date AND p.status='pending'
+       WHERE p.stage_season_id=$1 AND p.lesson_date<=$2::date AND p.status='pending'
        ORDER BY p.received_at,p.source_message_id,p.id`,
       [stageSeasonId,lessonDate]
     )
@@ -2674,7 +2678,7 @@ async function getPendingChannelLessonStageSeasonsForDate(lessonDate) {
        FROM pending_channel_lesson_posts p
        JOIN stage_seasons ss ON ss.id=p.stage_season_id AND ss.is_active=true
        JOIN stages st ON st.id=ss.stage_id AND st.is_active=true
-       WHERE p.lesson_date=$1::date AND p.status='pending'
+       WHERE p.lesson_date<=$1::date AND p.status='pending'
        ORDER BY p.stage_season_id`,
       [lessonDate]
     )
@@ -2788,9 +2792,9 @@ async function getScheduledSubjectsForDate(stageSeasonId, lessonDate) {
 // الهاشتاغ يستطيع تفعيل أي مادة مباشرة، لذلك تُستبعد المادة هنا إذا كان لها درس
 // مفعّل بالفعل في هذا الموسم في تاريخ اليوم، وبذلك يمكن دمج الهاشتاغ مع الجدول
 // حتى عندما تكون في اليوم نفسه 3 مواد أو أكثر.
-async function getPendingScheduledSubjectsForDate(stageSeasonId, lessonDate) {
+async function getPendingScheduledSubjectsForDate(stageSeasonId, lessonDate, queryable=pool) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return [];
-  return (await pool.query(`
+  return (await queryable.query(`
     SELECT DISTINCT sub.id, sub.name, lse.lesson_date::text AS lesson_date
     FROM lesson_schedule_entries lse
     JOIN subjects sub ON sub.id=lse.subject_id
@@ -2801,7 +2805,7 @@ async function getPendingScheduledSubjectsForDate(stageSeasonId, lessonDate) {
         FROM lessons l
         WHERE l.stage_season_id=$1
           AND l.subject_id=sub.id
-          AND (l.activated_at AT TIME ZONE 'Asia/Baghdad')::date=$2::date
+          AND COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date)=$2::date
       )
     ORDER BY sub.id`, [stageSeasonId, lessonDate])).rows;
 }

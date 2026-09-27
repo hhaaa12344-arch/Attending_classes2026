@@ -17,6 +17,8 @@ async function readJson(req) {
 }
 function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,origin,wakeNotifications}) {
   const overrides=require('./adminOverrides').createAdminOverrides(db.pool);
+  const discussionAttendance=require('./discussionAttendance').createDiscussionAttendance(db.pool);
+  const lessonRecovery=require('./lessonRecovery').createLessonRecovery(db);
   const studentContact=require('./studentContact').createStudentContact(db.pool);
   const oneTimeCohortMove=require('./oneTimeCohortMove').createOneTimeCohortMove(db.pool);
   const scheduleBatchImport=require('./scheduleBatchImport').createScheduleBatchImport(db.pool);
@@ -70,6 +72,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         }
         else if(/^\/lessons\/\d+\/admin-options$/.test(route))result=await overrides.options('lesson',positiveInt(route.split('/')[2]),q);
         else if(/^\/exams\/\d+\/admin-options$/.test(route))result=await overrides.options('exam',positiveInt(route.split('/')[2]),q);
+        else if(/^\/sessions\/\d+\/admin-options$/.test(route))result=await discussionAttendance.options(positiveInt(route.split('/')[2]),q);
         else if(route==='/lesson-management')result=await adminData.managedItems('lessons',q);
         else if(route==='/session-management')result=await adminData.managedItems('sessions',q);
         else if(route==='/lesson-attendance')result=await adminData.lessonAttendance(q);
@@ -292,6 +295,11 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           if(body.inviteLink&&!/^https:\/\/t\.me\/[A-Za-z0-9_+/?=-]+$/.test(body.inviteLink))throw appError('رابط المجموعة يجب أن يكون رابط تليجرام https://t.me/');
           result=await studies.createMubahathaGroup(positiveInt(body.subjectId),positiveInt(body.seasonId),{title:body.title,capacity:positiveInt(body.capacity),inviteLink:body.inviteLink||null});
           await audit(actor.id,'create_group','group',result.id,null,result);
+        }
+        else if((m=/^\/sessions\/(\d+)\/selected-attendance$/.exec(route))&&req.method==='POST')result=await discussionAttendance.mark(positiveInt(m[1]),body,actor.id);
+        else if((m=/^\/pending-lessons\/(\d+)\/restore$/.exec(route))&&req.method==='POST'){
+          result=await lessonRecovery.restore(positiveInt(m[1]),positiveInt(body.subjectId),{actorId:actor.id});
+          if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Lesson recovery delivery failed:',err.code||'DELIVERY_ERROR'));
         }
         else if((m=/^\/sessions\/(\d+)\/(reopen|retry-notifications|mark-all|cancel)$/.exec(route))&&req.method==='POST'){
           result=await adminData.manageSession(positiveInt(m[1]),m[2],actor.id);

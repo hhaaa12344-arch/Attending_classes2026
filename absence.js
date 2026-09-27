@@ -7,10 +7,10 @@ async function processCompletedDays(pool,timeZone) {
     // Group deadlines before expanding students. A later closed day never causes
     // an earlier still-open day to be permanently skipped by a global cursor.
     const inserted=await c.query(`WITH days AS (
-      SELECT l.stage_season_id,((l.activated_at AT TIME ZONE 'UTC') AT TIME ZONE $1)::date AS day,
+      SELECT l.stage_season_id,((COALESCE(l.attendance_opened_at,l.activated_at) AT TIME ZONE 'UTC') AT TIME ZONE $1)::date AS day,
         MAX(l.active_until) AS deadline
       FROM lessons l JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true
-      GROUP BY l.stage_season_id,((l.activated_at AT TIME ZONE 'UTC') AT TIME ZONE $1)::date
+      GROUP BY l.stage_season_id,((COALESCE(l.attendance_opened_at,l.activated_at) AT TIME ZONE 'UTC') AT TIME ZONE $1)::date
     ), pending AS (
       SELECT e.student_id,e.stage_season_id,e.started_at,e.ended_at,d.day
       FROM days d JOIN enrollments e ON e.stage_season_id=d.stage_season_id AND e.status='active'
@@ -29,8 +29,8 @@ async function processCompletedDays(pool,timeZone) {
           AND (sl.stage_season_id=p.stage_season_id OR sl.stage_season_id IS NULL)
           AND sl.status IN ('approved','ended') AND p.day BETWEEN sl.start_date AND sl.end_date) AS excused
       FROM pending p JOIN lessons l ON l.stage_season_id=p.stage_season_id
-        AND ((l.activated_at AT TIME ZONE 'UTC') AT TIME ZONE $1)::date=p.day
-        AND l.activated_at>=p.started_at AND (p.ended_at IS NULL OR l.activated_at<=p.ended_at)
+        AND ((COALESCE(l.attendance_opened_at,l.activated_at) AT TIME ZONE 'UTC') AT TIME ZONE $1)::date=p.day
+        AND COALESCE(l.attendance_opened_at,l.activated_at)>=p.started_at AND (p.ended_at IS NULL OR COALESCE(l.attendance_opened_at,l.activated_at)<=p.ended_at)
       LEFT JOIN attendance a ON a.student_id=p.student_id AND a.lesson_id=l.id
       GROUP BY p.student_id,p.stage_season_id,p.day
     ) INSERT INTO student_attendance_days(student_id,stage_season_id,attendance_date,lesson_count,attended_on_time_count,
@@ -61,8 +61,8 @@ async function refreshAdministrativeAttendance(c,studentIds,seasonId,timeZone) {
     SELECT d.id,COUNT(a.id) FILTER (WHERE a.listened_at<=l.active_until OR a.marking_kind='admin_late')::int AS attended
     FROM student_attendance_days d JOIN enrollments en ON en.student_id=d.student_id AND en.stage_season_id=d.stage_season_id
     JOIN lessons l ON l.stage_season_id=d.stage_season_id
-      AND ((l.activated_at AT TIME ZONE 'UTC') AT TIME ZONE $3)::date=d.attendance_date
-      AND l.activated_at>=en.started_at AND (en.ended_at IS NULL OR l.activated_at<=en.ended_at)
+      AND ((COALESCE(l.attendance_opened_at,l.activated_at) AT TIME ZONE 'UTC') AT TIME ZONE $3)::date=d.attendance_date
+      AND COALESCE(l.attendance_opened_at,l.activated_at)>=en.started_at AND (en.ended_at IS NULL OR COALESCE(l.attendance_opened_at,l.activated_at)<=en.ended_at)
     LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=d.student_id
     WHERE d.student_id=ANY($1::int[]) AND d.stage_season_id=$2 GROUP BY d.id
   ) UPDATE student_attendance_days d SET attended_on_time_count=counts.attended,
