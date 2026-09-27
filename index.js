@@ -140,7 +140,7 @@ bot.use(async (ctx, next) => {
 
   // Unknown actions are read-only denied in preview, including forged callbacks
   // from a different role. New write handlers cannot accidentally bypass a denylist.
-  const previewReads = new Set(['pv_exit','menu_today','menu_report','pm_subj','sr_subj','sr_group','sr_page','sr_stu',
+  const previewReads = new Set(['pv_exit','menu_today','menu_previous_lessons','menu_report','pm_subj','sr_subj','sr_group','sr_page','sr_stu',
     'gr_subj','gr_page','gr_stu','teacher_att','teacher_att_group','tg_subj','tg_group','ts_subj','ts_group','ex_subj','ex_view',
     'stex_list','rep_subj','noop','noop_activity','il_view','student_grades','student_report_marks']);
   if (ctx.callbackQuery?.data && !previewReads.has(ctx.callbackQuery.data.split(':')[0])) {
@@ -776,6 +776,17 @@ function singleLessonKeyboard(lesson) {
   ]);
 }
 
+function groupAvailableLessons(lessons, now = new Date()) {
+  const todayDate=currentDateInTimeZone(ATTENDANCE_TIME_ZONE,now);
+  const result={today:[],previous:[]};
+  for(const lesson of lessons){
+    const day=currentDateInTimeZone(ATTENDANCE_TIME_ZONE,new Date(lesson.activated_at));
+    if(day===todayDate)result.today.push(lesson);
+    else if(day<todayDate)result.previous.push(lesson);
+  }
+  return result;
+}
+
 async function showTodayLessons(ctx, options = {}) {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
@@ -784,20 +795,15 @@ async function showTodayLessons(ctx, options = {}) {
     return showTransitionPrompt(ctx);
   }
 
-  const lessons = await db.getActiveLessonsForStudent(student.stage_id, student.id);
-  if (lessons.length === 0) {
-    const text = options.confirmation
-      ? `${options.confirmation}\n\nلا توجد دروس أخرى غير مؤشَّرة حاليًا لمرحلتك.`
-      : 'لا توجد دروس غير مؤشَّرة حاليًا لمرحلتك. تحقق لاحقًا.';
-    return replyStudentScreen(ctx, student, text, Markup.inlineKeyboard([
-      [callbackButton('📅 الجدول الدراسي', 'student_lesson_schedule')]
-    ]));
-  }
-
-  const heading = options.confirmation
-    ? `${options.confirmation}\n\nدروس اليوم المتاحة لمرحلتك:`
-    : 'دروس اليوم غير المؤشَّرة لمرحلتك:\nانتقل إلى قناة الدروس، ثم أشّر كل درس استمعت إليه.';
+  const groups=groupAvailableLessons(await db.getActiveLessonsForStudent(student.stage_id, student.id));
+  const previous=options.previous===true,lessons=previous?groups.previous:groups.today;
+  const text=previous
+    ? (lessons.length?'دروس سابقة متاحة للحضور:\nنُشرت قبل اليوم وما زالت مهلة حضورها مفتوحة. أشّر كل درس استمعت إليه.':'لا توجد دروس سابقة غير مؤشَّرة وما زالت مهلة حضورها مفتوحة.')
+    : (lessons.length?'دروس اليوم غير المؤشَّرة لمرحلتك:\nانتقل إلى قناة الدروس، ثم أشّر كل درس استمعت إليه.':'لا توجد دروس منشورة اليوم غير مؤشَّرة ومتاحة للحضور حاليًا.');
+  const heading=options.confirmation?`${options.confirmation}\n\n${text}`:text;
   const keyboard = lessonKeyboard(lessons);
+  if(previous)keyboard.reply_markup.inline_keyboard.splice(-1,0,[callbackButton('↩️ دروس اليوم','menu_today')]);
+  else if(groups.previous.length)keyboard.reply_markup.inline_keyboard.splice(-1,0,[callbackButton(`📚 دروس سابقة متاحة للحضور (${groups.previous.length})`,'menu_previous_lessons')]);
 
   if (options.edit) {
     try {
@@ -2043,6 +2049,10 @@ bot.action('menu_today', async (ctx) => {
   await ctx.answerCbQuery();
   return showTodayLessons(ctx);
 });
+bot.action('menu_previous_lessons', async (ctx) => {
+  await ctx.answerCbQuery();
+  return showTodayLessons(ctx,{previous:true});
+});
 
 bot.hears('📚 دروس اليوم', (ctx) => showTodayLessons(ctx));
 
@@ -2490,6 +2500,7 @@ bot.action(/^attend:(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery('تم تسجيل حضورك ✅');
   return showTodayLessons(ctx, {
     edit: true,
+    previous:currentDateInTimeZone(ATTENDANCE_TIME_ZONE,new Date(lesson.activated_at))<currentDateInTimeZone(ATTENDANCE_TIME_ZONE),
     confirmation: `✅ تم الاستماع للدرس رقم ${Number(lesson.lesson_number)} من مادة «${lesson.subject_name}».`,
   });
 });
@@ -6605,6 +6616,7 @@ module.exports = {
   studentScheduleWindow,
   buildAdminAbsenceMessages,
   lessonKeyboard,
+  groupAvailableLessons,
   singleLessonKeyboard,
   channelEntryUrl,
   dailyLessonNotificationKeyboard,

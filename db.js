@@ -1791,7 +1791,7 @@ const getLessonBySource = (chatId, messageId) => pool.query(`
 const getActiveLessonsForStudent = (stageId, studentId) =>
   pool
     .query(
-      `SELECT l.id AS lesson_id, s.name AS subject_name, l.active_until, l.source_url,
+      `SELECT l.id AS lesson_id, s.name AS subject_name, l.activated_at, l.active_until, l.source_url,
               (SELECT COUNT(*) FROM effective_lessons numbered
                WHERE numbered.subject_id=l.subject_id
                  AND numbered.stage_season_id=l.stage_season_id
