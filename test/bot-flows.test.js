@@ -13,6 +13,26 @@ test.before(async()=>{
   app.bot.botInfo={id:12345,is_bot:true,username:'AttendanceTestBot',first_name:'test'};
 });
 test.after(async()=>{Telegram.prototype.callApi=original;if(db)await db.pool.end();});
+test('transferred account sees the same available lesson total in its report and attendance buttons',async()=>{
+  const target=await db.addStage('مرحلة نقل لاتساق التقرير'),sub=await db.addSubject(target.id,'المنطق التجريبي','report_transfer');
+  const moved=await db.createStudent(1999001,'طالب منقول لاتساق تقريره',stage.id);
+  await db.confirmOfficialStudent(moved.id);
+  const old=await db.activateLesson(sub.id),recovered=await db.activateLesson(sub.id),expired=await db.activateLesson(sub.id);
+  await db.pool.query("UPDATE lessons SET activated_at=now()-interval '3 hours',active_until=now()+interval '21 hours' WHERE id=$1",[old.id]);
+  await db.pool.query("UPDATE lessons SET activated_at=now()-interval '3 days',attendance_opened_at=now()-interval '20 minutes',active_until=now()+interval '23 hours' WHERE id=$1",[recovered.id]);
+  await db.pool.query("UPDATE lessons SET activated_at=now()-interval '4 days',active_until=now()-interval '3 days' WHERE id=$1",[expired.id]);
+  await db.updateStudentStage(moved.id,target.id);
+  await send(moved.telegram_id,'','menu_today');
+  let buttons=messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]).filter(b=>b.callback_data?.startsWith('attend:'));
+  assert.equal(buttons.length,2,JSON.stringify(messages));
+  await send(moved.telegram_id,'📊 تقريري');assert.ok(messages.some(m=>m.text?.includes('المنطق التجريبي: 0 حضور من 2 درس')));
+  await send(moved.telegram_id,'','attend:'+old.id);
+  await send(moved.telegram_id,'📊 تقريري');assert.ok(messages.some(m=>m.text?.includes('المنطق التجريبي: 1 حضور من 2 درس')));
+  await send(moved.telegram_id,'','menu_today');
+  buttons=messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]).filter(b=>b.callback_data?.startsWith('attend:'));
+  assert.deepEqual(buttons.map(b=>b.callback_data),['attend:'+recovered.id]);
+});
+
 test('student lesson schedule shows the immediate coming Saturday on Thursday and Friday',()=>{
   for(const day of ['2026-09-24','2026-09-25'])
     assert.deepEqual(app.studentScheduleWindow(day),{startDate:'2026-09-26',endDate:'2026-09-30',label:'الأسبوع القادم'});
