@@ -219,34 +219,3 @@ test('discussion notification diagnostics and retries require an admin and prese
  await db.pool.query('UPDATE mubahatha_sessions SET attendance_reopen_until=now() WHERE id=$1',[s.id]);
  assert.equal((await request('/sessions/'+s.id+'/retry-notifications',{})).status,409);
 });
-
-test('HTTP keeps pending-lesson restoration and selected discussion attendance behind distinct admin routes',async()=>{
- const sub=await db.addSubject(stage.id,'اختبار الاسترجاع والتحضير','recover_http');
- const g=await studies.createMubahathaGroup(sub.id,ss,{title:'مجموعة طلبة محددين'});
- await studies.setParticipationMode(student.id,sub.id,ss,'mubahatha');await studies.assignStudentToGroup(student.id,sub.id,ss);
- await db.pool.query("UPDATE group_memberships SET assigned_at=now()-interval '1 hour' WHERE student_id=$1 AND group_id=$2",[student.id,g.id]);
- await db.pool.query("UPDATE participation_modes SET joined_mubahatha_at=now()-interval '1 hour' WHERE student_id=$1 AND subject_id=$2",[student.id,sub.id]);
- const session=await studies.openSession(g.id,teacher.id,'اختبار التحضير',1),body={subjectId:sub.id,studentIds:[student.id],note:'حضور إداري'};
- assert.equal((await request('/sessions/'+session.id+'/admin-options',null,'GET',null)).status,401);
- assert.equal((await request('/sessions/'+session.id+'/selected-attendance',body,'POST',null)).status,401);
- assert.equal((await (await request('/sessions/'+session.id+'/admin-options')).json()).total,1);
- const marked=await request('/sessions/'+session.id+'/selected-attendance',body);assert.equal(marked.status,200);assert.equal((await marked.json()).records,2);
- assert.equal((await request('/sessions/'+session.id+'/selected-attendance',{...body,subjectId:subject.id})).status,409);
- const chat=-100777888999;await db.linkChannel(stage.id,chat,'قناة استرجاع اختبار');
- const p=await db.queuePendingChannelLessonPost({chatId:chat,messageId:10,stageId:stage.id,stageSeasonId:ss,lessonDate:'2026-01-01',receivedAt:new Date('2026-01-01T12:00:00Z')});
- assert.equal((await request('/pending-lessons/'+p.id+'/restore',{subjectId:sub.id},'POST',null)).status,401);
- const restored=await request('/pending-lessons/'+p.id+'/restore',{subjectId:sub.id});assert.equal(restored.status,200);
- const result=await restored.json();assert.equal(result.created,true);assert.equal(new Date(result.lesson.active_until)-new Date(result.lesson.attendance_opened_at),86400000);
- assert.equal((await (await request('/pending-lessons/'+p.id+'/restore',{subjectId:sub.id})).json()).created,false);
-});
-
-test('admin HTTP: republishing an expired lesson is admin-only, guarded by subject and idempotent',async()=>{
- const l=await db.activateLesson(subject.id,24,'manual',null,null,null,new Date(Date.now()-3*86400000));
- const body={expectedSubjectId:subject.id};
- assert.equal((await request('/lessons/'+l.id+'/republish',body,'POST',null)).status,401);
- const response=await request('/lessons/'+l.id+'/republish',body);assert.equal(response.status,200);
- const result=await response.json();assert.equal(result.created,true);
- assert.equal(new Date(result.lesson.active_until)-new Date(result.lesson.republished_at),86400000);
- assert.equal((await (await request('/lessons/'+l.id+'/republish',body)).json()).created,false);
- assert.equal((await request('/lessons/'+l.id+'/republish',{expectedSubjectId:999999})).status,409);
-});

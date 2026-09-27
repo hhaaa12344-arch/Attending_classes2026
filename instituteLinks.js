@@ -148,7 +148,7 @@ function createInstituteLinks(pool) {
         if (!item.url) continue;
         try { buttons.push([link(item.title, validateUrl(item.url))]); } catch (_) { /* Skip legacy invalid URL. */ }
       }
-      buttons.push([cb(actor.studentId&&!actor.teacherId&&!actor.admin?'📡 قناتي الدراسية':'📡 قنواتي الدراسية', 'il_view:channels:0')],
+      buttons.push([cb('📡 قنواتي الدراسية', 'il_view:channels:0')],
         [cb('👥 مجموعات مباحثاتي', 'il_view:groups:0')], [cb('↩️ القائمة الرئيسية', 'il_view:menu:0')]);
       return render(ctx, '🔗 روابط المعهد\nاختر الخدمة أو اعرض القنوات والمجموعات المرتبطة بحسابك.', buttons, actor);
     }
@@ -177,9 +177,8 @@ function createInstituteLinks(pool) {
       if (page) nav.push(cb('السابق', `il_view:${kind}:${page - 1}`));
       if (result.more) nav.push(cb('التالي', `il_view:${kind}:${page + 1}`));
       if (nav.length) buttons.push(nav);
-      if(kind==='channels'&&actor.studentId&&!actor.admin&&!actor.teacherId)buttons.push([cb('✏️ تصحيح مرحلتي الدراسية','stage_fix_start')]);
       buttons.push([cb('↩️ روابط المعهد', 'il_view:home:0')]);
-      let text = `${kind === 'channels' ? (actor.studentId&&!actor.teacherId&&!actor.admin?'📡 قناتي الدراسية':'📡 قنواتي الدراسية') : '👥 مجموعات مباحثاتي'} — الصفحة ${page + 1}`;
+      let text = `${kind === 'channels' ? '📡 قنواتي الدراسية' : '👥 مجموعات مباحثاتي'} — الصفحة ${page + 1}`;
       if (!result.rows.length) text += '\nلا توجد ارتباطات في هذه الصفحة ضمن المواسم الحالية.';
       if (missing.length) text += '\n\nلم تُضف روابط متاحة لهذه الارتباطات بعد؛ راجع الإدارة:\n' + missing.join('\n');
       return render(ctx, text, buttons, actor);

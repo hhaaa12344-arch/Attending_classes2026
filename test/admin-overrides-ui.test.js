@@ -5,7 +5,7 @@ async function setup(){
   const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../admin/index.html'),'utf8'),{url:'https://test.example/admin/',runScripts:'outside-only'}),w=dom.window;
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};w.confirm=()=>true;
   w.Telegram={WebApp:{showConfirm(message,done){done(w.confirm(message));},ready(){},expand(){},initData:'signed'}};
-  const requests=[];let windows=[],contactHistory=[],pending=true;
+  const requests=[];let windows=[],contactHistory=[];
   const stage={id:1,name:'المرحلة',stage_season_id:1,season_name:'الموسم',subjects:[{id:1,name:'العقائد'},{id:2,name:'الفقه'}],groups:[],teachers:[]};
   const item={id:71,subject_id:1,subject_name:'العقائد',stage_season_id:1,source_type:'channel_schedule',activated_at:'2026-01-01T12:00:00Z',active_until:'2026-01-02T12:00:00Z'};
   const exam={id:81,subject_id:1,subject_name:'العقائد',exam_number:1,opens_at:'2026-01-01T12:00:00Z',closes_at:'2026-01-02T12:00:00Z',status:'published',questions:[]};
@@ -22,9 +22,7 @@ async function setup(){
       else data={rows:[{id:1,full_name:'طالب <img src=x>',stage_name:'المرحلة',telegram_id:700001}],total:1,page:0,size:20};
     }
     else if(u.pathname.endsWith('/student-contact/1'))data=contactHistory;
-    else if(u.pathname.endsWith('/lesson-management'))data={season:{is_active:true},subjects:stage.subjects.map(s=>({...s,total:1,open_count:0})),rows:[{...item,item_number:1,attended_count:1,enrolled_count:30,is_active:false}],total:1,page:0,size:25,scheduledRows:pending?[{id:92,subject_id:2,subject_name:'الفقه',lesson_date:'2026-01-01'}]:[],pendingRows:pending?[{id:91,source_message_id:45,source_url:'https://t.me/test/45',received_at:'2026-01-01T12:00:00Z'}]:[]};
-    else if(u.pathname.endsWith('/lessons/71/republish')){item.republished_at=new Date().toISOString();data={created:true,lesson:item};}
-    else if(u.pathname.endsWith('/pending-lessons/91/restore')){pending=false;data={created:true,lesson:{active_until:new Date(Date.now()+86400000).toISOString()}};}
+    else if(u.pathname.endsWith('/lesson-management'))data={season:{is_active:true},subjects:stage.subjects.map(s=>({...s,total:1,open_count:0})),rows:[{...item,item_number:1,attended_count:1,enrolled_count:30,is_active:false}],total:1,page:0,size:25};
     else if(u.pathname.endsWith('/admin-options')){
       const p=Number(u.searchParams.get('page')||0),isExam=u.pathname.includes('/exams/');
       data={item:isExam?exam:item,subjects:stage.subjects,rows:p?[{id:26,full_name:'طالب الصفحة الثانية'}]:[{id:1,full_name:'طالب <img src=x>'},{id:2,full_name:'طالب حاضر',attendance:isExam?null:{marking_kind:'admin_late',listened_at:'2026-01-03T00:00:00Z',marked_by:42,admin_note:'عذر'}}],total:26,page:p,size:25};
@@ -120,29 +118,3 @@ test('UI: administrator searches a student, opens their profile and queues a pri
     await h.until(()=>h.el('#dialog-body').textContent.includes('رد خاص على الإجازة'));
   }finally{h.dom.window.close();}
 });
-
-
-test('UI publishes from the scheduled row in the same lesson table without a separate recovery list',async()=>{
- const h=await setup();try{
-  h.click('[data-action="lesson-management"]');await h.until(()=>h.w.document.querySelector('[data-action="scheduled-lesson-publish"]'));
-  assert.equal(h.w.document.querySelector('.restore-pending-lesson'),null);
-  assert.ok(!h.el('#content').textContent.includes('دروس محفوظة بانتظار الربط'));
-  h.click('[data-action="scheduled-lesson-publish"]');await h.until(()=>h.w.document.querySelector('.restore-pending-lesson'));
-  h.choose('.restore-pending-lesson [name="id"]');
-  h.submit('.restore-pending-lesson');await h.until(()=>h.requests.some(r=>r.url.endsWith('/pending-lessons/91/restore')));
-  assert.equal(JSON.parse(h.requests.find(r=>r.url.endsWith('/pending-lessons/91/restore')).options.body).subjectId,'2');
-  await h.until(()=>h.el('#notice').textContent.includes('استُرجع الدرس'));
-  assert.equal(h.el('#detail').open,false);
- }finally{h.dom.window.close();}
-});
-
- test('UI republish uses only lesson endpoint and does not open a discussion window',async()=>{
- const h=await setup();try{
-  h.click('[data-action="lesson-management"]');await h.until(()=>h.w.document.querySelector('[data-action="lesson-republish"]'));
-  h.click('[data-action="lesson-republish"]');await h.until(()=>h.requests.some(r=>r.url.endsWith('/lessons/71/republish')));
-  const request=h.requests.find(r=>r.url.endsWith('/lessons/71/republish'));
-  assert.deepEqual(JSON.parse(request.options.body),{expectedSubjectId:'1'});
-  assert.equal(h.requests.some(r=>r.url.includes('/sessions/')),false);
-  await h.until(()=>h.el('#notice').textContent.includes('أعيد نشر الدرس'));
- }finally{h.dom.window.close();}
- });

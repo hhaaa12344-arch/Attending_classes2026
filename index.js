@@ -6,9 +6,6 @@ const studies = require('./studies');
 const instituteLinks = require('./instituteLinks').createInstituteLinks(db.pool);
 const { initIntegritySchema } = require('./integrity');
 const access = require('./access').createAccess(db.pool);
-const lessonRecovery = require('./lessonRecovery').createLessonRecovery(db);
-const scheduledPublication = require('./scheduledPublication').createScheduledPublication(db);
-const stageCorrections = require('./stageCorrections').createStageCorrections(db);
 const adminData = require('./adminData').createAdminData(db, studies);
 const scheduler = require('./scheduler').createScheduler({pool:db.pool,studies});
 const studentReminders = require('./studentReminders');
@@ -107,7 +104,7 @@ const PREVIEW_BLOCKED_ACTION_PREFIXES = [
 const PREVIEW_BLOCKED_TEXT_ACTIONS = new Set([
   'leave_awaiting_days', 'leave_awaiting_reason', 'student_report_upload',
   'report_item_score', 'teacher_report_score', 'grade_override', 'lessons_score',
-  'teacher_slot_postpone_reason', 'stage_correction_reason',
+  'teacher_slot_postpone_reason',
 ]);
 // أزرار قوائم الطالب/الأستاذ التي تُنفّذ عمليات (لا مجرد عرض)
 const PREVIEW_BLOCKED_HEARS = new Set(['🌴 طلب إجازة', '📄 إرسال تقرير', '📣 رسالة جماعية']);
@@ -214,7 +211,7 @@ const STUDENT_MENU_BUTTONS = new Set([
   '📊 تقرير الحضور',
   '📊 تقريري',
   '🌴 طلب إجازة',
-  '🗓️ جدولي', '🗓️ جدول المباحثات',
+  '🗓️ جدول المباحثات',
   '📝 الامتحانات الشهرية',
   '🎯 درجات - المباحثات',
   '🎯 درجات المباحثات والتقارير',
@@ -234,7 +231,7 @@ const TEACHER_MENU_BUTTONS = new Set([
   '📣 رسالة جماعية',
   '🔗 روابط المعهد',
   '🚪 الخروج من المعاينة',
-  '📚 المواد الدراسية', '📊 حضور المباحثات', '📚 موادي', '📊 حضور موادي', '👥 المجموعات',
+  '📚 موادي', '📊 حضور موادي', '👥 المجموعات',
   '🗓️ جدول المباحثات', '📝 الامتحانات', '🏁 إنهاء الموسم', '✏️ تحرير الدرجات',
   '📄 تقارير الطلبة', '🔗 روابط المجموعات',
   '🖥️ فتح لوحة الأستاذ', TEACHER_MENU_SPACER,
@@ -400,7 +397,7 @@ async function sendOfficialConfirmationPrompt(ctx) {
 
 function teacherMainMenu() {
   return Markup.keyboard([
-    [replyButton('📚 المواد الدراسية'), replyButton('📊 حضور المباحثات')],
+    [replyButton('📚 موادي'), replyButton('📊 حضور موادي')],
     [replyButton('👥 المجموعات'), replyButton('🗓️ جدول المباحثات')],
     [replyButton('📝 الامتحانات'), replyButton('🏁 إنهاء الموسم')],
     [replyButton('✏️ تحرير الدرجات'), replyButton('📄 تقارير الطلبة')],
@@ -1286,10 +1283,6 @@ bot.on(['document', 'photo'], async (ctx, next) => {
 instituteLinks.install({ bot, Markup, userState, isAdmin, isInPreview, getPreview,
   effectiveStudent, effectiveTeacher, replyStudentScreen, studentMainMenu, teacherMainMenu,
   adminMainMenu, menus: [STUDENT_MENU_BUTTONS, TEACHER_MENU_BUTTONS, ADMIN_MENU_BUTTONS] });
-
-stageCorrections.install({bot,Markup,userState,effectiveStudent,isAdmin,isInPreview,adminIds:ADMIN_IDS,
-  menuButtons:[STUDENT_MENU_BUTTONS,TEACHER_MENU_BUTTONS,ADMIN_MENU_BUTTONS],studentMainMenu,
-  wakeNotifications:()=>outboxWorker.tick({force:true})});
 
 bot.on('text', async (ctx, next) => {
   const inputText = ctx.message.text.trim();
@@ -2964,11 +2957,11 @@ bot.action(/admin_mgt_reopen:(\d+):(\d+)/, async (ctx) => {
   const lessonId = Number(ctx.match[1]);
   const stageId = Number(ctx.match[2]);
   const reopened = await db.reopenLesson(lessonId);
-  if (!reopened) return ctx.answerCbQuery('الدرس غير متاح لإعادة الفتح: انتهت مهلة حضوره الأصلية أو موسمه غير نشط.', { show_alert: true });
+  if (!reopened) return ctx.answerCbQuery('الدرس غير متاح لإعادة الفتح: مضت 24 ساعة على نشره أو موسمه غير نشط.', { show_alert: true });
   const lesson = await db.getLessonById(lessonId);
   await ctx.answerCbQuery('تم فتح الدرس ✅');
   return ctx.editMessageText(
-    `✅ أُعيد فتح الدرس رقم ${Number(lesson.lesson_number)} من «${lesson.subject_name}» حتى ${new Date(reopened.active_until).toLocaleString('ar-IQ', {timeZone:'Asia/Baghdad'})}؛ ضمن مهلة الحضور الأصلية لهذا الدرس.\n` +
+    `✅ أُعيد فتح الدرس رقم ${Number(lesson.lesson_number)} من «${lesson.subject_name}» حتى ${new Date(reopened.active_until).toLocaleString('ar-IQ', {timeZone:'Asia/Baghdad'})}؛ ضمن 24 ساعة من النشر الأصلي.\n` +
       'يمكن للطلبة الآن فتح «📚 دروس اليوم» وتأشير الحضور عليه.'
   );
 });
@@ -3477,7 +3470,7 @@ async function showTeacherSubjects(ctx) {
   return ctx.reply(`موادك في ${subjects[0].season_name}:\n${lines.join('\n')}`, teacherMainMenu());
 }
 
-bot.hears(['📚 المواد الدراسية','📚 موادي'], showTeacherSubjects);
+bot.hears('📚 موادي', showTeacherSubjects);
 
 async function showTeacherAttendanceMenu(ctx) {
   const subjects = await getActorSubjects(ctx);
@@ -3492,7 +3485,7 @@ async function showTeacherAttendanceMenu(ctx) {
   return ctx.reply('اختر المادة لعرض حضور مباحثات طلبتها:', Markup.inlineKeyboard(rows));
 }
 
-bot.hears(['📊 حضور المباحثات','📊 حضور موادي'], showTeacherAttendanceMenu);
+bot.hears('📊 حضور موادي', showTeacherAttendanceMenu);
 
 bot.action(/^teacher_att:(\d+):(\d+)$/, async (ctx) => {
   const subjectId = Number(ctx.match[1]);
@@ -4078,8 +4071,7 @@ bot.action(/tg_cap:(\d+)/, async (ctx) => {
 // ---------------------------------------------------------------------------
 // الأستاذ — الجدول الأسبوعي
 // ---------------------------------------------------------------------------
-bot.hears('🗓️ جدول المباحثات', async (ctx,next) => {
-  if(!(isAdmin(ctx)&&!isInPreview(ctx))&&!await effectiveTeacher(ctx))return next();
+bot.hears('🗓️ جدول المباحثات', async (ctx) => {
   const actor = await requireTeacher(ctx);
   if (!actor) return undefined;
   const admin=isAdmin(ctx)&&!isInPreview(ctx);
@@ -4655,7 +4647,7 @@ bot.action(/fin_do:(\d+):(\d+)/, async (ctx) => {
 // ---------------------------------------------------------------------------
 // الطالب — جدوله الأسبوعي
 // ---------------------------------------------------------------------------
-bot.hears(['🗓️ جدول المباحثات','🗓️ جدولي'], async (ctx) => {
+bot.hears('🗓️ جدولي', async (ctx) => {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
   if (!stageSupportsStudies(student)) return ctx.reply('مرحلتك مخصصة لحضور الدروس فقط، ولا تشمل المباحثات أو التقارير أو الامتحانات.');
@@ -5373,7 +5365,7 @@ bot.action(/ch_do:(\d+):(\d+):(\d+)/, async (ctx) => {
         `الامتحانات: ${Number(summary.exam_count)}\n` +
         `طلبة نظام التقارير: ${Number(summary.report_students)}\n\n` +
         `سيصلك الآن ${ungraded.length} تقريرًا لم تُقيَّم بعد.\n` +
-        'تجد كل شيء في لوحتك: 📚 المواد الدراسية | 🗓️ جدول المباحثات | 📝 الامتحانات | 🏁 إنهاء الموسم.'
+        'تجد كل شيء في لوحتك: 📚 موادي | 🗓️ جدول المباحثات | 📝 الامتحانات | 🏁 إنهاء الموسم.'
     );
   } catch (err) {
     console.warn('تعذر إبلاغ الأستاذ الجديد:', err.description || err.message);
@@ -6063,9 +6055,8 @@ async function activateChannelLesson({
   notificationDate,
   activatedAt = null,
   activityMessageId = messageId,
-  existingActivation = null,
 }) {
-  const activated = existingActivation || await db.activateLesson(
+  const activated = await db.activateLesson(
     subject.id,
     LESSON_ACTIVE_HOURS,
     sourceType,
@@ -6137,7 +6128,7 @@ async function recoverPendingChannelLessonsForDate(lessonDate) {
         );
       }
 
-      posts = (await db.getPendingChannelLessonPosts(stageSeasonId, lessonDate)).filter(p=>p.auto_match&&(p.lesson_date instanceof Date?p.lesson_date.toISOString().slice(0,10):String(p.lesson_date).slice(0,10))===lessonDate);
+      posts = await db.getPendingChannelLessonPosts(stageSeasonId, lessonDate);
       if (!posts.length) continue;
 
       const scheduled = await db.getPendingScheduledSubjectsForDate(stageSeasonId, lessonDate);
@@ -6156,16 +6147,35 @@ async function recoverPendingChannelLessonsForDate(lessonDate) {
       const longStable = Date.now() - latestChangeMs >= 2 * 60 * 1000;
       if (!enoughSubjects && !longStable) continue;
 
-      const allSubjects=(await db.pool.query('SELECT sub.id,sub.name,sub.hashtag FROM subjects sub JOIN stage_seasons ss ON ss.stage_id=sub.stage_id WHERE ss.id=$1',[stageSeasonId])).rows;
-      for (const post of posts) {
-        const available=await db.getPendingScheduledSubjectsForDate(stageSeasonId,lessonDate);
-        const subject = require('./scheduledPublication').chooseSubject(available,post.content_text,allSubjects);
-        if(!subject)continue;
+      const pairCount = Math.min(posts.length, scheduled.length);
+      for (let i = 0; i < pairCount; i += 1) {
+        const post = posts[i];
+        const subject = scheduled[i];
         const channel = await db.getChannelByChatId(post.telegram_chat_id);
         if (!channel || Number(channel.stage_season_id) !== Number(stageSeasonId)) continue;
 
-        const result=await lessonRecovery.restore(post.id,subject.id,{scheduleDate:lessonDate});
-        if(!result.created)continue;
+        // لا نُنشئ درسًا انتهت مهلته أصلًا؛ يبقى المنشور معلّقًا ويمكن للأدمن معالجته يدويًا.
+        const receivedAt = post.received_at ? new Date(post.received_at) : null;
+        if (!receivedAt || Number.isNaN(receivedAt.getTime())) continue;
+        if (Date.now() - receivedAt.getTime() >= LESSON_ACTIVE_HOURS * 60 * 60 * 1000) continue;
+
+        const result = await activateChannelLesson({
+          channel,
+          subject,
+          sourceType: 'channel_schedule_recovered',
+          sourceUrl: post.source_url || null,
+          chatId: Number(post.telegram_chat_id),
+          messageId: Number(post.source_message_id),
+          notificationDate: lessonDate,
+          activatedAt: receivedAt,
+          activityMessageId: Number(post.source_message_id),
+        });
+        await db.resolvePendingChannelLessonPost(
+          post.id,
+          result.lesson.id,
+          subject.id,
+          'activated'
+        );
         recovered += 1;
         console.log(
           `تم استرجاع درس معلق بعد إدخال الجدول: موسم ${stageSeasonId}، مادة ${subject.id}، منشور ${post.source_message_id}`
@@ -6274,18 +6284,32 @@ async function handleChannelLesson(ctx) {
     }
 
     if (!subject && hashtags.length === 0) {
-      const result=await scheduledPublication.publish({channel,message,sourceUrl,
-        contentKind:channelPostContentKind(message,standaloneHashtag),edited:!!ctx.editedChannelPost});
-      if(result.created){
-        const activated=await activateChannelLesson({channel,subject:result.subject,sourceType:'channel_schedule',sourceUrl,
-          chatId,messageId:message.message_id,notificationDate:currentDate,activityMessageId,existingActivation:result.lesson});
-        activityLessonId=activated.lesson.id;
-      }else{
-        await db.setChannelPostActivityOutcome(chatId,activityMessageId,result.lesson?'activated':'schedule_pending',
-          result.lesson?'المنشور مرتبط بدرس سابق؛ لم تتغير مادته أو حضوره.':'حُفظ المنشور. الملفات الجديدة تطابق جدول يوم نشرها فقط؛ المنشورات القديمة والروابط تحتاج تحديدًا من الدروس المفعّلة.',
-          {stageId:channel.stage_id,stageSeasonId:channel.stage_season_id,lessonId:result.lesson?.id});
+      // إذا كان لهذه المرحلة ملفات أقدم معلّقة بانتظار الجدول، لا نتجاوزها بمنشور أحدث؛
+      // نحافظ على ترتيب النشر ثم تعالجها عملية الاسترجاع بالتسلسل.
+      const pendingBacklog = await db.getPendingChannelLessonPosts(
+        channel.stage_season_id,
+        currentDate
+      );
+      const pendingScheduled = pendingBacklog.length
+        ? []
+        : await db.getPendingScheduledSubjectsForDate(
+            channel.stage_season_id,
+            currentDate
+          );
+      if (pendingScheduled.length > 0) {
+        // أولًا نحاول التعرف على اسم المادة إذا كان مذكورًا في عنوان/وصف المنشور
+        // حتى لو لم يُستخدم هاشتاغ. وإذا لم يُذكر الاسم، نستخدم ترتيب أعمدة الجدول.
+        const messageText = String(message.caption || message.text || '');
+        const normalizedMessageText = normalizeHashtag(messageText);
+        const namedMatch = pendingScheduled.find((item) => {
+          const normalizedSubjectName = normalizeHashtag(item.name || '');
+          return normalizedSubjectName.length >= 3 && normalizedMessageText.includes(normalizedSubjectName);
+        });
+
+        // ترتيب subject_id هو نفسه ترتيب المواد الظاهر في الصف العلوي من جدول الأدمن والطالب.
+        subject = namedMatch || pendingScheduled[0];
+        activationSourceType = 'channel_schedule';
       }
-      return;
     }
 
     if (!subject) {
@@ -6307,7 +6331,6 @@ async function handleChannelLesson(ctx) {
           lessonDate: currentDate,
           sourceUrl,
           contentKind: channelPostContentKind(message, standaloneHashtag),
-          receivedAt: message.date ? new Date(message.date*1000) : null,
         });
         await db.setChannelPostActivityOutcome(
           chatId,
@@ -6358,7 +6381,6 @@ async function handleChannelLesson(ctx) {
       chatId,
       messageId: message.message_id,
       notificationDate: currentDate,
-      activatedAt: message.date ? new Date(message.date*1000) : null,
       activityMessageId,
     });
     activityLessonId = result.lesson.id;
@@ -6459,7 +6481,6 @@ async function main() {
   await db.initSchema();
   await studies.initStudiesSchema();
   await initIntegritySchema(db.pool);
-  await stageCorrections.initSchema();
   await instituteLinks.initSchema();
   await initBackupSchema(db.pool);
   await initStudentGuideSchema(db.pool);
@@ -6574,7 +6595,6 @@ module.exports = {
   groupStudentReport,
   parseLeaveDays,
   currentDateInTimeZone,
-  recoverPendingChannelLessonsForDate,
   studentScheduleWindow,
   buildAdminAbsenceMessages,
   lessonKeyboard,

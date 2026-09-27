@@ -114,7 +114,6 @@ async function initStudiesSchema() {
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS attendance_reopened_at TIMESTAMP;
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS attendance_reopen_until TIMESTAMP;
     ALTER TABLE mubahatha_sessions ADD COLUMN IF NOT EXISTS attendance_reopen_count INTEGER NOT NULL DEFAULT 0;
-    ALTER TABLE mubahatha_attendance ADD COLUMN IF NOT EXISTS admin_note TEXT;
 
     -- ---------- الامتحانات الشهرية ----------
     -- ثلاثة امتحانات في الموسم لكل مادة، كل امتحان 5 درجات مهما كان عدد أسئلته.

@@ -21,8 +21,6 @@ async function setup({authorized=true,noticeState=null}={}){
         rows:[{id:71,item_number:page?1:26,subject_name:'الفقه',title:'جلسة <img src=x>',group_title:'الأولى',activated_at:'2026-09-22T12:00:00Z',opened_at:'2026-09-22T12:00:00Z',active_until:'2026-09-23T12:00:00Z',closes_at:'2026-09-23T12:00:00Z',can_reopen:true,is_active:true,attended_count:3,enrolled_count:5,complete_count:3}]};
     }
     else if(u.pathname.endsWith('/sessions/71/notifications'))data=notifications;
-    else if(u.pathname.endsWith('/sessions/71/admin-options'))data={item:{id:71,subject_id:1,subject_name:'الفقه',group_title:'الأولى',opened_at:'2026-09-22T12:00:00Z',closes_at:'2026-09-22T13:00:00Z'},rows:[{id:1,full_name:'طالب البداية فقط',attended_start:true,attended_end:false},{id:2,full_name:'طالب ثان',attended_start:false,attended_end:false},{id:3,full_name:'طالب مكتمل',attended_start:true,attended_end:true}],total:3,page:0,size:25};
-    else if(u.pathname.endsWith('/sessions/71/selected-attendance'))data={added:2,records:3,existing:0};
     else if(/\/(lessons|sessions)\/71\/(reopen|retry-notifications|cancel|mark-all)$/.test(u.pathname))data={ok:true,added:2,records:4,attendance_reopen_until:notifications.until,notifications};
     else if(u.pathname.endsWith('/lessons/71/attendance'))data={lesson:{id:71,subject_name:'الفقه',activated_at:'2026-09-22T12:00:00Z'},rows:[{student_id:1,full_name:'طالب اختبار اسم رباعي',listened_at:'2026-09-22T13:00:00Z',marking_kind:'student'}],total:1,page:0,size:25};
     else if(u.pathname.endsWith('/lessons/71/attendance/1/remove'))data={removed:true};
@@ -278,23 +276,6 @@ test('admin displays zero queued notices honestly and exposes recipient diagnost
   click('[data-action="session-retry-notifications"]');await until(()=>requests.some(r=>r.url.endsWith('/sessions/71/retry-notifications')));
   await until(()=>!w.document.querySelector('#dialog-notice').hidden);
   assert.match(w.document.querySelector('#dialog-notice').textContent,/لم يُجهّز أي إشعار/);
- }finally{dom.window.close();}
-});
-
-test('admin selected discussion attendance uses checkboxes and the session endpoint only',async()=>{
- const {dom,w,requests,until,click}=await setup();try{
-  await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
-  click('[data-action="tab"][data-tab="schedule"]');await until(()=>w.document.querySelector('[data-action="session-selected"]'));
-  click('[data-action="session-selected"]');await until(()=>w.document.querySelector('#save-override'));
-  assert.match(w.document.querySelector('#dialog-title').textContent,/لمباحثة/);
-  assert.equal(w.document.querySelector('[name="opensAt"]'),null);
-  assert.equal(w.document.querySelector('[name="override-student"][value="3"]').disabled,true);
-  for(const id of [1,2]){const cb=w.document.querySelector(`[name="override-student"][value="${id}"]`);assert.equal(cb.type,'checkbox');cb.checked=true;cb.dispatchEvent(new w.Event('change',{bubbles:true}));}
-  w.document.querySelector('#save-override').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
-  await until(()=>requests.some(r=>r.url.endsWith('/sessions/71/selected-attendance')));
-  assert.deepEqual(JSON.parse(requests.find(r=>r.url.endsWith('/sessions/71/selected-attendance')).options.body).studentIds,[1,2]);
-  assert.ok(!requests.some(r=>r.url.includes('/lessons/')||r.url.includes('/exams/')));
-  await until(()=>w.document.querySelector('#notice').textContent.includes('أضيف 3 تسجيلًا'));
  }finally{dom.window.close();}
 });
 test('admin controls remain responsive while lesson deletion is saving and after exam deletion',async()=>{
