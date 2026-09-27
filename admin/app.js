@@ -9,7 +9,8 @@ const actionLabels={change_participation_mode:'تغيير متابعة مادة 
 const entityLabels={student:'طالب',stage:'مرحلة',subject:'مادة',group:'مجموعة',leave:'إجازة',report:'تقرير',session:'مباحثة',slot:'موعد',exam:'امتحان',question:'سؤال',teacher:'أستاذ',assignment:'إسناد',lesson_schedule:'جدول الدروس',lesson:'درس',channel:'قناة'};
 actionLabels['retry-notifications_session']='إعادة محاولة إشعار المباحثة';
 actionLabels.selected_discussion_attendance='حضور إداري لطلبة محددين في المباحثة';
-actionLabels.restore_pending_lesson='استرجاع درس معلّق';
+actionLabels.restore_pending_lesson='نشر درس محفوظ';
+actionLabels.republish_lesson='إعادة نشر درس لمدة 24 ساعة';
 actionLabels.stage_correction_approved='الموافقة على تصحيح المرحلة';
 actionLabels.stage_correction_rejected='رفض تصحيح المرحلة';
 actionLabels.stage_correction_stale='إغلاق طلب تصحيح مرحلة تغيّرت بياناته';
@@ -341,14 +342,25 @@ async function lessonManagementContent(stageId){
   const data=await api('/lesson-management?'+new URLSearchParams({stageId,page:mgtPage,...(mgtSubjectId?{subjectId:mgtSubjectId}:{}),...(currentSeasonId?{seasonId:currentSeasonId}:{})}));
   if(data.total&&mgtPage>0&&!data.rows.length){mgtPage--;return lessonManagementContent(stageId);}
   const ro=!data.season.is_active;
-  return ((!ro&&data.pendingRows?.length)?'<section class="detail-section"><h2>دروس محفوظة بانتظار الربط</h2><p>أقدم 50 منشورًا معلّقًا، بما فيها الأيام السابقة. اختر المادة الصحيحة للمنشور؛ يحتفظ بتاريخ نشره ورقمه حسب ترتيب النشر، ويفتح الحضور 24 ساعة من الاسترجاع.</p>'+table(['المنشور وتاريخ النشر','المادة الصحيحة والاسترجاع'],data.pendingRows.map(x=>[
-      `الرسالة #${esc(x.source_message_id)} · ${stamp(x.received_at)}${/^https:\/\//i.test(x.source_url||'')?`<div><a href="${esc(x.source_url)}" target="_blank" rel="noopener noreferrer">فتح المنشور</a></div>`:''}`,
-      `<form class="restore-pending-lesson"><input type="hidden" name="id" value="${x.id}"><label>المادة<select name="subjectId" required><option value="">اختر المادة</option>${data.subjects.map(sub=>`<option value="${sub.id}">${esc(sub.name)}</option>`).join('')}</select></label><button type="submit">ربط واسترجاع الدرس</button></form>`]))+'</section>':'')+managementSummary(data,'درسًا')+subjectSelector(data,'lesson-mgt',mgtSubjectId)+
-    table(['رقم الدرس في المادة','المادة','النشر الأصلي','نهاية التسجيل','الحضور','الإجراءات'],data.rows.map(l=>[`${l.item_number}<div class="subtle">المعرف #${l.id}</div>`,`${esc(l.subject_name)}<div class="subtle">${esc(lessonSource(l.source_type))}</div>`,stamp(l.activated_at),`${stamp(l.active_until)}<div>${l.is_active?'مفتوح':'انتهت المهلة'}</div>`,`${l.attended_count} / ${l.enrolled_count}`,
-      button('حذف حضور طالب','lesson-attendance-remove',`data-id="${l.id}"`)+(ro?'':(l.can_reopen?button('إعادة فتح للوقت المتبقي','lesson-reopen',`data-id="${l.id}" data-subject="${esc(l.subject_name)}" data-recovered="${l.attendance_opened_at?1:0}"`):'<span class="subtle">مضت مهلة إعادة الفتح</span>')+
+  return managementSummary(data,'درسًا')+subjectSelector(data,'lesson-mgt',mgtSubjectId)+
+    table(['رقم الدرس في المادة','المادة','النشر المسجّل','نهاية التسجيل','الحضور','الإجراءات'],[...(mgtPage===0?(data.scheduledRows||[]).map(x=>['—',esc(x.subject_name),'موعد الجدول: '+esc(x.lesson_date),'بانتظار تحديد المنشور','—',ro?'':button('نشر لمدة 24 ساعة','scheduled-lesson-publish',`data-subject="${x.subject_id}" data-date="${esc(x.lesson_date)}"`)]):[]),...data.rows.map(l=>[`${l.item_number}<div class="subtle">المعرف #${l.id}</div>`,`${esc(l.subject_name)}<div class="subtle">${esc(lessonSource(l.source_type))}</div>${/^https:\/\//i.test(l.source_url||'')?`<a href="${esc(l.source_url)}" target="_blank" rel="noopener noreferrer">فتح منشور الدرس</a>`:''}`,stamp(l.activated_at),`${stamp(l.active_until)}<div>${l.is_active?'مفتوح':'انتهت المهلة'}</div>`,`${l.attended_count} / ${l.enrolled_count}`,
+      button('حذف حضور طالب','lesson-attendance-remove',`data-id="${l.id}"`)+(ro?'':(l.can_reopen?button('إعادة فتح للوقت المتبقي','lesson-reopen',`data-id="${l.id}" data-subject="${esc(l.subject_name)}" data-recovered="${l.republished_at||l.attendance_opened_at?1:0}"`):'<span class="subtle">انتهت المهلة</span>')+
+      (!l.is_active&&!l.republished_at?button('إعادة نشر لمدة 24 ساعة','lesson-republish',`data-id="${l.id}" data-subject="${l.subject_id}"`):'')+
       button('تصحيح المادة','lesson-correct',`data-id="${l.id}"`)+
       (!l.is_active?button('حضور إداري متأخر لطلبة محددين','lesson-late',`data-id="${l.id}"`):'')+
-      button('تحضير الجميع','lesson-markall',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`)+button('حذف الدرس','lesson-cancel',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`,'danger'))]))+managementPager(data,'lessons');
+      button('تحضير الجميع','lesson-markall',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`)+button('حذف الدرس','lesson-cancel',`data-id="${l.id}" data-subject="${esc(l.subject_name)}"`,'danger'))])])+managementPager(data,'lessons');
+}
+async function publishScheduledLessonDialog(subjectId,date){
+  const n=++dialogSequence,data=await api('/lesson-management?'+new URLSearchParams({stageId:mgtStageId}));
+  if(n!==dialogSequence)return;
+  const subject=data.subjects.find(s=>String(s.id)===String(subjectId));if(!subject)throw Error('المادة غير موجودة.');
+  dialog('نشر درس من الجدول',`<p>${esc(subject.name)} · موعد الجدول ${esc(date)}</p>
+    <p>اختر منشور هذا الدرس بعد فتحه والتأكد من محتواه. لن يتغير أي درس آخر أو حضور سابق.</p>
+    ${data.pendingRows?.length?`<form class="restore-pending-lesson"><input type="hidden" name="subjectId" value="${subject.id}"><input type="hidden" name="scheduleDate" value="${esc(date)}">
+    ${table(['اختيار','المنشور المحفوظ'],data.pendingRows.map(x=>[`<input type="radio" name="id" value="${x.id}" required aria-label="المنشور ${x.source_message_id}">`,
+      `الرسالة #${esc(x.source_message_id)} · ${esc(x.content_kind||'')} · وقت محفوظ: ${stamp(x.received_at)}${/^https:\/\//i.test(x.source_url||'')?` · <a href="${esc(x.source_url)}" target="_blank" rel="noopener noreferrer">فتح المنشور</a>`:''}<div>${esc(x.content_text||'')}</div>`]))}
+    <label>تاريخ النشر الأصلي بتوقيت بغداد — إن كان الوقت المحفوظ غير صحيح<input type="datetime-local" name="originalPublishedAt"></label>
+    <button type="submit">نشر لمدة 24 ساعة</button></form>`:'<p>لا يوجد منشور محفوظ غير مربوط. أرسل ملف الدرس مع هاشتاغ المادة ليُعرف بصورة صريحة.</p>'}`);
 }
 let removeAttendanceState=null;
 async function removeAttendanceDialog(id,page=0,q=''){
@@ -370,7 +382,7 @@ async function removeAttendanceDialog(id,page=0,q=''){
 async function correctLessonDialog(id){
   const n=++dialogSequence,data=await api('/lessons/'+id+'/admin-options');if(n!==dialogSequence)return;
   const l=data.item;
-  dialog('تصحيح مادة الدرس',`<p>الدرس #${l.id} · ${esc(l.subject_name)} · النشر الأصلي: ${stamp(l.activated_at)}</p><p>${esc(lessonSource(l.source_type))}</p>
+  dialog('تصحيح مادة الدرس',`<p>الدرس #${l.id} · ${esc(l.subject_name)} · النشر الأصلي: ${stamp(l.activated_at)}</p><p>${esc(lessonSource(l.source_type))}</p>${/^https:\/\//i.test(l.source_url||'')?`<p><a href="${esc(l.source_url)}" target="_blank" rel="noopener noreferrer">فتح منشور الدرس للتحقق من مادته</a></p>`:''}
     <p>يبقى الدرس وكل سجلات حضوره محفوظة. تتغير المادة في التقارير ويُحسب رقم الدرس ضمن المادة الصحيحة.</p>
     <form id="correct-lesson" data-id="${l.id}"><input type="hidden" name="expectedSubjectId" value="${l.subject_id}">
     <label>المادة الصحيحة<select name="subjectId" required>${data.subjects.map(s=>`<option value="${s.id}" ${s.id===l.subject_id?'selected':''}>${esc(s.name)}</option>`).join('')}</select></label>
@@ -518,6 +530,12 @@ document.addEventListener('click',async event=>{
     else if(a==='student')await showStudent(target.dataset.id);
     else if(a.startsWith('new-'))await newForm(a.slice(4));
     else if(a==='exam')await showExam(target.dataset.id);
+    else if(a==='scheduled-lesson-publish')await publishScheduledLessonDialog(target.dataset.subject,target.dataset.date);
+    else if(a==='lesson-republish'){
+      if(!await confirmAction('إعادة نشر هذا الدرس لمدة 24 ساعة من الآن وإشعار الطلبة؟ يبقى رقم الدرس وكل حضوره السابق محفوظًا.'))return;
+      const r=await api('/lessons/'+target.dataset.id+'/republish',{expectedSubjectId:target.dataset.subject},'POST');
+      await loadLessonManagement();notify(r.created?'أعيد نشر الدرس لمدة 24 ساعة وحُفظ إشعار الطلبة للإرسال.':'سبق استرجاع هذا الدرس؛ لم تُمدد المدة.');
+    }
     else if(a==='lesson-correct')await correctLessonDialog(target.dataset.id);
     else if(a==='session-selected')await studentOverrideDialog('session',target.dataset.id);
     else if(a==='lesson-late')await studentOverrideDialog('lesson',target.dataset.id);
@@ -725,8 +743,8 @@ document.addEventListener('submit',async event=>{
     }else if(form.classList.contains('restore-pending-lesson')){
       if(!body.subjectId)throw Error('اختر المادة الصحيحة.');
       if(!await confirmAction('ربط هذا المنشور بالمادة المختارة واسترجاعه؟ يبقى تاريخ نشره الأصلي للترقيم، ويتاح الحضور 24 ساعة من الآن.'))return;
-      const r=await api('/pending-lessons/'+body.id+'/restore',{subjectId:body.subjectId},'POST');
-      await loadLessonManagement();notify(r.created?'استُرجع الدرس وأتيح الحضور حتى '+stamp(r.lesson.active_until):'هذا المنشور مفعّل بالفعل؛ لم تُمدد مهلته أو يُكرر.');
+      const r=await api('/pending-lessons/'+body.id+'/restore',{subjectId:body.subjectId,scheduleDate:body.scheduleDate,...(body.originalPublishedAt?{originalPublishedAt:body.originalPublishedAt+':00+03:00'}:{})},'POST');
+      closeDetail();await loadLessonManagement();notify(r.created?'استُرجع الدرس وأتيح الحضور حتى '+stamp(r.lesson.active_until):'هذا المنشور مفعّل بالفعل؛ لم تُمدد مهلته أو يُكرر.');
     }else if(form.id==='override-search'){adminSelection.query=body.q;await loadOverrideStudents(0);}
     else if(form.id==='save-override'){
       const state=adminSelection,ids=[...state.selected.keys()];
