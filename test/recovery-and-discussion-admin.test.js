@@ -43,7 +43,7 @@ test('old backlog never consumes today schedule; every stage retains explicit ma
   for(const f of fixtures){
     const old=await pending(f,10,1);
     await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$4,now()-interval '3 minutes'),($1,$3,$4,now()-interval '3 minutes')",[f.ss,f.a.id,f.b.id,today]);
-    await app.bot.handleUpdate({update_id:++seq,channel_post:{message_id:11,date:Math.floor(Date.now()/1000),chat:{id:f.chat,type:'channel',title:'قناة المرحلة'},voice:{file_id:'offline',file_unique_id:'voice'+f.chat,duration:60}}});
+    await app.bot.handleUpdate({update_id:++seq,channel_post:{message_id:11,caption:f.a.name,date:Math.floor(Date.now()/1000),chat:{id:f.chat,type:'channel',title:'قناة المرحلة'},voice:{file_id:'offline',file_unique_id:'voice'+f.chat,duration:60}}});
     assert.equal((await db.getLessonBySource(f.chat,11)).subject_id,f.a.id);
     assert.equal(await db.getLessonBySource(f.chat,10),undefined);
     await assert.rejects(recovery.restore(old.id,f.b.id,{scheduleDate:today}),{code:'REVIEW_REQUIRED'});
@@ -64,7 +64,7 @@ test('manual recovery rejects another stage and archived seasons; repeating sche
 
 test('new files posted before today schedule activate after adding it, with no separate recovery workflow',async()=>{
   const f=await fixture(),today=app.currentDateInTimeZone('Asia/Baghdad');
-  for(const messageId of [70,71])await app.bot.handleUpdate({update_id:++seq,channel_post:{message_id:messageId,date:Math.floor(Date.now()/1000),
+  for(const messageId of [70,71])await app.bot.handleUpdate({update_id:++seq,channel_post:{message_id:messageId,caption:messageId===70?f.a.name:f.b.name,date:Math.floor(Date.now()/1000),
     chat:{id:f.chat,type:'channel',title:'قناة المرحلة'},audio:{file_id:'offline',file_unique_id:'pending'+messageId,duration:60}}});
   assert.equal(await db.getLessonBySource(f.chat,70),undefined);
   await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$4,now()-interval '3 minutes'),($1,$3,$4,now()-interval '3 minutes')",[f.ss,f.a.id,f.b.id,today]);
@@ -75,6 +75,56 @@ test('new files posted before today schedule activate after adding it, with no s
   assert.equal((await db.getLessonBySource(f.chat,71)).subject_id,f.b.id);
   assert.equal((await admin.managedItems('lessons',{stageId:f.stage.id})).scheduledRows.length,0);
   assert.equal((await app.recoverPendingChannelLessonsForDate(today)).recovered,0);
+});
+
+test('old named audio is found after adding its subject today, becomes first and cannot consume another subject',async()=>{
+  const f=await fixture(),today=app.currentDateInTimeZone('Asia/Baghdad'),old=new Date(Date.now()-2*86400000);
+  const p=await db.queuePendingChannelLessonPost({chatId:f.chat,messageId:80,stageId:f.stage.id,stageSeasonId:f.ss,lessonDate:old.toISOString().slice(0,10),receivedAt:old,autoMatch:true,contentKind:'audio',contentText:f.a.name});
+  await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$4,now()-interval '3 minutes'),($1,$3,$4,now()-interval '3 minutes')",[f.ss,f.a.id,f.b.id,today]);
+  const newer=await db.activateLesson(f.a.id,24,'channel_schedule',null,f.chat,81);
+  await db.markAttendance(f.student.id,newer.id);
+  const attendance=(await db.pool.query('SELECT * FROM attendance WHERE lesson_id=$1',[newer.id])).rows;
+  assert.equal((await app.recoverPendingChannelLessonsForDate(today)).recovered,1);
+  const recovered=await db.getLessonBySource(f.chat,80);
+  assert.equal(recovered.subject_id,f.a.id);assert.equal(recovered.active_until-recovered.attendance_opened_at,86400000);
+  assert.equal(Number((await db.getLessonById(recovered.id)).lesson_number),1);assert.equal(Number((await db.getLessonById(newer.id)).lesson_number),2);
+  assert.deepEqual((await db.pool.query('SELECT * FROM attendance WHERE lesson_id=$1',[newer.id])).rows,attendance);
+  assert.deepEqual((await db.getPendingScheduledSubjectsForDate(f.ss,today)).map(s=>s.id),[f.b.id]);
+  assert.equal((await app.recoverPendingChannelLessonsForDate(today)).recovered,0);
+});
+
+test('one verified old audio matches the single newly scheduled missing subject; two anonymous audios never guess',async()=>{
+  const today=app.currentDateInTimeZone('Asia/Baghdad'),old=new Date(Date.now()-2*86400000);
+  for(const count of [2,1]){
+    const f=await fixture();
+    for(let i=0;i<count;i++)await db.queuePendingChannelLessonPost({chatId:f.chat,messageId:90+i,stageId:f.stage.id,stageSeasonId:f.ss,lessonDate:old.toISOString().slice(0,10),receivedAt:old,autoMatch:true,contentKind:'audio'});
+    await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,f.b.id,today]);
+    await app.recoverPendingChannelLessonsForDate(today);
+    if(count===1){const l=await db.getLessonBySource(f.chat,90);assert.equal(l.subject_id,f.b.id);assert.equal(l.active_until-l.attendance_opened_at,86400000);}
+    else assert.equal(await db.getLessonBySource(f.chat,90),undefined);
+  }
+});
+
+test('two anonymous files cannot compete for one subject on their original publication day',async()=>{
+  const today=app.currentDateInTimeZone('Asia/Baghdad');
+  for(const daysAgo of [0,2]){
+    const f=await fixture(),at=new Date(Date.now()-daysAgo*86400000);
+    const date=daysAgo?new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(at):today;
+    for(const messageId of [95,96])await db.queuePendingChannelLessonPost({chatId:f.chat,messageId,stageId:f.stage.id,stageSeasonId:f.ss,lessonDate:date,receivedAt:at,autoMatch:true,contentKind:'audio'});
+    await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,f.a.id,date]);
+    await app.recoverPendingChannelLessonsForDate(today);
+    assert.equal(await db.getLessonBySource(f.chat,95),undefined);
+    assert.equal(await db.getLessonBySource(f.chat,96),undefined);
+  }
+});
+
+test('a standalone subject hashtag and following audio share one lesson and one daily notice',async()=>{
+  const f=await fixture();
+  const base={date:Math.floor(Date.now()/1000),chat:{id:f.chat,type:'channel',title:'قناة المرحلة'}};
+  await app.bot.handleUpdate({update_id:++seq,channel_post:{...base,message_id:100,text:'#'+f.a.hashtag}});
+  await app.bot.handleUpdate({update_id:++seq,channel_post:{...base,message_id:101,audio:{file_id:'standalone-audio',duration:60}}});
+  const title=await db.getLessonBySource(f.chat,100),audio=await db.getLessonBySource(f.chat,101);
+  assert.equal(audio.id,title.id);assert.equal((await db.pool.query('SELECT COUNT(*)::int AS n FROM effective_lessons WHERE stage_season_id=$1',[f.ss])).rows[0].n,1);
 });
 test('selected discussion marking adds only missing phases and never writes lesson attendance even with colliding IDs',async()=>{
   const f=await fixture(),g=await studies.createMubahathaGroup(f.a.id,f.ss,{title:'مجموعة التحضير'});

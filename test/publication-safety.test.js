@@ -17,7 +17,7 @@ async function fixture(){
   await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$4,now()-interval '3 minutes'),($1,$3,$4,now()-interval '3 minutes')",[ss,a.id,b.id,day]);
   return {stage,ss,a,b,student,chat,channel,day};
 }
-function post(f,id,extra={}){return {channel:f.channel,sourceUrl:`https://t.me/c/1/${id}`,contentKind:'audio',message:{chat:{id:f.chat},message_id:id,date:Math.floor(Date.now()/1000),...extra}};}
+function post(f,id,extra={}){return {channel:f.channel,sourceUrl:`https://t.me/c/1/${id}`,contentKind:'audio',message:{audio:{file_id:'offline',duration:60},chat:{id:f.chat},message_id:id,date:Math.floor(Date.now()/1000),...extra}};}
 
 test('backup midnight timestamp consumes September 27 slot in Baghdad instead of repeatedly picking المسائل',async()=>{
   const f=await fixture(),day='2026-09-27';
@@ -29,11 +29,11 @@ test('backup midnight timestamp consumes September 27 slot in Baghdad instead of
 
 test('simultaneous files consume distinct scheduled subjects, duplicate updates create nothing, stages stay isolated',async()=>{
   const f=await fixture(),other=await fixture();
-  const results=await Promise.all([publisher.publish(post(f,10)),publisher.publish(post(f,11))]);
+  const results=await Promise.all([publisher.publish(post(f,10,{caption:f.a.name})),publisher.publish(post(f,11,{caption:f.b.name}))]);
   assert.ok(results.every(r=>r.created));assert.deepEqual(results.map(r=>r.lesson.subject_id),[f.a.id,f.b.id]);
   assert.equal((await publisher.publish(post(f,10))).created,false);
   assert.equal((await publisher.publish(post(f,12))).created,false);
-  assert.equal((await publisher.publish(post(other,10))).lesson.subject_id,other.a.id);
+  assert.equal((await publisher.publish(post(other,10,{caption:other.a.name}))).lesson.subject_id,other.a.id);
   assert.equal((await db.getPendingScheduledSubjectsForDate(f.ss,f.day)).length,0);
   assert.ok(results.every(r=>baghdadDay(r.lesson.activated_at)===f.day));
 });
@@ -41,7 +41,7 @@ test('simultaneous files consume distinct scheduled subjects, duplicate updates 
 test('old edited media and companion links cannot steal today slots; a named العقائد media selects العقائد',async()=>{
   const f=await fixture(),old=post(f,25,{date:Math.floor(Date.now()/1000)-86400});old.edited=true;
   assert.equal((await publisher.publish(old)).created,false);
-  const link=post(f,26,{text:'https://example.test/lesson'});link.contentKind='link';
+  const link=post(f,26,{text:'https://example.test/lesson'});link.contentKind='link';delete link.message.audio;
   assert.equal((await publisher.publish(link)).created,false);
   const r=await publisher.publish(post(f,27,{caption:'درس العقائد'}));assert.equal(r.lesson.subject_id,f.b.id);
   assert.equal((await publisher.publish(post(f,28))).lesson.subject_id,f.a.id);
@@ -60,7 +60,7 @@ test('schedule-only rows appear in lesson management without fabricated attendan
   const f=await fixture(),original=new Date(Date.now()-2*86400000),recorded=new Date(Date.now()-3600000);
   let screen=await admin.managedItems('lessons',{stageId:f.stage.id});
   assert.equal(screen.scheduledRows.length,2);assert.equal(screen.rows.length,0);
-  const newer=await publisher.publish(post(f,100));await db.markAttendance(f.student.id,newer.lesson.id);
+  const newer=await publisher.publish(post(f,100,{caption:f.a.name}));await db.markAttendance(f.student.id,newer.lesson.id);
   const saved=(await db.pool.query('SELECT * FROM attendance WHERE lesson_id=$1',[newer.lesson.id])).rows;
   const p=await db.queuePendingChannelLessonPost({chatId:f.chat,messageId:99,stageId:f.stage.id,stageSeasonId:f.ss,lessonDate:f.day,receivedAt:recorded,contentKind:'audio'});
   const r=await recovery.restore(p.id,f.a.id,{actorId:42,targetScheduleDate:f.day,originalPublishedAt:original.toISOString()});
