@@ -5,7 +5,7 @@ async function setup(){
   const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../admin/index.html'),'utf8'),{url:'https://test.example/admin/',runScripts:'outside-only'}),w=dom.window;
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};w.confirm=()=>true;
   w.Telegram={WebApp:{showConfirm(message,done){done(w.confirm(message));},ready(){},expand(){},initData:'signed'}};
-  const requests=[];let windows=[],contactHistory=[];
+  const requests=[];let windows=[],contactHistory=[],pending=true;
   const stage={id:1,name:'المرحلة',stage_season_id:1,season_name:'الموسم',subjects:[{id:1,name:'العقائد'},{id:2,name:'الفقه'}],groups:[],teachers:[]};
   const item={id:71,subject_id:1,subject_name:'العقائد',stage_season_id:1,source_type:'channel_schedule',activated_at:'2026-01-01T12:00:00Z',active_until:'2026-01-02T12:00:00Z'};
   const exam={id:81,subject_id:1,subject_name:'العقائد',exam_number:1,opens_at:'2026-01-01T12:00:00Z',closes_at:'2026-01-02T12:00:00Z',status:'published',questions:[]};
@@ -22,7 +22,8 @@ async function setup(){
       else data={rows:[{id:1,full_name:'طالب <img src=x>',stage_name:'المرحلة',telegram_id:700001}],total:1,page:0,size:20};
     }
     else if(u.pathname.endsWith('/student-contact/1'))data=contactHistory;
-    else if(u.pathname.endsWith('/lesson-management'))data={season:{is_active:true},subjects:stage.subjects.map(s=>({...s,total:1,open_count:0})),rows:[{...item,item_number:1,attended_count:1,enrolled_count:30,is_active:false}],total:1,page:0,size:25};
+    else if(u.pathname.endsWith('/lesson-management'))data={season:{is_active:true},subjects:stage.subjects.map(s=>({...s,total:1,open_count:0})),rows:[{...item,item_number:1,attended_count:1,enrolled_count:30,is_active:false}],total:1,page:0,size:25,pendingRows:pending?[{id:91,source_message_id:45,source_url:'https://t.me/test/45',received_at:'2026-01-01T12:00:00Z'}]:[]};
+    else if(u.pathname.endsWith('/pending-lessons/91/restore')){pending=false;data={created:true,lesson:{active_until:new Date(Date.now()+86400000).toISOString()}};}
     else if(u.pathname.endsWith('/admin-options')){
       const p=Number(u.searchParams.get('page')||0),isExam=u.pathname.includes('/exams/');
       data={item:isExam?exam:item,subjects:stage.subjects,rows:p?[{id:26,full_name:'طالب الصفحة الثانية'}]:[{id:1,full_name:'طالب <img src=x>'},{id:2,full_name:'طالب حاضر',attendance:isExam?null:{marking_kind:'admin_late',listened_at:'2026-01-03T00:00:00Z',marked_by:42,admin_note:'عذر'}}],total:26,page:p,size:25};
@@ -117,4 +118,17 @@ test('UI: administrator searches a student, opens their profile and queues a pri
     assert.equal(sent.studentId,1);assert.equal(sent.message,'رد خاص على الإجازة');
     await h.until(()=>h.el('#dialog-body').textContent.includes('رد خاص على الإجازة'));
   }finally{h.dom.window.close();}
+});
+
+
+test('UI restores an older pending lesson only after selecting its subject',async()=>{
+ const h=await setup();try{
+  h.click('[data-action="lesson-management"]');await h.until(()=>h.w.document.querySelector('.restore-pending-lesson'));
+  assert.match(h.el('#content').textContent,/تاريخ نشره ورقمه/);
+  h.el('.restore-pending-lesson [name="subjectId"]').value='2';
+  h.submit('.restore-pending-lesson');await h.until(()=>h.requests.some(r=>r.url.endsWith('/pending-lessons/91/restore')));
+  assert.equal(JSON.parse(h.requests.find(r=>r.url.endsWith('/pending-lessons/91/restore')).options.body).subjectId,'2');
+  await h.until(()=>h.el('#notice').textContent.includes('استُرجع الدرس'));
+  assert.equal(h.w.document.querySelector('.restore-pending-lesson'),null);
+ }finally{h.dom.window.close();}
 });
