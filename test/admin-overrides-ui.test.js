@@ -151,6 +151,7 @@ test('UI publishes from the scheduled row in the same lesson table without a sep
 test('UI historical repair previews source links and requires review before its dedicated admin request',async()=>{
  const h=await setup();try{
   h.click('[data-action="lesson-management"]');await h.until(()=>h.w.document.querySelector('[data-action="lesson-publication-repair"]'));
+  assert.ok(h.el('#content').textContent.includes('تصحيح نشر 26 و27 سبتمبر لم يُطبّق بعد.'));
   h.click('[data-action="lesson-publication-repair"]');await h.until(()=>h.w.document.querySelector('#apply-publication-repair'));
   assert.match(h.el('#dialog-body').textContent,/9.*7/);assert.equal(h.el('#dialog-body a').href,'https://t.me/test/31');
   assert.equal(h.requests.some(r=>r.url.includes('/lesson-publication-repair')&&r.options.method==='POST'),false);

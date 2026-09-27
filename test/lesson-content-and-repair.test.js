@@ -2,12 +2,23 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const {classify}=require('../lessonContent');
 const {createScheduledPublication,baghdadDay}=require('../scheduledPublication');
-let db,studies,publisher,admin,seq=1600000;
+let db,studies,publisher,admin,server,base,token,wakeCount=0,seq=1600000;
+async function api(path,body,auth=token){
+  const response=await fetch(base+'/api/admin'+path,{method:body?'POST':'GET',headers:{...(auth?{Authorization:'Bearer '+auth}:{}),...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
+  return {status:response.status,data:await response.json()};
+}
 test.before(async()=>{
   ({db,studies}=await require('./helpers.cjs').testDatabase());publisher=createScheduledPublication(db);
   admin=require('../adminData').createAdminData(db,studies);
+  const botToken='12345:LOCAL_REPAIR_TEST',scheduler=require('../scheduler').createScheduler({pool:db.pool,studies});
+  server=require('../adminServer').createAdminServer({db,studies,adminData:admin,scheduler,botToken,adminIds:[42],origin:'https://institute.example',wakeNotifications:()=>{wakeCount++;}});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));base='http://127.0.0.1:'+server.address().port;
+  const {createHmac}=require('node:crypto'),p=new URLSearchParams({auth_date:String(Math.floor(Date.now()/1000)),user:JSON.stringify({id:42,first_name:'إدارة اختبار'})});
+  const secret=createHmac('sha256','WebAppData').update(botToken).digest();
+  p.set('hash',createHmac('sha256',secret).update([...p].sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`${k}=${v}`).join('\n')).digest('hex'));
+  const auth=await api('/auth',{initData:p.toString()},null);assert.equal(auth.status,200);token=auth.data.token;
 });
-test.after(async()=>db.pool.end());
+test.after(async()=>{if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}if(db)await db.pool.end();});
 async function fixture(chat=null){
   const stage=await db.addStage('مرحلة مراجعة المحتوى '+(++seq)),ss=(await db.listStageSeasons(stage.id))[0].id;
   const definitions=[['مسائل معاملات مستوى 2','الفقه'],['عقائد الباب الحادي عشر - مستوى 2','العقائد'],['شرح قطر ج2 مستوى2','النحو'],['المنطق ج2 مستوى 2','المنطق'],['التفسير','التفسير']];
@@ -57,7 +68,7 @@ test('a generic institute photo and sound wait until only one scheduled subject 
   assert.equal((await db.getLessonBySource(f.chat,20)).id,(await db.getLessonBySource(f.chat,21)).id);
 });
 
-test('reviewed September repair yields seven lessons, preserves original attendance, merges duplicates and leaves discussions alone',async()=>{
+test('authenticated HTTP preview and apply repair nine lessons into seven, preserve attendance and discussions, and wake notifications',async()=>{
   const f=await fixture(-1003488013652),[a,b,c,d,e]=f.subjects;
   const beforeDefinitions=[[22,a],[23,b],[25,a],[26,a],[27,a],[28,c],[30,d],[36,d],[37,e]];
   const ids={};
@@ -70,18 +81,27 @@ test('reviewed September repair yields seven lessons, preserves original attenda
   for(const message of [21,24,29,31,38,39,40,41,42,43,44])await db.queuePendingChannelLessonPost({chatId:f.chat,messageId:message,stageId:f.stage.id,stageSeasonId:f.ss,lessonDate:'2026-09-27',contentKind:message%2?'link':'audio',receivedAt:new Date('2026-09-27T05:33:00Z')});
   const original=(await db.pool.query('SELECT * FROM attendance WHERE lesson_id=ANY($1::int[]) ORDER BY id',[Object.values(ids)])).rows;
   const discussions=(await db.pool.query('SELECT * FROM mubahatha_attendance ORDER BY id')).rows;
-  const repair=require('../historicalLessonRepair').createHistoricalLessonRepair(db),preview=await repair.preview(f.stage.id);
+  const before=await api('/lesson-management?stageId='+f.stage.id);assert.equal(before.status,200);assert.equal(before.data.total,9);
+  assert.equal(before.data.repairAvailable,true);assert.equal(before.data.repairApplied,false);
+  const previewResponse=await api('/lesson-publication-repair?stageId='+f.stage.id);assert.equal(previewResponse.status,200);
+  const preview=previewResponse.data;
   assert.equal(preview.beforeCount,9);assert.equal(preview.afterCount,7);
-  await assert.rejects(repair.apply(f.stage.id,'invalid',42),{code:'CONFLICT'});
-  assert.equal((await repair.apply(f.stage.id,preview.token,42)).lessons,7);
-  const screen=await admin.managedItems('lessons',{stageId:f.stage.id});assert.equal(screen.total,7);
+  const body={stageId:f.stage.id,token:preview.token};
+  assert.equal((await api('/lesson-publication-repair',body,null)).status,401);
+  assert.equal((await api('/lesson-publication-repair',{...body,token:'invalid'})).status,409);
+  assert.equal((await api('/lesson-management?stageId='+f.stage.id)).data.total,9);assert.equal(wakeCount,0);
+  const applied=await api('/lesson-publication-repair',body);assert.equal(applied.status,200);assert.equal(applied.data.lessons,7);assert.equal(wakeCount,1);
+  const screenResponse=await api('/lesson-management?stageId='+f.stage.id);assert.equal(screenResponse.status,200);
+  const screen=screenResponse.data;assert.equal(screen.total,7);
+  assert.equal(screen.repairApplied,true);
   const totals=new Map(screen.subjects.map(s=>[s.id,s.total]));assert.deepEqual(f.subjects.map(s=>totals.get(s.id)),[2,1,1,2,1]);
   assert.deepEqual((await db.pool.query('SELECT * FROM attendance WHERE id=ANY($1::int[]) ORDER BY id',[original.map(a=>a.id)])).rows,original);
   assert.ok((await db.pool.query('SELECT 1 FROM attendance WHERE student_id=$1 AND lesson_id=$2',[second.id,ids[27]])).rows.length);
   assert.equal((await db.getLessonById(ids[26])).id,ids[27]);assert.equal(await db.getLessonById(ids[22]),undefined);
   assert.equal(await db.markAttendance(f.student.id,ids[22]),undefined);
   assert.deepEqual((await db.pool.query('SELECT * FROM mubahatha_attendance ORDER BY id')).rows,discussions);
-  assert.equal((await repair.apply(f.stage.id,preview.token,42)).alreadyApplied,true);
+  assert.equal((await api('/lesson-publication-repair',body)).data.alreadyApplied,true);
+  assert.equal(wakeCount,1);
   assert.equal((await db.pool.query("SELECT COUNT(*)::int AS n FROM notification_outbox WHERE dedupe_key LIKE 'channel-3488013652-20260926-27-v1:%'")).rows[0].n,2);
   await db.initSchema();assert.equal((await admin.managedItems('lessons',{stageId:f.stage.id})).total,7);
 });
