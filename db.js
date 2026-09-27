@@ -1429,7 +1429,21 @@ const listSubjectTeachers = (subjectId) =>
     )
     .then((r) => r.rows);
 
-// تقرير حضور مادة واحدة لأستاذها: كل طالب وكم درسًا حضر من إجمالي دروس المادة في الموسم.
+// Report eligibility uses attendance availability, not the publication date used
+// for numbering. Keep closed windows in history and preserve recorded attendance.
+// Republished lessons have a separate 24-hour window; do not count the closed gap
+// between the original 24-hour window and republication for a moved enrollment.
+const REPORT_LESSON_ELIGIBILITY = `(
+  (COALESCE(l.attendance_opened_at,l.activated_at) <= now()
+    AND (e.ended_at IS NULL OR COALESCE(l.attendance_opened_at,l.activated_at) < e.ended_at)
+    AND (CASE WHEN l.republished_at IS NULL THEN l.active_until
+      ELSE LEAST(l.active_until,COALESCE(l.attendance_opened_at,l.activated_at)+interval '24 hours') END) > e.started_at)
+  OR (l.republished_at IS NOT NULL AND l.republished_at <= now()
+    AND (e.ended_at IS NULL OR l.republished_at < e.ended_at) AND l.active_until > e.started_at)
+  OR EXISTS (SELECT 1 FROM attendance saved WHERE saved.lesson_id=l.id AND saved.student_id=st.id)
+)`;
+
+// تقرير حضور مادة واحدة لأستاذها: كل طالب وكم درسًا حضر من الدروس المتاحة خلال تسجيله.
 const getSubjectAttendanceForTeacher = (subjectId, stageSeasonId) =>
   pool
     .query(
@@ -1443,7 +1457,7 @@ const getSubjectAttendanceForTeacher = (subjectId, stageSeasonId) =>
        LEFT JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=$1 AND pm.stage_season_id=$2
        LEFT JOIN group_memberships gm ON gm.student_id=st.id AND gm.subject_id=$1 AND gm.stage_season_id=$2
        LEFT JOIN effective_lessons l ON l.subject_id=$1 AND l.stage_season_id=$2
-            AND l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
+            AND ${REPORT_LESSON_ELIGIBILITY}
        LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=st.id
        WHERE e.stage_season_id=$2 AND e.status='active'
        GROUP BY st.id, st.full_name,pm.mode,gm.group_id
@@ -2593,8 +2607,7 @@ const getStageSeasonReport = (stageSeasonId, timeZone = 'Asia/Baghdad') =>
        JOIN ranked r ON r.id=e.stage_season_id
        JOIN subjects sub ON sub.stage_id=r.stage_id
        LEFT JOIN effective_lessons l ON l.subject_id=sub.id AND l.stage_season_id=r.id
-              AND ((l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at))
-                OR EXISTS (SELECT 1 FROM attendance saved WHERE saved.lesson_id=l.id AND saved.student_id=st.id))
+              AND ${REPORT_LESSON_ELIGIBILITY}
        LEFT JOIN attendance a ON a.lesson_id = l.id AND a.student_id = st.id
        WHERE r.id=$1
        GROUP BY st.id, st.full_name, r.id, r.stage_id, r.stage_name_snapshot, r.current_stage_name,
@@ -2644,8 +2657,7 @@ const getStudentSeasonReport = (studentId, stageSeasonId = null, timeZone = 'Asi
        JOIN ranked r ON r.id=e.stage_season_id
        JOIN subjects sub ON sub.stage_id=r.stage_id
        LEFT JOIN effective_lessons l ON l.subject_id=sub.id AND l.stage_season_id=r.id
-              AND ((l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at))
-                OR EXISTS (SELECT 1 FROM attendance saved WHERE saved.lesson_id=l.id AND saved.student_id=st.id))
+              AND ${REPORT_LESSON_ELIGIBILITY}
        LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=st.id
        WHERE st.id=$1 ${stageSeasonId ? 'AND r.id=$2' : ''}
        GROUP BY st.id, st.full_name, r.id, r.stage_id, r.stage_name_snapshot, r.current_stage_name,
