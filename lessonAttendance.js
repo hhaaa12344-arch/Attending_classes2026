@@ -12,7 +12,7 @@ function createLessonAttendance(pool){
         WHERE ss.stage_id=$1 AND (($2::int IS NULL AND ss.is_active=true) OR ss.season_id=$2)`,[stageId,seasonId])).rows[0];
       if(!season)throw appError('لا يوجد موسم لهذه المرحلة ضمن الاختيار الحالي.','NOT_FOUND',404);
       const subjects=(await c.query(`SELECT sub.id,sub.name,COUNT(l.id)::int AS total_lessons FROM subjects sub
-        LEFT JOIN lessons l ON l.subject_id=sub.id AND l.stage_season_id=$1
+        LEFT JOIN effective_lessons l ON l.subject_id=sub.id AND l.stage_season_id=$1
           AND l.activated_at <= $2::timestamp
         WHERE sub.stage_id=$3 GROUP BY sub.id ORDER BY sub.name,sub.id`,[season.id,season.as_of,stageId])).rows;
       const where=`FROM enrollments e JOIN students st ON st.id=e.student_id WHERE e.stage_season_id=$1
@@ -20,7 +20,7 @@ function createLessonAttendance(pool){
       const args=[season.id,`%${String(q).replace(/[\\%_]/g,'\\$&')}%`,status];
       const total=Number((await c.query('SELECT COUNT(*) AS n '+where,args)).rows[0].n);
       const students=(await c.query(`SELECT st.id,st.full_name,e.status ${where} ORDER BY st.full_name,st.id LIMIT $4 OFFSET $5`,[...args,allRows?null:p.size,allRows?0:p.offset])).rows;
-      const attended=(await c.query(`SELECT a.student_id,l.subject_id,COUNT(*)::int AS attended FROM attendance a JOIN lessons l ON l.id=a.lesson_id
+      const attended=(await c.query(`SELECT a.student_id,l.subject_id,COUNT(*)::int AS attended FROM attendance a JOIN effective_lessons l ON l.id=a.lesson_id
         WHERE a.student_id=ANY($1::int[]) AND l.stage_season_id=$2
           AND l.activated_at <= $3::timestamp AND a.listened_at <= $3::timestamp
         GROUP BY a.student_id,l.subject_id`,[students.map(s=>s.id),season.id,season.as_of])).rows;

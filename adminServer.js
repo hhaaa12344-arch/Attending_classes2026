@@ -17,6 +17,9 @@ async function readJson(req) {
 }
 function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,origin,wakeNotifications}) {
   const overrides=require('./adminOverrides').createAdminOverrides(db.pool);
+  const discussionAttendance=require('./discussionAttendance').createDiscussionAttendance(db.pool);
+  const lessonRecovery=require('./lessonRecovery').createLessonRecovery(db);
+  const historicalRepair=require('./historicalLessonRepair').createHistoricalLessonRepair(db);
   const studentContact=require('./studentContact').createStudentContact(db.pool);
   const oneTimeCohortMove=require('./oneTimeCohortMove').createOneTimeCohortMove(db.pool);
   const scheduleBatchImport=require('./scheduleBatchImport').createScheduleBatchImport(db.pool);
@@ -70,10 +73,16 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         }
         else if(/^\/lessons\/\d+\/admin-options$/.test(route))result=await overrides.options('lesson',positiveInt(route.split('/')[2]),q);
         else if(/^\/exams\/\d+\/admin-options$/.test(route))result=await overrides.options('exam',positiveInt(route.split('/')[2]),q);
+        else if(/^\/sessions\/\d+\/admin-options$/.test(route))result=await discussionAttendance.options(positiveInt(route.split('/')[2]),q);
+        else if(route==='/lesson-publication-repair')result=await historicalRepair.preview(positiveInt(q.stageId));
         else if(route==='/lesson-management')result=await adminData.managedItems('lessons',q);
         else if(route==='/session-management')result=await adminData.managedItems('sessions',q);
         else if(route==='/lesson-attendance')result=await adminData.lessonAttendance(q);
         else if(route==='/students')result=await adminData.students(q);
+        else if(route==='/lesson-publication-repair'&&req.method==='POST'){
+          result=await historicalRepair.apply(positiveInt(body.stageId),body.token,actor.id);
+          if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Corrected lesson delivery failed:',err.code||'DELIVERY_ERROR'));
+        }
         else if(route==='/one-time-cohort-move')result=await oneTimeCohortMove.status();
         else if(route==='/student-contact')result=await studentContact.search({actorId:actor.id,role:'admin',q:q.q||'',page:q.page||0});
         else if(/^\/student-contact\/\d+$/.test(route))result=await studentContact.history({actorId:actor.id,role:'admin',studentId:positiveInt(route.split('/')[2])});
@@ -293,11 +302,20 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           result=await studies.createMubahathaGroup(positiveInt(body.subjectId),positiveInt(body.seasonId),{title:body.title,capacity:positiveInt(body.capacity),inviteLink:body.inviteLink||null});
           await audit(actor.id,'create_group','group',result.id,null,result);
         }
+        else if((m=/^\/sessions\/(\d+)\/selected-attendance$/.exec(route))&&req.method==='POST')result=await discussionAttendance.mark(positiveInt(m[1]),body,actor.id);
+        else if((m=/^\/pending-lessons\/(\d+)\/restore$/.exec(route))&&req.method==='POST'){
+          result=await lessonRecovery.restore(positiveInt(m[1]),positiveInt(body.subjectId),{actorId:actor.id,originalPublishedAt:body.originalPublishedAt,targetScheduleDate:body.scheduleDate});
+          if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Lesson recovery delivery failed:',err.code||'DELIVERY_ERROR'));
+        }
         else if((m=/^\/sessions\/(\d+)\/(reopen|retry-notifications|mark-all|cancel)$/.exec(route))&&req.method==='POST'){
           result=await adminData.manageSession(positiveInt(m[1]),m[2],actor.id);
           if(wakeNotifications&&['reopen','retry-notifications'].includes(m[2])){
             Promise.resolve().then(wakeNotifications).catch(err=>console.error('Reopened attendance delivery failed:',err.code||'DELIVERY_ERROR'));
           }
+        }
+        else if((m=/^\/lessons\/(\d+)\/republish$/.exec(route))&&req.method==='POST'){
+          result=await lessonRecovery.restoreExisting(positiveInt(m[1]),body,actor.id);
+          if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Lesson republish delivery failed:',err.code||'DELIVERY_ERROR'));
         }
         else if((m=/^\/lessons\/(\d+)\/subject$/.exec(route))&&req.method==='PATCH')result=await overrides.correctSubject(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/lessons\/(\d+)\/late-attendance$/.exec(route))&&req.method==='POST')result=await overrides.lateAttendance(positiveInt(m[1]),body,actor.id);

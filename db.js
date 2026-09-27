@@ -141,6 +141,9 @@ async function initSchema() {
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_chat_id BIGINT;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_message_id BIGINT;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS reminder_sent BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE lessons ADD COLUMN IF NOT EXISTS attendance_opened_at TIMESTAMP;
+    ALTER TABLE lessons ADD COLUMN IF NOT EXISTS republished_at TIMESTAMP;
+    ALTER TABLE lessons ADD COLUMN IF NOT EXISTS schedule_date DATE;
     ALTER TABLE attendance ADD COLUMN IF NOT EXISTS marking_kind TEXT NOT NULL DEFAULT 'student'
       CHECK (marking_kind IN ('student','admin_late'));
     ALTER TABLE attendance ADD COLUMN IF NOT EXISTS marked_by BIGINT;
@@ -199,6 +202,9 @@ async function initSchema() {
       resolved_at TIMESTAMP,
       UNIQUE(telegram_chat_id, source_message_id)
     );
+    ALTER TABLE pending_channel_lesson_posts ADD COLUMN IF NOT EXISTS auto_match BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE pending_channel_lesson_posts ADD COLUMN IF NOT EXISTS content_text TEXT;
+    ALTER TABLE pending_channel_lesson_posts ADD COLUMN IF NOT EXISTS title_message_id BIGINT;
     CREATE INDEX IF NOT EXISTS idx_pending_channel_lessons_lookup
       ON pending_channel_lesson_posts(stage_season_id, lesson_date, status, received_at, id);
 
@@ -369,6 +375,18 @@ async function initSchema() {
 
     ALTER TABLE lessons
       ADD COLUMN IF NOT EXISTS stage_season_id INTEGER REFERENCES stage_seasons(id) ON DELETE RESTRICT;
+
+    CREATE TABLE IF NOT EXISTS lesson_corrections (
+      lesson_id INTEGER PRIMARY KEY REFERENCES lessons(id) ON DELETE RESTRICT,
+      canonical_lesson_id INTEGER REFERENCES lessons(id) ON DELETE RESTRICT,
+      reason TEXT NOT NULL,actor_id BIGINT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CHECK(canonical_lesson_id IS NULL OR canonical_lesson_id<>lesson_id)
+    );
+    CREATE TABLE IF NOT EXISTS lesson_repair_batches (
+      key TEXT PRIMARY KEY,actor_id BIGINT NOT NULL,before_data JSONB NOT NULL,after_data JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE OR REPLACE VIEW effective_lessons AS
+      SELECT l.* FROM lessons l WHERE NOT EXISTS(SELECT 1 FROM lesson_corrections r WHERE r.lesson_id=l.id);
 
     UPDATE lessons l
     SET stage_season_id = chosen.id
@@ -862,13 +880,13 @@ const getStudentById = (id) =>
 const updateStudentName = (id, name) =>
   pool.query('UPDATE students SET full_name=$1 WHERE id=$2', [name, id]);
 
-async function updateStudentStage(id, stageId) {
-  const client = await pool.connect();
+async function updateStudentStage(id, stageId, transactionClient = null) {
+  const client = transactionClient || await pool.connect();
   try {
-    await client.query('BEGIN');
+    if(!transactionClient)await client.query('BEGIN');
     const current=(await client.query('SELECT stage_id FROM students WHERE id=$1 FOR UPDATE',[id])).rows[0];
     if(!current)throw new Error('الطالب غير موجود.');
-    if(Number(current.stage_id)===Number(stageId)){await client.query('COMMIT');return;}
+    if(Number(current.stage_id)===Number(stageId)){if(!transactionClient)await client.query('COMMIT');return;}
     const target = await client.query(
       'SELECT ss.id FROM stage_seasons ss JOIN stages st ON st.id=ss.stage_id AND st.is_active=true WHERE ss.stage_id=$1 AND ss.is_active=true FOR UPDATE OF ss',
       [stageId]
@@ -905,12 +923,12 @@ async function updateStudentStage(id, stageId) {
        WHERE student_id=$1 AND status='pending'`,
       [id]
     );
-    await client.query('COMMIT');
+    if(!transactionClient)await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK');
+    if(!transactionClient)await client.query('ROLLBACK');
     throw err;
   } finally {
-    client.release();
+    if(!transactionClient)client.release();
   }
 }
 
@@ -1029,7 +1047,7 @@ const listStageSeasons = (stageId) =>
       `WITH ranked AS (${RANKED_STAGE_SEASONS_CTE})
        SELECT r.*, COALESCE(r.stage_name_snapshot, r.current_stage_name) AS stage_name,
               (SELECT COUNT(*) FROM enrollments e WHERE e.stage_season_id=r.id) AS student_count,
-              (SELECT COUNT(*) FROM lessons l WHERE l.stage_season_id=r.id) AS lesson_count
+              (SELECT COUNT(*) FROM effective_lessons l WHERE l.stage_season_id=r.id) AS lesson_count
        FROM ranked r WHERE r.stage_id=$1 ORDER BY r.started_at DESC, r.id DESC`,
       [stageId]
     )
@@ -1043,7 +1061,7 @@ const listStudentSeasons = (studentId) =>
     .query(
       `WITH ranked AS (${RANKED_STAGE_SEASONS_CTE})
        SELECT r.*, COALESCE(r.stage_name_snapshot, r.current_stage_name) AS stage_name,
-              (SELECT COUNT(*) FROM lessons l WHERE l.stage_season_id=r.id) AS lesson_count
+              (SELECT COUNT(*) FROM effective_lessons l WHERE l.stage_season_id=r.id) AS lesson_count
        FROM students st
        JOIN enrollments e ON e.student_id=st.id AND e.status='active'
        JOIN ranked r ON r.id=e.stage_season_id AND r.is_active=true AND r.stage_id=st.stage_id
@@ -1424,7 +1442,7 @@ const getSubjectAttendanceForTeacher = (subjectId, stageSeasonId) =>
        JOIN students st ON st.id=e.student_id
        LEFT JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=$1 AND pm.stage_season_id=$2
        LEFT JOIN group_memberships gm ON gm.student_id=st.id AND gm.subject_id=$1 AND gm.stage_season_id=$2
-       LEFT JOIN lessons l ON l.subject_id=$1 AND l.stage_season_id=$2
+       LEFT JOIN effective_lessons l ON l.subject_id=$1 AND l.stage_season_id=$2
             AND l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at)
        LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=st.id
        WHERE e.stage_season_id=$2 AND e.status='active'
@@ -1447,7 +1465,7 @@ const getInstituteOverview = () =>
         (SELECT COUNT(*) FROM teachers WHERE is_active=true AND telegram_id IS NOT NULL) AS linked_teachers,
         (SELECT COUNT(*) FROM channels c
          JOIN stage_seasons ss2 ON ss2.id=c.stage_season_id AND ss2.is_active=true) AS active_channels,
-        (SELECT COUNT(*) FROM lessons WHERE (activated_at AT TIME ZONE 'UTC' AT TIME ZONE $1)::date = ((now() AT TIME ZONE $1))::date) AS lessons_today,
+        (SELECT COUNT(*) FROM effective_lessons WHERE (activated_at AT TIME ZONE 'UTC' AT TIME ZONE $1)::date = ((now() AT TIME ZONE $1))::date) AS lessons_today,
         (SELECT COUNT(*) FROM attendance WHERE (listened_at AT TIME ZONE 'UTC' AT TIME ZONE $1)::date = ((now() AT TIME ZONE $1))::date) AS attendance_today,
         (SELECT COUNT(*) FROM mubahatha_sessions WHERE (opened_at AT TIME ZONE 'UTC' AT TIME ZONE $1)::date = ((now() AT TIME ZONE $1))::date) AS sessions_today`,
       [process.env.SCHEDULE_TIMEZONE || 'Asia/Baghdad']
@@ -1460,7 +1478,7 @@ const getInstituteStageBreakdown = () =>
       `SELECT COALESCE(ss.stage_name_snapshot, sg.name) AS stage_name, se.name AS season_name,
               (SELECT COUNT(*) FROM enrollments e WHERE e.stage_season_id=ss.id AND e.status='active') AS student_count,
               (SELECT COUNT(*) FROM subjects sub WHERE sub.stage_id=sg.id) AS subject_count,
-              (SELECT COUNT(*) FROM lessons l WHERE l.stage_season_id=ss.id) AS lesson_count,
+              (SELECT COUNT(*) FROM effective_lessons l WHERE l.stage_season_id=ss.id) AS lesson_count,
               (SELECT COUNT(*) FROM mubahatha_groups g WHERE g.stage_season_id=ss.id) AS group_count,
               (SELECT COUNT(*) FROM channels c WHERE c.stage_season_id=ss.id) AS channel_count
        FROM stage_seasons ss
@@ -1637,7 +1655,7 @@ const getDeepChannelDiagnostics = async () => {
        SELECT DISTINCT ON (l.source_chat_id)
          l.source_chat_id,l.id AS lesson_id,l.activated_at,l.source_message_id,
          sub.name AS lesson_subject_name,sub.stage_id AS lesson_stage_id,sg.name AS lesson_stage_name
-       FROM lessons l
+       FROM effective_lessons l
        JOIN subjects sub ON sub.id=l.subject_id
        JOIN stages sg ON sg.id=sub.stage_id
        WHERE l.source_chat_id IS NOT NULL
@@ -1645,7 +1663,7 @@ const getDeepChannelDiagnostics = async () => {
      ), lesson_stage_history AS (
        SELECT l.source_chat_id,COUNT(DISTINCT sub.stage_id)::int AS lesson_stage_count,
          string_agg(DISTINCT sg.name,'، ' ORDER BY sg.name) AS lesson_stage_names
-       FROM lessons l JOIN subjects sub ON sub.id=l.subject_id JOIN stages sg ON sg.id=sub.stage_id
+       FROM effective_lessons l JOIN subjects sub ON sub.id=l.subject_id JOIN stages sg ON sg.id=sub.stage_id
        WHERE l.source_chat_id IS NOT NULL
        GROUP BY l.source_chat_id
      )
@@ -1721,18 +1739,19 @@ const activateLesson = (
   sourceUrl = null,
   sourceChatId = null,
   sourceMessageId = null,
-  activatedAt = null
+  activatedAt = null,
+  options = {}
 ) =>
-  pool
+  (options.client || pool)
     .query(
       `INSERT INTO lessons(
          subject_id, stage_season_id, activated_at, active_until, source_type, source_url,
-         source_chat_id, source_message_id
+         source_chat_id, source_message_id, attendance_opened_at, schedule_date
        )
        SELECT sub.id, ss.id,
               COALESCE($7::timestamp, now()),
-              COALESCE($7::timestamp, now()) + ($2 || ' hours')::interval,
-              $3, $4, $5, $6
+              COALESCE($8::timestamp,$7::timestamp, now()) + ($2 || ' hours')::interval,
+              $3, $4, $5, $6, $8::timestamp, $9::date
        FROM subjects sub
        JOIN stages st ON st.id=sub.stage_id AND st.is_active=true
        JOIN stage_seasons ss ON ss.stage_id=sub.stage_id AND ss.is_active=true
@@ -1741,17 +1760,17 @@ const activateLesson = (
          WHERE source_chat_id IS NOT NULL AND source_message_id IS NOT NULL
        DO UPDATE SET source_url=COALESCE(EXCLUDED.source_url, lessons.source_url)
        RETURNING *`,
-      [subjectId, hours, sourceType, sourceUrl, sourceChatId, sourceMessageId, activatedAt]
+      [subjectId, hours, sourceType, sourceUrl, sourceChatId, sourceMessageId, activatedAt, options.attendanceOpenedAt||null,options.scheduleDate||null]
     )
     .then((r) => r.rows[0]);
 
-const getLessonBySource = (chatId, messageId) =>
-  pool
-    .query(
-      'SELECT * FROM lessons WHERE source_chat_id=$1 AND source_message_id=$2 LIMIT 1',
-      [chatId, messageId]
-    )
-    .then((r) => r.rows[0]);
+const getLessonBySource = (chatId, messageId) => pool.query(`
+  SELECT resolved.*, (r.lesson_id IS NOT NULL AND r.canonical_lesson_id IS NULL) AS withdrawn
+  FROM lessons original LEFT JOIN lesson_corrections r ON r.lesson_id=original.id
+  JOIN lessons resolved ON resolved.id=COALESCE(r.canonical_lesson_id,original.id)
+  WHERE original.source_chat_id=$1 AND original.source_message_id=$2
+  UNION ALL SELECT l.*,false FROM effective_lessons l JOIN pending_channel_lesson_posts p ON p.lesson_id=l.id
+  WHERE p.telegram_chat_id=$1 AND p.source_message_id=$2 AND p.status IN ('activated','duplicate') LIMIT 1`,[chatId,messageId]).then(r=>r.rows[0]);
 
 // الدرس المفتوح متاح للمسجلين حاليًا، ولو انضموا أو انتقلوا بعد تفعيله.
 // لا نغيّر تاريخ الالتحاق؛ يبقى أساسًا لحساب الغياب عن الدروس السابقة.
@@ -1759,12 +1778,12 @@ const getActiveLessonsForStudent = (stageId, studentId) =>
   pool
     .query(
       `SELECT l.id AS lesson_id, s.name AS subject_name, l.active_until, l.source_url,
-              (SELECT COUNT(*) FROM lessons numbered
+              (SELECT COUNT(*) FROM effective_lessons numbered
                WHERE numbered.subject_id=l.subject_id
                  AND numbered.stage_season_id=l.stage_season_id
                  AND (numbered.activated_at, numbered.id) <= (l.activated_at, l.id)) AS lesson_number,
               false AS attended
-       FROM lessons l
+       FROM effective_lessons l
        JOIN subjects s ON s.id = l.subject_id
        JOIN enrollments e
          ON e.stage_season_id=l.stage_season_id AND e.student_id=$2 AND e.status='active'
@@ -1804,22 +1823,27 @@ const getLessonById = (lessonId) =>
   pool
     .query(
       `SELECT l.*, s.stage_id, s.name AS subject_name,
-              (SELECT COUNT(*) FROM lessons numbered
+              (SELECT COUNT(*) FROM effective_lessons numbered
                WHERE numbered.subject_id=l.subject_id
                  AND numbered.stage_season_id=l.stage_season_id
                  AND (numbered.activated_at, numbered.id) <= (l.activated_at, l.id)) AS lesson_number
-       FROM lessons l
-       JOIN subjects s ON s.id=l.subject_id WHERE l.id=$1`,
+       FROM effective_lessons l
+       JOIN subjects s ON s.id=l.subject_id WHERE l.id=COALESCE((SELECT canonical_lesson_id FROM lesson_corrections WHERE lesson_id=$1),$1)`,
       [lessonId]
     )
     .then((r) => r.rows[0]);
 
-const markAttendance = (studentId, lessonId) =>
-  pool
-    .query(
+const markAttendance = async (studentId, lessonId) => {
+  const c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    await c.query('SELECT pg_advisory_xact_lock(734221,1)');
+    const redirect=(await c.query('SELECT canonical_lesson_id FROM lesson_corrections WHERE lesson_id=$1',[lessonId])).rows[0];
+    if(redirect){if(!redirect.canonical_lesson_id){await c.query('COMMIT');return undefined;}lessonId=redirect.canonical_lesson_id;}
+    const result=await c.query(
       `INSERT INTO attendance(student_id, lesson_id)
        SELECT $1, l.id
-       FROM lessons l
+       FROM effective_lessons l
        JOIN enrollments e
          ON e.stage_season_id=l.stage_season_id AND e.student_id=$1 AND e.status='active'
        JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true
@@ -1830,8 +1854,15 @@ const markAttendance = (studentId, lessonId) =>
          AND e.started_at <= now() AND (e.ended_at IS NULL OR e.ended_at > now())
        ON CONFLICT (student_id, lesson_id) DO NOTHING RETURNING *`,
       [studentId, lessonId]
-    )
-    .then((r) => r.rows[0]);
+    );
+    const inserted=result.rows[0];
+    if(inserted){
+      const lesson=(await c.query('SELECT stage_season_id,republished_at FROM effective_lessons WHERE id=$1',[lessonId])).rows[0];
+      if(lesson.republished_at)await require('./absence').refreshAdministrativeAttendance(c,[studentId],lesson.stage_season_id,process.env.ATTENDANCE_TIME_ZONE||'Asia/Baghdad');
+    }
+    await c.query('COMMIT');return inserted;
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+};
 
 // آخر الدروس المفعّلة لمرحلة معيّنة (كل موادها)، لإدارتها يدويًا: إلغاء تفعيل بالخطأ،
 // إعادة فتح للتأخر، أو تحضير جماعي. تُحسب عدد الحاضرين لكل درس مباشرة.
@@ -1842,7 +1873,7 @@ const getRecentLessonsForStage = (stageId, limit = 15) =>
               (l.active_until > now()) AS is_active,
               (SELECT COUNT(*)::int FROM attendance a WHERE a.lesson_id=l.id) AS attended_count,
               (SELECT COUNT(*)::int FROM enrollments e WHERE e.stage_season_id=l.stage_season_id AND e.status='active') AS enrolled_count
-       FROM lessons l JOIN subjects s ON s.id=l.subject_id
+       FROM effective_lessons l JOIN subjects s ON s.id=l.subject_id
        WHERE s.stage_id=$1
        ORDER BY l.activated_at DESC LIMIT $2`,
       [stageId, limit]
@@ -1856,10 +1887,10 @@ const cancelLesson = (lessonId) =>
 
 // إعادة الفتح تحفظ النشر والحضور، وتنتهي بعد 24 ساعة من التفعيل الأصلي.
 const reopenLesson = (lessonId) =>
-  pool.query(`UPDATE lessons l SET active_until=l.activated_at + interval '24 hours'
+  pool.query(`UPDATE lessons l SET active_until=COALESCE(l.republished_at,l.attendance_opened_at,l.activated_at) + interval '24 hours'
     FROM stage_seasons ss
     WHERE l.id=$1 AND ss.id=l.stage_season_id AND ss.is_active=true
-      AND l.activated_at <= now() AND l.activated_at + interval '24 hours' > now()
+      AND l.activated_at <= now() AND COALESCE(l.republished_at,l.attendance_opened_at,l.activated_at) + interval '24 hours' > now()
     RETURNING l.*`,[lessonId]).then(r=>r.rows[0]);
 
 // تحضير جماعي لكل طلبة المرحلة النشطين ضمن موسم الدرس ممن لم يؤشّروا بعد؛
@@ -1869,7 +1900,7 @@ const markAllPresentForLesson = (lessonId) =>
     .query(
       `INSERT INTO attendance(student_id, lesson_id)
        SELECT e.student_id, l.id
-       FROM lessons l
+       FROM effective_lessons l
        JOIN enrollments e ON e.stage_season_id=l.stage_season_id AND e.status='active'
        JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true
        JOIN subjects sub ON sub.id=l.subject_id AND sub.stage_id=ss.stage_id
@@ -1885,7 +1916,7 @@ const markAllPresentForLesson = (lessonId) =>
 const canStudentAttendLesson = (studentId, lessonId) =>
   pool
     .query(
-      `SELECT 1 FROM lessons l
+      `SELECT 1 FROM effective_lessons l
        JOIN enrollments e ON e.stage_season_id=l.stage_season_id
        JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true
        JOIN subjects sub ON sub.id=l.subject_id AND sub.stage_id=ss.stage_id
@@ -2188,11 +2219,11 @@ const getUnmarkedLessonsForStudent = (studentId) =>
   pool
     .query(
       `SELECT l.id AS lesson_id, s.name AS subject_name, l.active_until, l.source_url,
-              (SELECT COUNT(*) FROM lessons numbered
+              (SELECT COUNT(*) FROM effective_lessons numbered
                WHERE numbered.subject_id=l.subject_id
                  AND numbered.stage_season_id=l.stage_season_id
                  AND (numbered.activated_at, numbered.id) <= (l.activated_at, l.id)) AS lesson_number
-       FROM lessons l
+       FROM effective_lessons l
        JOIN subjects s ON s.id=l.subject_id
        JOIN enrollments e
          ON e.stage_season_id=l.stage_season_id AND e.student_id=$1 AND e.status='active'
@@ -2218,11 +2249,11 @@ const getLessonsNeedingReminder = () =>
   pool
     .query(
       `SELECT l.*, s.stage_id, s.name AS subject_name,
-              (SELECT COUNT(*) FROM lessons numbered
+              (SELECT COUNT(*) FROM effective_lessons numbered
                WHERE numbered.subject_id=l.subject_id
                  AND numbered.stage_season_id=l.stage_season_id
                  AND (numbered.activated_at, numbered.id) <= (l.activated_at, l.id)) AS lesson_number
-       FROM lessons l
+       FROM effective_lessons l
        JOIN subjects s ON s.id = l.subject_id
        WHERE l.reminder_sent = false
          AND l.active_until > now()
@@ -2238,7 +2269,7 @@ const getNonAttendedStudentsForLesson = (lessonId, stageId) =>
     .query(
       `SELECT st.* FROM students st
        JOIN enrollments e ON e.student_id=st.id AND e.status='active'
-       JOIN lessons l ON l.stage_season_id=e.stage_season_id AND l.id=$2
+       JOIN effective_lessons l ON l.stage_season_id=e.stage_season_id AND l.id=$2
        WHERE st.stage_id = $1 AND st.is_active=true
           AND NOT EXISTS(SELECT 1 FROM attendance a WHERE a.lesson_id=$2 AND a.student_id=st.id)`,
       [stageId, lessonId]
@@ -2386,7 +2417,7 @@ const getMissedLessonsBySubject = (studentIds) => {
        JOIN enrollments e ON e.student_id=st.id AND e.status='active'
        JOIN stage_seasons ss ON ss.id=e.stage_season_id
        JOIN subjects sub ON sub.stage_id=ss.stage_id
-       JOIN lessons l ON l.subject_id=sub.id AND l.stage_season_id=ss.id
+       JOIN effective_lessons l ON l.subject_id=sub.id AND l.stage_season_id=ss.id
          AND l.activated_at>=e.started_at AND (e.ended_at IS NULL OR l.activated_at<=e.ended_at)
        LEFT JOIN attendance a ON a.student_id=st.id AND a.lesson_id=l.id
        WHERE st.id = ANY($1::int[])
@@ -2561,7 +2592,7 @@ const getStageSeasonReport = (stageSeasonId, timeZone = 'Asia/Baghdad') =>
        JOIN students st ON st.id=e.student_id
        JOIN ranked r ON r.id=e.stage_season_id
        JOIN subjects sub ON sub.stage_id=r.stage_id
-       LEFT JOIN lessons l ON l.subject_id=sub.id AND l.stage_season_id=r.id
+       LEFT JOIN effective_lessons l ON l.subject_id=sub.id AND l.stage_season_id=r.id
               AND ((l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at))
                 OR EXISTS (SELECT 1 FROM attendance saved WHERE saved.lesson_id=l.id AND saved.student_id=st.id))
        LEFT JOIN attendance a ON a.lesson_id = l.id AND a.student_id = st.id
@@ -2612,7 +2643,7 @@ const getStudentSeasonReport = (studentId, stageSeasonId = null, timeZone = 'Asi
        JOIN students st ON st.id=e.student_id
        JOIN ranked r ON r.id=e.stage_season_id
        JOIN subjects sub ON sub.stage_id=r.stage_id
-       LEFT JOIN lessons l ON l.subject_id=sub.id AND l.stage_season_id=r.id
+       LEFT JOIN effective_lessons l ON l.subject_id=sub.id AND l.stage_season_id=r.id
               AND ((l.activated_at >= e.started_at AND (e.ended_at IS NULL OR l.activated_at <= e.ended_at))
                 OR EXISTS (SELECT 1 FROM attendance saved WHERE saved.lesson_id=l.id AND saved.student_id=st.id))
        LEFT JOIN attendance a ON a.lesson_id=l.id AND a.student_id=st.id
@@ -2635,19 +2666,23 @@ async function queuePendingChannelLessonPost({
   lessonDate,
   sourceUrl = null,
   contentKind = null,
-}) {
+  receivedAt = null,
+  autoMatch = false,
+  contentText = null,
+  titleMessageId = null,
+}, queryable=pool) {
   if (!Number.isFinite(Number(chatId)) || !Number.isFinite(Number(messageId))) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return null;
   return (
-    await pool.query(
+    await queryable.query(
       `INSERT INTO pending_channel_lesson_posts(
-         telegram_chat_id,source_message_id,stage_id,stage_season_id,lesson_date,source_url,content_kind
-       ) VALUES($1,$2,$3,$4,$5,$6,$7)
+         telegram_chat_id,source_message_id,stage_id,stage_season_id,lesson_date,source_url,content_kind,received_at,auto_match,content_text,title_message_id
+       ) VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamp,now()),$9,$10,$11)
        ON CONFLICT(telegram_chat_id,source_message_id) DO UPDATE SET
          source_url=COALESCE(EXCLUDED.source_url,pending_channel_lesson_posts.source_url),
          content_kind=COALESCE(EXCLUDED.content_kind,pending_channel_lesson_posts.content_kind)
        RETURNING *`,
-      [chatId,messageId,stageId,stageSeasonId,lessonDate,sourceUrl,contentKind]
+      [chatId,messageId,stageId,stageSeasonId,lessonDate,sourceUrl,contentKind,receivedAt,autoMatch,String(contentText||'').slice(0,4096),titleMessageId]
     )
   ).rows[0] || null;
 }
@@ -2659,7 +2694,7 @@ async function getPendingChannelLessonPosts(stageSeasonId, lessonDate) {
       `SELECT p.*,c.title AS channel_title
        FROM pending_channel_lesson_posts p
        LEFT JOIN channels c ON c.telegram_chat_id=p.telegram_chat_id
-       WHERE p.stage_season_id=$1 AND p.lesson_date=$2::date AND p.status='pending'
+       WHERE p.stage_season_id=$1 AND p.lesson_date<=$2::date AND p.status='pending'
        ORDER BY p.received_at,p.source_message_id,p.id`,
       [stageSeasonId,lessonDate]
     )
@@ -2674,7 +2709,7 @@ async function getPendingChannelLessonStageSeasonsForDate(lessonDate) {
        FROM pending_channel_lesson_posts p
        JOIN stage_seasons ss ON ss.id=p.stage_season_id AND ss.is_active=true
        JOIN stages st ON st.id=ss.stage_id AND st.is_active=true
-       WHERE p.lesson_date=$1::date AND p.status='pending'
+       WHERE p.lesson_date<=$1::date AND p.status='pending'
        ORDER BY p.stage_season_id`,
       [lessonDate]
     )
@@ -2776,7 +2811,7 @@ async function getLessonSchedule(stageSeasonId) {
 async function getScheduledSubjectsForDate(stageSeasonId, lessonDate) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return [];
   return (await pool.query(`
-    SELECT DISTINCT sub.id, sub.name, lse.lesson_date::text AS lesson_date
+    SELECT DISTINCT sub.id, sub.name, sub.hashtag, lse.lesson_date::text AS lesson_date
     FROM lesson_schedule_entries lse
     JOIN subjects sub ON sub.id=lse.subject_id
     JOIN stage_seasons ss ON ss.id=lse.stage_season_id AND ss.stage_id=sub.stage_id
@@ -2788,20 +2823,20 @@ async function getScheduledSubjectsForDate(stageSeasonId, lessonDate) {
 // الهاشتاغ يستطيع تفعيل أي مادة مباشرة، لذلك تُستبعد المادة هنا إذا كان لها درس
 // مفعّل بالفعل في هذا الموسم في تاريخ اليوم، وبذلك يمكن دمج الهاشتاغ مع الجدول
 // حتى عندما تكون في اليوم نفسه 3 مواد أو أكثر.
-async function getPendingScheduledSubjectsForDate(stageSeasonId, lessonDate) {
+async function getPendingScheduledSubjectsForDate(stageSeasonId, lessonDate, queryable=pool) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return [];
-  return (await pool.query(`
-    SELECT DISTINCT sub.id, sub.name, lse.lesson_date::text AS lesson_date
+  return (await queryable.query(`
+    SELECT DISTINCT sub.id, sub.name, sub.hashtag, lse.lesson_date::text AS lesson_date
     FROM lesson_schedule_entries lse
     JOIN subjects sub ON sub.id=lse.subject_id
     JOIN stage_seasons ss ON ss.id=lse.stage_season_id AND ss.stage_id=sub.stage_id
     WHERE lse.stage_season_id=$1 AND lse.lesson_date=$2
       AND NOT EXISTS (
         SELECT 1
-        FROM lessons l
+        FROM effective_lessons l
         WHERE l.stage_season_id=$1
           AND l.subject_id=sub.id
-          AND (l.activated_at AT TIME ZONE 'Asia/Baghdad')::date=$2::date
+          AND COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date)=$2::date
       )
     ORDER BY sub.id`, [stageSeasonId, lessonDate])).rows;
 }

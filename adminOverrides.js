@@ -27,7 +27,7 @@ function createAdminOverrides(pool) {
     catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
   }
   async function parent(c,kind,id,lock=false) {
-    const table=kind==='lesson'?'lessons':'exams';
+    const table=kind==='lesson'?'effective_lessons':'exams';
     const row=(await c.query(`SELECT p.*,sub.name AS subject_name,ss.stage_id,ss.is_active AS season_active,
       sg.is_active AS stage_active FROM ${table} p JOIN subjects sub ON sub.id=p.subject_id
       JOIN stage_seasons ss ON ss.id=p.stage_season_id AND ss.stage_id=sub.stage_id
@@ -67,7 +67,7 @@ function createAdminOverrides(pool) {
     const subjectId=positiveInt(body.subjectId),expected=positiveInt(body.expectedSubjectId);
     return transaction(async c=>{
       const before=await parent(c,'lesson',id,true);
-      if(!(await c.query('SELECT 1 FROM lessons WHERE id=$1 AND activated_at<=now()',[id])).rowCount)
+      if(!(await c.query('SELECT 1 FROM effective_lessons WHERE id=$1 AND activated_at<=now()',[id])).rowCount)
         throw appError('لا يمكن تصحيح درس لم يُنشر بعد.');
       if(before.subject_id!==expected)throw appError('تغيرت مادة الدرس منذ فتح الشاشة. حدّث الصفحة.','CONFLICT',409);
       const target=(await c.query('SELECT id,name FROM subjects WHERE id=$1 AND stage_id=$2 FOR SHARE',[subjectId,before.stage_id])).rows[0];
@@ -89,7 +89,7 @@ function createAdminOverrides(pool) {
       await c.query('SELECT pg_advisory_xact_lock(734221,1)');
       const lesson=await parent(c,'lesson',id,true);
       if(lesson.subject_id!==subjectId)throw appError('تغيرت مادة الدرس. حدّث الصفحة وحدد الدرس مجددًا.','CONFLICT',409);
-      if(!(await c.query('SELECT 1 FROM lessons WHERE id=$1 AND activated_at<=now() AND active_until<=now()',[id])).rowCount)
+      if(!(await c.query('SELECT 1 FROM effective_lessons WHERE id=$1 AND activated_at<=now() AND active_until<=now()',[id])).rowCount)
         throw appError('الحضور الإداري المتأخر متاح بعد انتهاء وقت الدرس فقط.','NOT_EXPIRED',409);
       await validateStudents(c,lesson,ids);
       const rows=(await c.query(`INSERT INTO attendance(student_id,lesson_id,marking_kind,marked_by,admin_note)

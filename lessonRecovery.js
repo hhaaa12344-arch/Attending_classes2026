@@ -24,13 +24,13 @@ function createLessonRecovery(db){
       await c.query('BEGIN');
       await c.query('SELECT pg_advisory_xact_lock(734221,1)');
       const before=(await c.query(`SELECT l.*,sub.name AS subject_name,sub.stage_id,ss.is_active AS season_active,st.is_active AS stage_active
-        FROM lessons l JOIN subjects sub ON sub.id=l.subject_id JOIN stage_seasons ss ON ss.id=l.stage_season_id JOIN stages st ON st.id=sub.stage_id
+        FROM effective_lessons l JOIN subjects sub ON sub.id=l.subject_id JOIN stage_seasons ss ON ss.id=l.stage_season_id JOIN stages st ON st.id=sub.stage_id
         WHERE l.id=$1 FOR UPDATE OF l FOR SHARE OF ss,st`,[id])).rows[0];
       if(!before)throw appError('الدرس غير موجود.','NOT_FOUND',404);
       if(!before.season_active||!before.stage_active)throw appError('الموسم مؤرشف.','ARCHIVED',409);
       if(before.subject_id!==expectedSubjectId)throw appError('تغيرت مادة الدرس. حدّث الصفحة.','CONFLICT',409);
       if(before.republished_at){await c.query('COMMIT');return {lesson:before,created:false};}
-      if(!(await c.query('SELECT 1 FROM lessons WHERE id=$1 AND activated_at<=now() AND active_until<=now()',[id])).rows.length)throw appError('إعادة النشر متاحة للدرس المنتهي فقط.','NOT_EXPIRED',409);
+      if(!(await c.query('SELECT 1 FROM effective_lessons WHERE id=$1 AND activated_at<=now() AND active_until<=now()',[id])).rows.length)throw appError('إعادة النشر متاحة للدرس المنتهي فقط.','NOT_EXPIRED',409);
       const lesson=(await c.query(`UPDATE lessons SET republished_at=now(),active_until=now()+interval '24 hours',reminder_sent=false WHERE id=$1 RETURNING *`,[id])).rows[0];
       const queued=await notice(c,lesson,before.subject_name,before.stage_id,'lesson-republished');
       const students=(await c.query('SELECT student_id FROM enrollments WHERE stage_season_id=$1',[lesson.stage_season_id])).rows.map(r=>r.student_id);
@@ -57,27 +57,43 @@ function createLessonRecovery(db){
       if(!p.season_active||!p.stage_active)throw appError('لا يمكن استرجاع درس في مرحلة أو موسم مؤرشف.','ARCHIVED',409);
       const subject=(await c.query('SELECT * FROM subjects WHERE id=$1 AND stage_id=$2 FOR SHARE',[subjectId,p.stage_id])).rows[0];
       if(!subject)throw appError('اختر مادة من مرحلة المنشور نفسه.');
-      const existing=(await c.query('SELECT * FROM lessons WHERE source_chat_id=$1 AND source_message_id=$2',[p.telegram_chat_id,p.source_message_id])).rows[0];
+      const existing=(await c.query('SELECT * FROM effective_lessons WHERE source_chat_id=$1 AND source_message_id=$2',[p.telegram_chat_id,p.source_message_id])).rows[0];
       if(existing){
         await c.query("UPDATE pending_channel_lesson_posts SET status='duplicate',lesson_id=$2,resolved_subject_id=$3,resolved_at=now() WHERE id=$1 AND status='pending'",[id,existing.id,existing.subject_id]);
         await c.query('COMMIT');return {lesson:existing,created:false};
       }
       if(p.status!=='pending')throw appError('عولج المنشور سابقًا.','CONFLICT',409);
       if(!(await c.query('SELECT 1 FROM channels WHERE telegram_chat_id=$1 AND stage_id=$2 AND stage_season_id=$3',[p.telegram_chat_id,p.stage_id,p.stage_season_id])).rows[0])throw appError('تغيّر ربط القناة؛ راجع المرحلة قبل استرجاع المنشور.','CHANNEL_CHANGED',409);
+      let resolvedScheduleDate=targetScheduleDate||scheduleDate||null;
       if(scheduleDate){
         const publicationDay=p.lesson_date instanceof Date?p.lesson_date.toISOString().slice(0,10):String(p.lesson_date).slice(0,10);
-        if(!p.auto_match||publicationDay!==scheduleDate)throw appError('المنشور القديم يحتاج ربطًا صريحًا بالمادة؛ لا يمكنه شغل جدول يوم آخر تلقائيًا.','REVIEW_REQUIRED',409);
-        if(!(await db.getPendingScheduledSubjectsForDate(p.stage_season_id,scheduleDate,c)).some(x=>x.id===subjectId)){
+        if(!p.auto_match)throw appError('المنشور القديم يحتاج ربطًا صريحًا بالمادة.','REVIEW_REQUIRED',409);
+        if(publicationDay!==scheduleDate){
+          const subjects=(await c.query('SELECT id,name,hashtag FROM subjects WHERE stage_id=$1',[p.stage_id])).rows;
+          const matched=require('./lessonContent').namedSubjects(subjects,p.content_text);
+          let identified=matched.length===1&&matched[0].id===subjectId;
+          if(!matched.length){
+            const available=await db.getPendingScheduledSubjectsForDate(p.stage_season_id,scheduleDate,c);
+            const oldAudio=(await c.query(`SELECT id FROM pending_channel_lesson_posts WHERE stage_season_id=$1 AND status='pending' AND auto_match=true
+              AND lesson_date<$2::date AND content_kind IN ('voice','audio','audio_document','document')`,[p.stage_season_id,scheduleDate])).rows;
+            identified=available.length===1&&available[0].id===subjectId&&oldAudio.length===1&&Number(oldAudio[0].id)===Number(p.id);
+          }
+          if(!identified)throw appError('لا يمكن نقل ملف يوم سابق إلى مادة بالتخمين.','REVIEW_REQUIRED',409);
+          if(!(await c.query('SELECT 1 FROM lesson_schedule_entries WHERE stage_season_id=$1 AND subject_id=$2 AND lesson_date=$3',[p.stage_season_id,subjectId,scheduleDate])).rows.length){await c.query('COMMIT');return {created:false,skipped:true};}
+          resolvedScheduleDate=publicationDay;
+        }else if(!(await db.getPendingScheduledSubjectsForDate(p.stage_season_id,scheduleDate,c)).some(x=>x.id===subjectId)){
           await c.query('COMMIT');return {created:false,skipped:true};
         }
       }
+
       if(targetScheduleDate&&!(await c.query('SELECT 1 FROM lesson_schedule_entries WHERE stage_season_id=$1 AND subject_id=$2 AND lesson_date=$3',[p.stage_season_id,subjectId,targetScheduleDate])).rows.length)throw appError('تغير الجدول. حدّث الصفحة.','CONFLICT',409);
       const now=(await c.query('SELECT now() AS at')).rows[0].at;
       if(new Date(original||p.received_at)>new Date(now))throw appError('تاريخ نشر الدرس لم يحن بعد.');
       const lesson=await db.activateLesson(subjectId,24,'channel_schedule_recovered',p.source_url,
-        p.telegram_chat_id,p.source_message_id,original||p.received_at,{client:c,attendanceOpenedAt:now,scheduleDate:targetScheduleDate||scheduleDate||null});
+        p.telegram_chat_id,p.source_message_id,original||p.received_at,{client:c,attendanceOpenedAt:now,scheduleDate:resolvedScheduleDate});
       if(!lesson)throw appError('لم تعد المرحلة متاحة.','ARCHIVED',409);
       await c.query("UPDATE pending_channel_lesson_posts SET status='activated',lesson_id=$2,resolved_subject_id=$3,resolved_at=now() WHERE id=$1",[id,lesson.id,subjectId]);
+      if(p.title_message_id)await c.query("UPDATE pending_channel_lesson_posts SET status='duplicate',lesson_id=$3,resolved_subject_id=$4,resolved_at=now() WHERE telegram_chat_id=$1 AND source_message_id=$2",[p.telegram_chat_id,p.title_message_id,lesson.id,subjectId]);
       await c.query(`UPDATE channel_post_activity SET last_outcome='activated_after_schedule',last_detail='استُرجع الدرس مع حفظ تاريخ نشره وإتاحة الحضور 24 ساعة من الاسترجاع',last_lesson_id=$3
         WHERE telegram_chat_id=$1 AND last_message_id=$2`,[p.telegram_chat_id,p.source_message_id,lesson.id]);
       const notices=await notice(c,lesson,subject.name,p.stage_id);
