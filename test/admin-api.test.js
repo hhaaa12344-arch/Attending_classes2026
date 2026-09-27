@@ -239,3 +239,14 @@ test('HTTP keeps pending-lesson restoration and selected discussion attendance b
  const result=await restored.json();assert.equal(result.created,true);assert.equal(new Date(result.lesson.active_until)-new Date(result.lesson.attendance_opened_at),86400000);
  assert.equal((await (await request('/pending-lessons/'+p.id+'/restore',{subjectId:sub.id})).json()).created,false);
 });
+
+test('admin HTTP: republishing an expired lesson is admin-only, guarded by subject and idempotent',async()=>{
+ const l=await db.activateLesson(subject.id,24,'manual',null,null,null,new Date(Date.now()-3*86400000));
+ const body={expectedSubjectId:subject.id};
+ assert.equal((await request('/lessons/'+l.id+'/republish',body,'POST',null)).status,401);
+ const response=await request('/lessons/'+l.id+'/republish',body);assert.equal(response.status,200);
+ const result=await response.json();assert.equal(result.created,true);
+ assert.equal(new Date(result.lesson.active_until)-new Date(result.lesson.republished_at),86400000);
+ assert.equal((await (await request('/lessons/'+l.id+'/republish',body)).json()).created,false);
+ assert.equal((await request('/lessons/'+l.id+'/republish',{expectedSubjectId:999999})).status,409);
+});
