@@ -207,7 +207,8 @@ function createAdminData(db, studies) {
           AND COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date)=e.lesson_date)
         ORDER BY e.lesson_date DESC,sub.id LIMIT 50`,[season.id,subjectId])).rows:undefined;
       const repairAvailable=lesson&&!!(await c.query("SELECT 1 FROM channels WHERE stage_id=$1 AND stage_season_id=$2 AND telegram_chat_id=-1003488013652",[stageId,season.id])).rows.length;
-      await c.query('COMMIT');return {season,subjects,rows,total,...p,...(lesson?{pendingRows,scheduledRows,repairAvailable}:{}),
+      const repairApplied=repairAvailable&&!!(await c.query("SELECT 1 FROM lesson_repair_batches WHERE key='channel-3488013652-20260926-27-v1'")).rows.length;
+      await c.query('COMMIT');return {season,subjects,rows,total,...p,...(lesson?{pendingRows,scheduledRows,repairAvailable,repairApplied}:{}),
         ...(kind==='sessions'?{startAttendanceDelayMinutes:studies.START_ATTENDANCE_DELAY_MINUTES,
           endAttendanceMinutes:studies.END_ATTENDANCE_MINUTES}:{})};
     }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}

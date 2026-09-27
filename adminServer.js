@@ -79,10 +79,6 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(route==='/session-management')result=await adminData.managedItems('sessions',q);
         else if(route==='/lesson-attendance')result=await adminData.lessonAttendance(q);
         else if(route==='/students')result=await adminData.students(q);
-        else if(route==='/lesson-publication-repair'&&req.method==='POST'){
-          result=await historicalRepair.apply(positiveInt(body.stageId),body.token,actor.id);
-          if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Corrected lesson delivery failed:',err.code||'DELIVERY_ERROR'));
-        }
         else if(route==='/one-time-cohort-move')result=await oneTimeCohortMove.status();
         else if(route==='/student-contact')result=await studentContact.search({actorId:actor.id,role:'admin',q:q.q||'',page:q.page||0});
         else if(/^\/student-contact\/\d+$/.test(route))result=await studentContact.history({actorId:actor.id,role:'admin',studentId:positiveInt(route.split('/')[2])});
@@ -147,6 +143,10 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
       } else if(req.method==='POST'||req.method==='PATCH') {
         const body=await readJson(req);
         if(route==='/student-contact'&&req.method==='POST')result=await studentContact.send({...body,actorId:actor.id,role:'admin'});
+        else if(route==='/lesson-publication-repair'&&req.method==='POST'){
+          result=await historicalRepair.apply(positiveInt(body.stageId),body.token,actor.id);
+          if(result.applied&&wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Corrected lesson delivery failed:',err.code||'DELIVERY_ERROR'));
+        }
         else if(route==='/one-time-cohort-move'&&req.method==='POST')result=await oneTimeCohortMove.execute(body.studentIds,actor.id);
         else if((m=/^\/students\/(\d+)$/.exec(route))&&req.method==='PATCH')result=await adminData.updateStudent(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/students\/(\d+)\/subjects\/(\d+)\/participation$/.exec(route))&&req.method==='PATCH'){
