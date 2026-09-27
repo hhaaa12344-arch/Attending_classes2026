@@ -7,6 +7,7 @@ const instituteLinks = require('./instituteLinks').createInstituteLinks(db.pool)
 const { initIntegritySchema } = require('./integrity');
 const access = require('./access').createAccess(db.pool);
 const lessonRecovery = require('./lessonRecovery').createLessonRecovery(db);
+const scheduledPublication = require('./scheduledPublication').createScheduledPublication(db);
 const stageCorrections = require('./stageCorrections').createStageCorrections(db);
 const adminData = require('./adminData').createAdminData(db, studies);
 const scheduler = require('./scheduler').createScheduler({pool:db.pool,studies});
@@ -6062,8 +6063,9 @@ async function activateChannelLesson({
   notificationDate,
   activatedAt = null,
   activityMessageId = messageId,
+  existingActivation = null,
 }) {
-  const activated = await db.activateLesson(
+  const activated = existingActivation || await db.activateLesson(
     subject.id,
     LESSON_ACTIVE_HOURS,
     sourceType,
@@ -6135,7 +6137,7 @@ async function recoverPendingChannelLessonsForDate(lessonDate) {
         );
       }
 
-      posts = await db.getPendingChannelLessonPosts(stageSeasonId, lessonDate);
+      posts = (await db.getPendingChannelLessonPosts(stageSeasonId, lessonDate)).filter(p=>p.auto_match&&(p.lesson_date instanceof Date?p.lesson_date.toISOString().slice(0,10):String(p.lesson_date).slice(0,10))===lessonDate);
       if (!posts.length) continue;
 
       const scheduled = await db.getPendingScheduledSubjectsForDate(stageSeasonId, lessonDate);
@@ -6154,10 +6156,11 @@ async function recoverPendingChannelLessonsForDate(lessonDate) {
       const longStable = Date.now() - latestChangeMs >= 2 * 60 * 1000;
       if (!enoughSubjects && !longStable) continue;
 
-      const pairCount = Math.min(posts.length, scheduled.length);
-      for (let i = 0; i < pairCount; i += 1) {
-        const post = posts[i];
-        const subject = scheduled[i];
+      const allSubjects=(await db.pool.query('SELECT sub.id,sub.name,sub.hashtag FROM subjects sub JOIN stage_seasons ss ON ss.stage_id=sub.stage_id WHERE ss.id=$1',[stageSeasonId])).rows;
+      for (const post of posts) {
+        const available=await db.getPendingScheduledSubjectsForDate(stageSeasonId,lessonDate);
+        const subject = require('./scheduledPublication').chooseSubject(available,post.content_text,allSubjects);
+        if(!subject)continue;
         const channel = await db.getChannelByChatId(post.telegram_chat_id);
         if (!channel || Number(channel.stage_season_id) !== Number(stageSeasonId)) continue;
 
@@ -6271,32 +6274,18 @@ async function handleChannelLesson(ctx) {
     }
 
     if (!subject && hashtags.length === 0) {
-      // إذا كان لهذه المرحلة ملفات أقدم معلّقة بانتظار الجدول، لا نتجاوزها بمنشور أحدث؛
-      // نحافظ على ترتيب النشر ثم تعالجها عملية الاسترجاع بالتسلسل.
-      const pendingBacklog = await db.getPendingChannelLessonPosts(
-        channel.stage_season_id,
-        currentDate
-      );
-      const pendingScheduled = pendingBacklog.length
-        ? []
-        : await db.getPendingScheduledSubjectsForDate(
-            channel.stage_season_id,
-            currentDate
-          );
-      if (pendingScheduled.length > 0) {
-        // أولًا نحاول التعرف على اسم المادة إذا كان مذكورًا في عنوان/وصف المنشور
-        // حتى لو لم يُستخدم هاشتاغ. وإذا لم يُذكر الاسم، نستخدم ترتيب أعمدة الجدول.
-        const messageText = String(message.caption || message.text || '');
-        const normalizedMessageText = normalizeHashtag(messageText);
-        const namedMatch = pendingScheduled.find((item) => {
-          const normalizedSubjectName = normalizeHashtag(item.name || '');
-          return normalizedSubjectName.length >= 3 && normalizedMessageText.includes(normalizedSubjectName);
-        });
-
-        // ترتيب subject_id هو نفسه ترتيب المواد الظاهر في الصف العلوي من جدول الأدمن والطالب.
-        subject = namedMatch || pendingScheduled[0];
-        activationSourceType = 'channel_schedule';
+      const result=await scheduledPublication.publish({channel,message,sourceUrl,
+        contentKind:channelPostContentKind(message,standaloneHashtag),edited:!!ctx.editedChannelPost});
+      if(result.created){
+        const activated=await activateChannelLesson({channel,subject:result.subject,sourceType:'channel_schedule',sourceUrl,
+          chatId,messageId:message.message_id,notificationDate:currentDate,activityMessageId,existingActivation:result.lesson});
+        activityLessonId=activated.lesson.id;
+      }else{
+        await db.setChannelPostActivityOutcome(chatId,activityMessageId,result.lesson?'activated':'schedule_pending',
+          result.lesson?'المنشور مرتبط بدرس سابق؛ لم تتغير مادته أو حضوره.':'حُفظ المنشور. الملفات الجديدة تطابق جدول يوم نشرها فقط؛ المنشورات القديمة والروابط تحتاج تحديدًا من الدروس المفعّلة.',
+          {stageId:channel.stage_id,stageSeasonId:channel.stage_season_id,lessonId:result.lesson?.id});
       }
+      return;
     }
 
     if (!subject) {

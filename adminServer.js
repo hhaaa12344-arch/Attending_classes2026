@@ -298,7 +298,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         }
         else if((m=/^\/sessions\/(\d+)\/selected-attendance$/.exec(route))&&req.method==='POST')result=await discussionAttendance.mark(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/pending-lessons\/(\d+)\/restore$/.exec(route))&&req.method==='POST'){
-          result=await lessonRecovery.restore(positiveInt(m[1]),positiveInt(body.subjectId),{actorId:actor.id});
+          result=await lessonRecovery.restore(positiveInt(m[1]),positiveInt(body.subjectId),{actorId:actor.id,originalPublishedAt:body.originalPublishedAt,targetScheduleDate:body.scheduleDate});
           if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Lesson recovery delivery failed:',err.code||'DELIVERY_ERROR'));
         }
         else if((m=/^\/sessions\/(\d+)\/(reopen|retry-notifications|mark-all|cancel)$/.exec(route))&&req.method==='POST'){
@@ -306,6 +306,10 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           if(wakeNotifications&&['reopen','retry-notifications'].includes(m[2])){
             Promise.resolve().then(wakeNotifications).catch(err=>console.error('Reopened attendance delivery failed:',err.code||'DELIVERY_ERROR'));
           }
+        }
+        else if((m=/^\/lessons\/(\d+)\/republish$/.exec(route))&&req.method==='POST'){
+          result=await lessonRecovery.restoreExisting(positiveInt(m[1]),body,actor.id);
+          if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Lesson republish delivery failed:',err.code||'DELIVERY_ERROR'));
         }
         else if((m=/^\/lessons\/(\d+)\/subject$/.exec(route))&&req.method==='PATCH')result=await overrides.correctSubject(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/lessons\/(\d+)\/late-attendance$/.exec(route))&&req.method==='POST')result=await overrides.lateAttendance(positiveInt(m[1]),body,actor.id);

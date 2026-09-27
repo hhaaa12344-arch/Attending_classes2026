@@ -188,8 +188,8 @@ function createAdminData(db, studies) {
       const total=subjects.filter(s=>!subjectId||s.id===subjectId).reduce((n,s)=>n+s.total,0);
       const rows=(await c.query(`WITH items AS (${source}), numbered AS (
         SELECT i.*,ROW_NUMBER() OVER (PARTITION BY item_subject_id ORDER BY published_at,id)::int AS item_number FROM items i)
-        SELECT i.*,sub.name AS subject_name,${lesson?"COALESCE(i.attendance_opened_at,i.published_at) + interval '24 hours'":'i.attendance_reopen_until'} AS reopen_until,
-          (i.published_at <= now() AND ${lesson?"COALESCE(i.attendance_opened_at,i.published_at) + interval '24 hours' > now()":'(i.attendance_reopen_until IS NULL OR i.attendance_reopen_until <= now())'} AND $5::boolean) AS can_reopen,
+        SELECT i.*,sub.name AS subject_name,${lesson?"COALESCE(i.republished_at,i.attendance_opened_at,i.published_at) + interval '24 hours'":'i.attendance_reopen_until'} AS reopen_until,
+          (i.published_at <= now() AND ${lesson?"COALESCE(i.republished_at,i.attendance_opened_at,i.published_at) + interval '24 hours' > now()":'(i.attendance_reopen_until IS NULL OR i.attendance_reopen_until <= now())'} AND $5::boolean) AS can_reopen,
           ${lesson?`(i.active_until > now()) AS is_active,
             (SELECT COUNT(*)::int FROM attendance a WHERE a.lesson_id=i.id) AS attended_count,
             (SELECT COUNT(*)::int FROM enrollments e WHERE e.stage_season_id=$1 AND e.status='active') AS enrolled_count`:
@@ -198,8 +198,15 @@ function createAdminData(db, studies) {
         FROM numbered i JOIN subjects sub ON sub.id=i.item_subject_id
         WHERE ($2::int IS NULL OR i.item_subject_id=$2) ORDER BY i.published_at DESC,i.id DESC LIMIT $3 OFFSET $4`,
         [season.id,subjectId,p.size,p.offset,season.is_active])).rows;
-      const pendingRows=lesson?(await c.query(`SELECT id,source_message_id,source_url,received_at FROM pending_channel_lesson_posts WHERE stage_season_id=$1 AND status='pending' ORDER BY received_at,source_message_id,id LIMIT 50`,[season.id])).rows:undefined;
-      await c.query('COMMIT');return {season,subjects,rows,total,...p,...(lesson?{pendingRows}:{}),
+      const pendingRows=lesson?(await c.query(`SELECT id,source_message_id,source_url,received_at,content_kind,content_text,auto_match FROM pending_channel_lesson_posts WHERE stage_season_id=$1 AND status='pending' ORDER BY received_at,source_message_id,id LIMIT 50`,[season.id])).rows:undefined;
+      const scheduledRows=lesson?(await c.query(`SELECT e.id,e.subject_id,sub.name AS subject_name,e.lesson_date::text AS lesson_date
+        FROM lesson_schedule_entries e JOIN subjects sub ON sub.id=e.subject_id
+        WHERE e.stage_season_id=$1 AND e.lesson_date<=(now() AT TIME ZONE 'Asia/Baghdad')::date
+        AND ($2::int IS NULL OR e.subject_id=$2) AND NOT EXISTS(SELECT 1 FROM lessons l
+          WHERE l.stage_season_id=e.stage_season_id AND l.subject_id=e.subject_id
+          AND COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date)=e.lesson_date)
+        ORDER BY e.lesson_date DESC,sub.id LIMIT 50`,[season.id,subjectId])).rows:undefined;
+      await c.query('COMMIT');return {season,subjects,rows,total,...p,...(lesson?{pendingRows,scheduledRows}:{}),
         ...(kind==='sessions'?{startAttendanceDelayMinutes:studies.START_ATTENDANCE_DELAY_MINUTES,
           endAttendanceMinutes:studies.END_ATTENDANCE_MINUTES}:{})};
     }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}

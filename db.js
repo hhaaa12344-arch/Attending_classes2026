@@ -142,6 +142,7 @@ async function initSchema() {
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_message_id BIGINT;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS reminder_sent BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS attendance_opened_at TIMESTAMP;
+    ALTER TABLE lessons ADD COLUMN IF NOT EXISTS republished_at TIMESTAMP;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS schedule_date DATE;
     ALTER TABLE attendance ADD COLUMN IF NOT EXISTS marking_kind TEXT NOT NULL DEFAULT 'student'
       CHECK (marking_kind IN ('student','admin_late'));
@@ -201,6 +202,8 @@ async function initSchema() {
       resolved_at TIMESTAMP,
       UNIQUE(telegram_chat_id, source_message_id)
     );
+    ALTER TABLE pending_channel_lesson_posts ADD COLUMN IF NOT EXISTS auto_match BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE pending_channel_lesson_posts ADD COLUMN IF NOT EXISTS content_text TEXT;
     CREATE INDEX IF NOT EXISTS idx_pending_channel_lessons_lookup
       ON pending_channel_lesson_posts(stage_season_id, lesson_date, status, received_at, id);
 
@@ -1817,9 +1820,12 @@ const getLessonById = (lessonId) =>
     )
     .then((r) => r.rows[0]);
 
-const markAttendance = (studentId, lessonId) =>
-  pool
-    .query(
+const markAttendance = async (studentId, lessonId) => {
+  const c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    await c.query('SELECT pg_advisory_xact_lock(734221,1)');
+    const result=await c.query(
       `INSERT INTO attendance(student_id, lesson_id)
        SELECT $1, l.id
        FROM lessons l
@@ -1833,8 +1839,15 @@ const markAttendance = (studentId, lessonId) =>
          AND e.started_at <= now() AND (e.ended_at IS NULL OR e.ended_at > now())
        ON CONFLICT (student_id, lesson_id) DO NOTHING RETURNING *`,
       [studentId, lessonId]
-    )
-    .then((r) => r.rows[0]);
+    );
+    const inserted=result.rows[0];
+    if(inserted){
+      const lesson=(await c.query('SELECT stage_season_id,republished_at FROM lessons WHERE id=$1',[lessonId])).rows[0];
+      if(lesson.republished_at)await require('./absence').refreshAdministrativeAttendance(c,[studentId],lesson.stage_season_id,process.env.ATTENDANCE_TIME_ZONE||'Asia/Baghdad');
+    }
+    await c.query('COMMIT');return inserted;
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+};
 
 // آخر الدروس المفعّلة لمرحلة معيّنة (كل موادها)، لإدارتها يدويًا: إلغاء تفعيل بالخطأ،
 // إعادة فتح للتأخر، أو تحضير جماعي. تُحسب عدد الحاضرين لكل درس مباشرة.
@@ -1859,10 +1872,10 @@ const cancelLesson = (lessonId) =>
 
 // إعادة الفتح تحفظ النشر والحضور، وتنتهي بعد 24 ساعة من التفعيل الأصلي.
 const reopenLesson = (lessonId) =>
-  pool.query(`UPDATE lessons l SET active_until=COALESCE(l.attendance_opened_at,l.activated_at) + interval '24 hours'
+  pool.query(`UPDATE lessons l SET active_until=COALESCE(l.republished_at,l.attendance_opened_at,l.activated_at) + interval '24 hours'
     FROM stage_seasons ss
     WHERE l.id=$1 AND ss.id=l.stage_season_id AND ss.is_active=true
-      AND l.activated_at <= now() AND COALESCE(l.attendance_opened_at,l.activated_at) + interval '24 hours' > now()
+      AND l.activated_at <= now() AND COALESCE(l.republished_at,l.attendance_opened_at,l.activated_at) + interval '24 hours' > now()
     RETURNING l.*`,[lessonId]).then(r=>r.rows[0]);
 
 // تحضير جماعي لكل طلبة المرحلة النشطين ضمن موسم الدرس ممن لم يؤشّروا بعد؛
@@ -2639,19 +2652,21 @@ async function queuePendingChannelLessonPost({
   sourceUrl = null,
   contentKind = null,
   receivedAt = null,
-}) {
+  autoMatch = false,
+  contentText = null,
+}, queryable=pool) {
   if (!Number.isFinite(Number(chatId)) || !Number.isFinite(Number(messageId))) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return null;
   return (
-    await pool.query(
+    await queryable.query(
       `INSERT INTO pending_channel_lesson_posts(
-         telegram_chat_id,source_message_id,stage_id,stage_season_id,lesson_date,source_url,content_kind,received_at
-       ) VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamp,now()))
+         telegram_chat_id,source_message_id,stage_id,stage_season_id,lesson_date,source_url,content_kind,received_at,auto_match,content_text
+       ) VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamp,now()),$9,$10)
        ON CONFLICT(telegram_chat_id,source_message_id) DO UPDATE SET
          source_url=COALESCE(EXCLUDED.source_url,pending_channel_lesson_posts.source_url),
          content_kind=COALESCE(EXCLUDED.content_kind,pending_channel_lesson_posts.content_kind)
        RETURNING *`,
-      [chatId,messageId,stageId,stageSeasonId,lessonDate,sourceUrl,contentKind,receivedAt]
+      [chatId,messageId,stageId,stageSeasonId,lessonDate,sourceUrl,contentKind,receivedAt,autoMatch,String(contentText||'').slice(0,4096)]
     )
   ).rows[0] || null;
 }
@@ -2780,7 +2795,7 @@ async function getLessonSchedule(stageSeasonId) {
 async function getScheduledSubjectsForDate(stageSeasonId, lessonDate) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return [];
   return (await pool.query(`
-    SELECT DISTINCT sub.id, sub.name, lse.lesson_date::text AS lesson_date
+    SELECT DISTINCT sub.id, sub.name, sub.hashtag, lse.lesson_date::text AS lesson_date
     FROM lesson_schedule_entries lse
     JOIN subjects sub ON sub.id=lse.subject_id
     JOIN stage_seasons ss ON ss.id=lse.stage_season_id AND ss.stage_id=sub.stage_id
@@ -2795,7 +2810,7 @@ async function getScheduledSubjectsForDate(stageSeasonId, lessonDate) {
 async function getPendingScheduledSubjectsForDate(stageSeasonId, lessonDate, queryable=pool) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return [];
   return (await queryable.query(`
-    SELECT DISTINCT sub.id, sub.name, lse.lesson_date::text AS lesson_date
+    SELECT DISTINCT sub.id, sub.name, sub.hashtag, lse.lesson_date::text AS lesson_date
     FROM lesson_schedule_entries lse
     JOIN subjects sub ON sub.id=lse.subject_id
     JOIN stage_seasons ss ON ss.id=lse.stage_season_id AND ss.stage_id=sub.stage_id
