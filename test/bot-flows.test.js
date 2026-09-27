@@ -24,13 +24,46 @@ test('transferred account sees the same available lesson total in its report and
   await db.updateStudentStage(moved.id,target.id);
   await send(moved.telegram_id,'','menu_today');
   let buttons=messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]).filter(b=>b.callback_data?.startsWith('attend:'));
+  await send(moved.telegram_id,'','menu_previous_lessons');
+  buttons.push(...messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]).filter(b=>b.callback_data?.startsWith('attend:')));
   assert.equal(buttons.length,2,JSON.stringify(messages));
   await send(moved.telegram_id,'📊 تقريري');assert.ok(messages.some(m=>m.text?.includes('المنطق التجريبي: 0 حضور من 2 درس')));
   await send(moved.telegram_id,'','attend:'+old.id);
   await send(moved.telegram_id,'📊 تقريري');assert.ok(messages.some(m=>m.text?.includes('المنطق التجريبي: 1 حضور من 2 درس')));
-  await send(moved.telegram_id,'','menu_today');
+  await send(moved.telegram_id,'','menu_previous_lessons');
   buttons=messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]).filter(b=>b.callback_data?.startsWith('attend:'));
   assert.deepEqual(buttons.map(b=>b.callback_data),['attend:'+recovered.id]);
+});
+
+test('today grouping follows Baghdad midnight and keeps recovered or republished lectures on their original day',()=>{
+  const previous={lesson_id:1,activated_at:'2026-09-26T20:59:59Z',republished_at:'2026-09-26T22:00:00Z'};
+  const today={lesson_id:2,activated_at:'2026-09-26T21:00:00Z'};
+  const recovered={lesson_id:3,activated_at:'2026-09-25T09:00:00Z',attendance_opened_at:'2026-09-26T22:00:00Z'};
+  assert.deepEqual(app.groupAvailableLessons([previous,today,recovered],new Date('2026-09-26T23:00:00Z')),{today:[today],previous:[previous,recovered]});
+});
+
+test('today has three lessons, previous has two; republished Aqeedah retains its subject and appears only in previous lessons',async()=>{
+  const target=await db.addStage('مرحلة فصل دروس اليوم'),st=await db.createStudent(1999002,'طالب لاختبار فصل الأيام',target.id);
+  await db.confirmOfficialStudent(st.id);
+  const a=await db.addSubject(target.id,'مسائل الاختبار','daily_a'),b=await db.addSubject(target.id,'منطق الاختبار','daily_b');
+  const c=await db.addSubject(target.id,'تفسير الاختبار','daily_c'),d=await db.addSubject(target.id,'عقائد الاختبار','daily_d');
+  const today=app.currentDateInTimeZone('Asia/Baghdad'),midnight=new Date(today+'T00:00:00+03:00');
+  const older=[];for(const sub of [a,b]){const l=await db.activateLesson(sub.id);await db.pool.query("UPDATE lessons SET activated_at=$2,attendance_opened_at=now(),active_until=now()+interval '24 hours' WHERE id=$1",[l.id,new Date(midnight-3600000)]);older.push(l.id);}
+  const current=[];for(const sub of [a,b,c]){const l=await db.activateLesson(sub.id);await db.pool.query('UPDATE lessons SET activated_at=$2 WHERE id=$1',[l.id,midnight]);current.push(l.id);}
+  const aqeedah=await db.activateLesson(d.id);await db.pool.query("UPDATE lessons SET activated_at=now()-interval '3 days',active_until=now()-interval '2 days' WHERE id=$1",[aqeedah.id]);
+  const buttons=()=>messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]),ids=()=>buttons().filter(b=>b.callback_data?.startsWith('attend:')).map(b=>Number(b.callback_data.split(':')[1]));
+  await send(st.telegram_id,'','menu_today');assert.deepEqual(new Set(ids()),new Set(current));assert.ok(buttons().some(b=>b.callback_data==='menu_previous_lessons'&&b.text.includes('(2)')));
+  await send(st.telegram_id,'','menu_previous_lessons');assert.deepEqual(new Set(ids()),new Set(older));assert.ok(buttons().some(b=>b.callback_data==='menu_today'));
+  const original=await db.getLessonById(aqeedah.id);
+  const reopened=await require('../lessonRecovery').createLessonRecovery(db).restoreExisting(aqeedah.id,{expectedSubjectId:d.id},42);
+  assert.equal(reopened.lesson.subject_id,d.id);assert.equal(reopened.lesson.activated_at.getTime(),original.activated_at.getTime());
+  await send(st.telegram_id,'','menu_previous_lessons');assert.deepEqual(new Set(ids()),new Set([...older,aqeedah.id]));assert.ok(buttons().some(b=>b.callback_data==='attend:'+aqeedah.id&&b.text.includes('عقائد الاختبار')));
+  await send(st.telegram_id,'','attend:'+aqeedah.id);assert.ok(messages.some(m=>m.text?.includes('دروس سابقة متاحة للحضور')));assert.deepEqual(new Set(ids()),new Set(older));
+  await send(st.telegram_id,'','menu_today');assert.deepEqual(new Set(ids()),new Set(current));
+  for(const id of current)await db.markAttendance(st.id,id);
+  await send(st.telegram_id,'','menu_today');assert.deepEqual(ids(),[]);assert.ok(buttons().some(b=>b.callback_data==='menu_previous_lessons'));assert.ok(messages.some(m=>m.text?.includes('لا توجد دروس منشورة اليوم')));
+  for(const id of older)await db.markAttendance(st.id,id);
+  await send(st.telegram_id,'','menu_previous_lessons');assert.deepEqual(ids(),[]);assert.ok(buttons().some(b=>b.callback_data==='menu_today'));
 });
 
 test('student lesson schedule shows the immediate coming Saturday on Thursday and Friday',()=>{
