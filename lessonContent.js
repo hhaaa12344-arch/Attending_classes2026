@@ -10,12 +10,24 @@ function namedSubjects(subjects,text){
     return [s.name,s.hashtag,normalize(s.hashtag).replace(/^ال/,''),...aliases].some(label=>compact(label).length>=3&&content.includes(compact(label)));
   });
 }
+// اسم الملف وعنوان المقطع (إن وُجدا) يساعدان على تعرّف المادة عند غياب الوصف.
+function mediaLabel(message){
+  const parts=[];
+  for(const m of [message.audio,message.voice,message.video,message.document]){
+    if(!m)continue;
+    for(const key of ['title','performer','file_name'])if(typeof m[key]==='string')parts.push(m[key]);
+  }
+  return parts.join(' ');
+}
+function messageText(message){
+  return [message.caption||message.text||'',mediaLabel(message)].filter(Boolean).join(' ');
+}
 function classify(message,subjects=[]){
   const text=message.caption||message.text||'',plain=normalize(text),url=extractFirstUrl(message);
   if(message.sticker)return {kind:'ignore',reason:'ملصق'};
   if(/رابط البوت|الدليل الارشادي|فيديو توضيحي.*(?:تسجيل الحضور|نظام تسجيل|البوت)|المناهج الدراسيه غير متوفره|المناهج الدراسية غير متوفرة/s.test(plain)
     ||(/🗓/.test(text)&&/(?:\d{4}[\/.-]\d|هـ)/.test(text)))return {kind:'ignore',reason:'إعلان أو تعليمات، وليس درسًا'};
-  const matches=namedSubjects(subjects,text);
+  const matches=namedSubjects(subjects,messageText(message));
   const media=!!(message.audio||message.voice||message.video||message.video_note||message.document);
   if(media)return {kind:'media',matches};
   let institute=false;
@@ -23,4 +35,4 @@ function classify(message,subjects=[]){
   if(url&&(matches.length===1||institute))return {kind:'title',matches};
   return {kind:'review',matches};
 }
-module.exports={classify,namedSubjects,compact};
+module.exports={classify,namedSubjects,compact,mediaLabel,messageText};

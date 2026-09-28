@@ -6189,10 +6189,12 @@ async function recoverPendingChannelLessonsForDate(lessonDate) {
 
       const allSubjects=(await db.pool.query('SELECT sub.id,sub.name,sub.hashtag FROM subjects sub JOIN stage_seasons ss ON ss.stage_id=sub.stage_id WHERE ss.id=$1',[stageSeasonId])).rows;
       posts.sort((a,b)=>Number(require('./lessonContent').namedSubjects(allSubjects,b.content_text).length===1)-Number(require('./lessonContent').namedSubjects(allSubjects,a.content_text).length===1));
+      // المنشورات المسمّاة تأخذ موادها أولًا؛ ثم الملفات التي بلا اسم تأخذ المواد المتبقية بترتيب وصولها
+      // وترتيب الجدول (وهذا ما كان يحدث عند النشر المباشر). ما لا تتوفر له مادة يبقى معلّقًا
+      // إلى أن تُضاف مادته إلى الجدول، فيُفتح حينها 24 ساعة مع إشعار الطلبة.
       for (const post of posts) {
-        if(!require('./lessonContent').namedSubjects(allSubjects,post.content_text).length&&posts.filter(p=>!require('./lessonContent').namedSubjects(allSubjects,p.content_text).length).length>1)continue;
         const available=await db.getPendingScheduledSubjectsForDate(stageSeasonId,lessonDate);
-        const subject = require('./scheduledPublication').chooseSubject(available,post.content_text,allSubjects);
+        const subject = require('./scheduledPublication').chooseSubject(available,post.content_text,allSubjects,{byOrder:true});
         if(!subject)continue;
         const channel = await db.getChannelByChatId(post.telegram_chat_id);
         if (!channel || Number(channel.stage_season_id) !== Number(stageSeasonId)) continue;

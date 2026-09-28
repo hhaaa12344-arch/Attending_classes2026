@@ -2,10 +2,15 @@
 // One transaction owns selection and insertion. A caption/link, an edited old
 // post, or an old backlog must never silently consume today's first subject.
 const baghdadDay=date=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(date);
-const {classify,namedSubjects}=require('./lessonContent');
-function chooseSubject(subjects,text,allSubjects=subjects){
+const {classify,namedSubjects,messageText}=require('./lessonContent');
+// عند وجود اسم صريح للمادة يُعتمد الاسم فقط. وإن لم يوجد اسم:
+//  - مع {byOrder:true} تُؤخذ أول مادة مجدولة لم تُفعّل بعد (بترتيب أعمدة الجدول)،
+//    وهو المسار المعتاد لنشر ملف صوتي بلا وصف.
+//  - وبدونه لا يُختار إلا إذا بقيت مادة واحدة فقط.
+function chooseSubject(subjects,text,allSubjects=subjects,{byOrder=false}={}){
   const matches=namedSubjects(allSubjects,text);
   if(matches.length)return matches.length===1?subjects.find(s=>s.id===matches[0].id):null;
+  if(byOrder)return subjects[0]||null;
   return subjects.length===1?subjects[0]:null;
 }
 function createScheduledPublication(db){
@@ -28,7 +33,7 @@ function createScheduledPublication(db){
       const allSubjects=(await c.query('SELECT id,name,hashtag FROM subjects WHERE stage_id=$1',[channel.stage_id])).rows;
       const classification=classify(message,allSubjects);
       if(classification.kind==='ignore'){await c.query('COMMIT');return {created:false,ignored:true};}
-      const text=message.caption||message.text||'';
+      const text=messageText(message);
       const ownMatches=namedSubjects(allSubjects,text);
       const previous=classification.kind==='media'?(await c.query(`SELECT * FROM pending_channel_lesson_posts WHERE telegram_chat_id=$1 AND stage_season_id=$2
         AND source_message_id=$3 AND content_kind='lesson_title' AND lesson_date=$4 AND received_at<=$5 AND received_at>=$5::timestamp-interval '24 hours'`,
@@ -53,11 +58,14 @@ function createScheduledPublication(db){
       // A titled link gets a short pairing interval. Link-only lectures are recovered
       // after the interval; a following file belongs to that same lecture.
       if(classification.kind==='title'||!autoMatch||!p.auto_match||p.status!=='pending'){await c.query('COMMIT');return {created:false,pending:p};}
-      const first=(await c.query(`SELECT id FROM pending_channel_lesson_posts p WHERE stage_season_id=$1 AND lesson_date=$2 AND status='pending' AND auto_match=true
+      // طابور الملفات التي بلا اسم مادة: الأقدم فيه يأخذ أول مادة مجدولة متبقية.
+      // الملفات المسمّاة (حتى لو كانت مادتها غير مجدولة بعد) لا تدخل الطابور كي لا تعطّل ما بعدها.
+      const queue=(await c.query(`SELECT id,content_text FROM pending_channel_lesson_posts p WHERE stage_season_id=$1 AND lesson_date=$2 AND status='pending' AND auto_match=true
         AND NOT EXISTS(SELECT 1 FROM effective_lessons l WHERE l.source_chat_id=p.telegram_chat_id AND l.source_message_id=p.source_message_id)
-        ORDER BY received_at,source_message_id,id LIMIT 1`,[channel.stage_season_id,day])).rows[0];
+        ORDER BY received_at,source_message_id,id`,[channel.stage_season_id,day])).rows;
+      const first=queue.find(r=>!namedSubjects(allSubjects,r.content_text).length)||null;
       const subjects=await db.getPendingScheduledSubjectsForDate(channel.stage_season_id,day,c);
-      const subject=explicitSubjectId?allSubjects.find(s=>s.id===explicitSubjectId):chooseSubject(subjects,contentText,allSubjects);
+      const subject=explicitSubjectId?allSubjects.find(s=>s.id===explicitSubjectId):chooseSubject(subjects,contentText,allSubjects,{byOrder:true});
       if((!known&&(!first||Number(first.id)!==Number(p.id)))||!subject){await c.query('COMMIT');return {created:false,pending:p};}
       const lesson=await db.activateLesson(subject.id,24,explicitSubjectId?'channel_hashtag':'channel_schedule',sourceUrl,message.chat.id,message.message_id,published,{client:c,scheduleDate:day});
       if(!lesson)throw Error('لم يعد موسم المرحلة متاحًا.');
