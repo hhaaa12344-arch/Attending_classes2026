@@ -53,19 +53,29 @@ test('audio inherits المنطق, المسائل, القطر and العقائد
   assert.equal((await admin.managedItems('lessons',{stageId:f.stage.id})).total,4);
 });
 
-test('a generic institute photo and sound wait until only one scheduled subject remains',async()=>{
+test('a generic institute photo and unnamed sound take the next scheduled subject by order; named files keep their own subject',async()=>{
   const f=await fixture();
   await publisher.publish(input(f,20,{caption:'المرحلة الثانية اضغط هنا http://edu.turathalanbiaa.com/lesson/1433',photo:[{file_id:'photo'}]},'link'));
-  assert.equal((await publisher.publish(input(f,21,{audio:{file_id:'62.mp3',duration:60}},'audio'))).created,false);
-  for(const [index,sub] of f.subjects.slice(0,3).entries()){
+  const first=await publisher.publish(input(f,21,{audio:{file_id:'62.mp3',duration:60}},'audio'));
+  assert.equal(first.created,true);assert.equal(first.lesson.subject_id,f.subjects[0].id);
+  assert.equal((await db.getLessonBySource(f.chat,20)).id,(await db.getLessonBySource(f.chat,21)).id);
+  for(const [index,sub] of f.subjects.slice(1,3).entries()){
     const result=await publisher.publish(input(f,30+index,{audio:{file_id:'known'+index,duration:60},caption:sub.name},'audio'));
     assert.equal(result.lesson.subject_id,sub.id);
   }
-  const p=(await db.getPendingChannelLessonPosts(f.ss,f.day)).find(x=>Number(x.source_message_id)===21);
-  const available=await db.getPendingScheduledSubjectsForDate(f.ss,f.day);assert.deepEqual(available.map(s=>s.id),[f.subjects[3].id]);
-  await require('../lessonRecovery').createLessonRecovery(db).restore(p.id,available[0].id,{scheduleDate:f.day});
-  assert.equal((await db.getLessonBySource(f.chat,21)).subject_id,f.subjects[3].id);
-  assert.equal((await db.getLessonBySource(f.chat,20)).id,(await db.getLessonBySource(f.chat,21)).id);
+  const last=await publisher.publish(input(f,40,{audio:{file_id:'last.mp3',duration:60}},'audio'));
+  assert.equal(last.lesson.subject_id,f.subjects[3].id);
+  assert.deepEqual(await db.getPendingScheduledSubjectsForDate(f.ss,f.day),[]);
+  const extra=await publisher.publish(input(f,41,{audio:{file_id:'extra.mp3',duration:60}},'audio'));
+  assert.equal(extra.created,false);assert.ok(extra.pending);
+});
+
+test('audio file name or title identifies the subject when there is no caption',async()=>{
+  const f=await fixture();
+  const r=await publisher.publish(input(f,50,{audio:{file_id:'named-file',duration:60,file_name:'عقائد الباب الحادي عشر - 30.mp3'}},'audio'));
+  assert.equal(r.lesson.subject_id,f.subjects[1].id);
+  const next=await publisher.publish(input(f,51,{audio:{file_id:'plain',duration:60}},'audio'));
+  assert.equal(next.lesson.subject_id,f.subjects[0].id);
 });
 
 test('authenticated HTTP preview and apply repair nine lessons into seven, preserve attendance and discussions, and wake notifications',async()=>{

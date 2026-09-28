@@ -113,9 +113,32 @@ test('two anonymous files cannot compete for one subject on their original publi
     for(const messageId of [95,96])await db.queuePendingChannelLessonPost({chatId:f.chat,messageId,stageId:f.stage.id,stageSeasonId:f.ss,lessonDate:date,receivedAt:at,autoMatch:true,contentKind:'audio'});
     await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,f.a.id,date]);
     await app.recoverPendingChannelLessonsForDate(today);
-    assert.equal(await db.getLessonBySource(f.chat,95),undefined);
-    assert.equal(await db.getLessonBySource(f.chat,96),undefined);
+    if(daysAgo===0){
+      // اليوم نفسه: أول ملف بلا اسم يأخذ المادة المجدولة الوحيدة، والثاني ينتظر مادته.
+      assert.equal((await db.getLessonBySource(f.chat,95)).subject_id,f.a.id);
+      assert.equal(await db.getLessonBySource(f.chat,96),undefined);
+    }else{
+      assert.equal(await db.getLessonBySource(f.chat,95),undefined);
+      assert.equal(await db.getLessonBySource(f.chat,96),undefined);
+    }
   }
+});
+
+test('unnamed audios published today follow schedule order; an extra audio waits, then opens 24h with a notice once its subject is added',async()=>{
+  const f=await fixture(),today=app.currentDateInTimeZone('Asia/Baghdad');
+  await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,f.a.id,today]);
+  const send=id=>app.bot.handleUpdate({update_id:++seq,channel_post:{message_id:id,date:Math.floor(Date.now()/1000),chat:{id:f.chat,type:'channel',title:'قناة المرحلة'},audio:{file_id:'offline',file_unique_id:'order'+id,duration:60}}});
+  await send(200);await send(201);
+  assert.equal((await db.getLessonBySource(f.chat,200)).subject_id,f.a.id);
+  assert.equal(await db.getLessonBySource(f.chat,201),undefined);
+  assert.equal((await db.getPendingChannelLessonPosts(f.ss,today)).filter(p=>Number(p.source_message_id)===201).length,1);
+  await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,f.b.id,today]);
+  assert.equal((await app.recoverPendingChannelLessonsForDate(today)).recovered,1);
+  const late=await db.getLessonBySource(f.chat,201);
+  assert.equal(late.subject_id,f.b.id);assert.equal(late.active_until-late.attendance_opened_at,86400000);
+  assert.equal((await db.pool.query('SELECT * FROM notification_outbox WHERE dedupe_key LIKE $1',[`lesson-recovered:${late.id}:%`])).rows.length,1);
+  assert.equal((await db.getLessonBySource(f.chat,200)).subject_id,f.a.id);
+  assert.equal((await app.recoverPendingChannelLessonsForDate(today)).recovered,0);
 });
 
 test('a standalone subject hashtag and following audio share one lesson and one daily notice',async()=>{

@@ -56,6 +56,16 @@ test('a second file naming an already used subject stays pending instead of beco
   assert.deepEqual((await db.getPendingScheduledSubjectsForDate(f.ss,f.day)).map(s=>s.id),[f.b.id]);
 });
 
+test('a named file whose subject is not scheduled yet waits without taking another slot or blocking later unnamed files',async()=>{
+  const f=await fixture(),extra=await db.addSubject(f.stage.id,'التفسير','تفسير'+(++seq));
+  const waiting=await publisher.publish(post(f,60,{caption:'درس التفسير'}));
+  assert.equal(waiting.created,false);
+  const next=await publisher.publish(post(f,61));
+  assert.equal(next.lesson.subject_id,f.a.id);
+  await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,extra.id,f.day]);
+  assert.deepEqual((await db.getPendingScheduledSubjectsForDate(f.ss,f.day)).map(s=>s.id).sort((x,y)=>x-y),[f.b.id,extra.id].sort((x,y)=>x-y));
+});
+
 test('schedule-only rows appear in lesson management without fabricated attendance, then explicit old publication becomes first',async()=>{
   const f=await fixture(),original=new Date(Date.now()-2*86400000),recorded=new Date(Date.now()-3600000);
   let screen=await admin.managedItems('lessons',{stageId:f.stage.id});
