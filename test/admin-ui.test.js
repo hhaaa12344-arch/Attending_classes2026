@@ -131,6 +131,44 @@ test('admin panel stays usable when Telegram never calls the confirmation back',
   }finally{dom.window.close();}
 });
 
+test('lesson schedule: only the current month is open, days are named and each weekday has its own colour',async()=>{
+  const {dom,w,until,click}=await setup();try{
+    const parts=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit'}).formatToParts(new Date()).map(p=>[p.type,p.value]));
+    const at=(offset)=>{const d=new Date(Date.UTC(Number(parts.year),Number(parts.month)-1+offset,1));return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`;};
+    const [prev,cur,next]=[at(-1),at(0),at(1)];
+    const dates=[`${prev}-05`,`${prev}-06`,`${cur}-05`,`${cur}-06`,`${cur}-07`,`${next}-05`];
+    const base=w.fetch;w.fetch=async(url,options={})=>{
+      const u=new URL(url,'https://institute.example');
+      if(!u.pathname.endsWith('/lesson-schedule'))return base(url,options);
+      const data=options.method==='POST'?{ok:true}:{stage_season_id:1,start_date:dates[0],end_date_exclusive:`${next}-28`,dates,subjects:[{id:1,name:'الفقه'},{id:2,name:'العقائد'}],entries:[{subject_id:1,lesson_date:`${cur}-05`}]};
+      return {ok:true,status:200,json:async()=>data};
+    };
+    await until(()=>w.document.querySelector('.stage-card'));
+    click('[data-action="lesson-schedule"]');await until(()=>w.document.querySelector('.lesson-schedule .month-toggle'));
+    const rowsOf=key=>[...w.document.querySelectorAll(`.lesson-schedule tr[data-month="${key}"]`)];
+    const open=key=>w.document.querySelector(`.month-toggle[data-month="${key}"]`).getAttribute('aria-expanded')==='true';
+    assert.equal(w.document.querySelectorAll('.month-toggle').length,3);
+    assert.ok(open(cur)&&!open(prev)&&!open(next));
+    assert.ok(rowsOf(cur).every(r=>!r.hidden)&&rowsOf(prev).every(r=>r.hidden)&&rowsOf(next).every(r=>r.hidden));
+    // weekday names and one colour class per weekday
+    const names=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+    for(const row of w.document.querySelectorAll('.lesson-schedule tbody tr[data-month]')){
+      const iso=row.querySelector('.schedule-check').dataset.date,wd=new Date(iso+'T00:00:00Z').getUTCDay();
+      assert.equal(row.querySelector('.day-cell').textContent,names[wd]);assert.ok(row.classList.contains('day-'+wd));
+    }
+    // another month opens on demand and closes again
+    click(`.month-toggle[data-month="${prev}"]`);assert.ok(open(prev)&&rowsOf(prev).every(r=>!r.hidden));
+    click(`.month-toggle[data-month="${prev}"]`);assert.ok(!open(prev)&&rowsOf(prev).every(r=>r.hidden));
+    // open all / back to the current month only
+    click('[data-action="schedule-months-all"]');assert.ok(open(prev)&&open(cur)&&open(next));
+    click('[data-action="schedule-months-all"]');assert.ok(!open(prev)&&open(cur)&&!open(next));
+    // the per-month counter follows a toggle
+    const counter=w.document.querySelector(`.month-toggle[data-month="${cur}"] .month-planned`);assert.equal(counter.textContent,'1');
+    click(`.lesson-schedule tr[data-month="${cur}"] .schedule-check[data-checked="false"]`);
+    await until(()=>counter.textContent==='2');
+  }finally{dom.window.close();}
+});
+
 test('admin confirmation falls back inside the page when Telegram cannot show its popup',async()=>{
   const {dom,w,requests,until,click}=await setup();try{
     await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
