@@ -115,6 +115,22 @@ test('admin save uses a non-blocking Telegram confirmation and repeated save/can
   }finally{dom.window.close();}
 });
 
+test('admin panel stays usable when Telegram never calls the confirmation back',async()=>{
+  const {dom,w,requests,until,click}=await setup();try{
+    await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
+    click('[data-action="student"]');await until(()=>w.document.querySelector('[data-action="student-participation"]'));
+    const calls=[];let decide;w.Telegram.WebApp.showConfirm=(message,done)=>{calls.push(done);decide=done;};
+    const selector='[data-action="student-participation"][data-subject="1"]';
+    click(selector);assert.equal(calls.length,1);
+    // The popup is lost: no callback ever arrives. The next tap must not be ignored.
+    click(selector);assert.equal(calls.length,2,'a stale confirmation must not swallow later taps');
+    calls[0](true);await new Promise(r=>setTimeout(r,0));
+    assert.equal(requests.filter(r=>r.url.endsWith('/participation')).length,0,'an abandoned confirmation never saves');
+    decide(true);await until(()=>requests.filter(r=>r.url.endsWith('/participation')).length===1);
+    await until(()=>w.document.querySelector(selector)?.textContent==='تحويل إلى تقارير');
+  }finally{dom.window.close();}
+});
+
 test('admin confirmation falls back inside the page when Telegram cannot show its popup',async()=>{
   const {dom,w,requests,until,click}=await setup();try{
     await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
