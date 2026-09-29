@@ -309,21 +309,37 @@ async function loadLessonSchedule(){
   if(!lessonScheduleStageId||!eligible.some(s=>String(s.id)===String(lessonScheduleStageId)))lessonScheduleStageId=eligible[0].id;
   await renderLessonSchedule(eligible);
 }
+const WEEKDAY_NAMES=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+const weekdayIndex=iso=>new Date(`${iso}T00:00:00Z`).getUTCDay();
+// The month opened by default: today's month in Baghdad, else the nearest upcoming one, else the last.
+function scheduleOpenMonth(months){
+  const parts=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit'}).formatToParts(new Date()).map(p=>[p.type,p.value]));
+  const current=`${parts.year}-${parts.month}`;
+  return months.includes(current)?current:(months.find(m=>m>current)||months[months.length-1]||'');
+}
 async function renderLessonSchedule(eligible){
   const stage=eligible.find(x=>String(x.id)===String(lessonScheduleStageId));if(!stage)return;
   const data=await api('/lesson-schedule?stageSeasonId='+stage.stage_season_id);lessonScheduleData=data;
-  const checked=new Set(data.entries.map(e=>`${e.subject_id}:${e.lesson_date}`));let lastMonth='';
-  const rows=(data.dates||[]).map(iso=>{
-    const month=monthLabel(iso),monthCell=month!==lastMonth?month:'';lastMonth=month;
-    const cells=data.subjects.map(sub=>{const key=`${sub.id}:${iso}`,on=checked.has(key);
-      return `<td><button type="button" class="schedule-check ${on?'checked':''}" data-action="lesson-schedule-toggle" data-subject-id="${sub.id}" data-date="${iso}" data-checked="${on?'true':'false'}" aria-label="${esc(sub.name)} ${esc(isoDateLabel(iso))}">${on?'✓':'·'}</button></td>`;}).join('');
-    return `<tr><td class="month-cell">${esc(monthCell)}</td><td class="date-cell">${esc(isoDateLabel(iso))}</td>${cells}</tr>`;
+  const checked=new Set(data.entries.map(e=>`${e.subject_id}:${e.lesson_date}`));
+  const byMonth=new Map();for(const iso of data.dates||[]){const key=iso.slice(0,7);if(!byMonth.has(key))byMonth.set(key,[]);byMonth.get(key).push(iso);}
+  const months=[...byMonth.keys()],openMonth=scheduleOpenMonth(months),span=2+data.subjects.length;
+  const rows=months.map(key=>{
+    const days=byMonth.get(key),open=key===openMonth;
+    const planned=days.reduce((n,iso)=>n+data.subjects.filter(sub=>checked.has(`${sub.id}:${iso}`)).length,0);
+    const head=`<tr class="month-row"><td class="month-row-cell" colspan="${span}"><button type="button" class="month-toggle" data-action="schedule-month-toggle" data-month="${key}" aria-expanded="${open}"><span class="month-arrow">${open?'▾':'◂'}</span> ${esc(monthLabel(days[0]))} <span class="subtle">· ${days.length} يومًا · <span class="month-planned">${planned}</span> موعد</span></button></td></tr>`;
+    return head+days.map(iso=>{
+      const wd=weekdayIndex(iso);
+      const cells=data.subjects.map(sub=>{const k=`${sub.id}:${iso}`,on=checked.has(k);
+        return `<td><button type="button" class="schedule-check ${on?'checked':''}" data-action="lesson-schedule-toggle" data-subject-id="${sub.id}" data-date="${iso}" data-checked="${on?'true':'false'}" aria-label="${esc(sub.name)} ${esc(WEEKDAY_NAMES[wd])} ${esc(isoDateLabel(iso))}">${on?'✓':'·'}</button></td>`;}).join('');
+      return `<tr class="day-${wd}" data-month="${key}" ${open?'':'hidden'}><td class="day-cell">${WEEKDAY_NAMES[wd]}</td><td class="date-cell">${esc(isoDateLabel(iso))}</td>${cells}</tr>`;
+    }).join('');
   }).join('');
   setContent(head('جدول الدروس','ضع علامة ✓ في تاريخ نشر كل مادة. هذا الجدول التخطيطي لا يفعّل الدرس ولا يرسل الإشعارات.')+
     `<div class="toolbar"><label>المرحلة الدراسية<select id="lesson-schedule-stage">${eligible.map(e=>`<option value="${e.id}" ${String(e.id)===String(lessonScheduleStageId)?'selected':''}>${esc(e.name)}</option>`).join('')}</select></label>
-    <div class="subtle">من ${esc(isoDateLabel(data.start_date))} إلى ما قبل ${esc(isoDateLabel(data.end_date_exclusive))} · الخميس والجمعة مستبعدان تلقائيًا.</div></div>`+
+    <div class="subtle">من ${esc(isoDateLabel(data.start_date))} إلى ما قبل ${esc(isoDateLabel(data.end_date_exclusive))} · الخميس والجمعة مستبعدان تلقائيًا.</div>
+    ${months.length>1?`<button type="button" data-action="schedule-months-all" data-current="${openMonth}">فتح كل الأشهر</button>`:''}</div>`+
     `<div class="summary"><div><b>${data.dates.length}</b> يومًا دراسيًا</div><div><b>${data.subjects.length}</b> مادة</div><div><b class="lesson-schedule-summary-count">${data.entries.length}</b> موعد نشر مخطط</div></div>`+
-    `<div class="table-wrap lesson-schedule-wrap"><table class="lesson-schedule"><thead><tr><th>الشهر الميلادي</th><th>التاريخ</th>${data.subjects.map(s=>`<th>${esc(s.name)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`);
+    `<div class="table-wrap lesson-schedule-wrap"><table class="lesson-schedule"><thead><tr><th>اليوم</th><th>التاريخ</th>${data.subjects.map(s=>`<th>${esc(s.name)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 let mgtStageId='',mgtSubjectId='',mgtPage=0,sessionSubjectId='',sessionPage=0;
 function managementSummary(data,kind){
@@ -650,6 +666,21 @@ document.addEventListener('click',async event=>{
       if(!await confirmAction(`فكّ ربط قناة «${target.dataset.title}» عن مرحلتها؟ تبقى الدروس والحضور السابقة محفوظة، ولن تُفعّل دروسًا جديدة.`))return;
       busy=true;await api('/channels/'+target.dataset.id+'/unlink',{},'POST');notify('فُكّ ربط القناة.');await loadChannels();
     }
+    else if(a==='schedule-month-toggle'){
+      const open=target.getAttribute('aria-expanded')!=='true';
+      document.querySelectorAll(`.lesson-schedule tr[data-month="${target.dataset.month}"]`).forEach(r=>{r.hidden=!open;});
+      target.setAttribute('aria-expanded',String(open));target.querySelector('.month-arrow').textContent=open?'▾':'◂';
+    }
+    else if(a==='schedule-months-all'){
+      const toggles=[...document.querySelectorAll('.lesson-schedule .month-toggle')];
+      const openAll=toggles.some(b=>b.getAttribute('aria-expanded')!=='true');
+      for(const b of toggles){
+        const open=openAll||b.dataset.month===target.dataset.current;
+        document.querySelectorAll(`.lesson-schedule tr[data-month="${b.dataset.month}"]`).forEach(r=>{r.hidden=!open;});
+        b.setAttribute('aria-expanded',String(open));b.querySelector('.month-arrow').textContent=open?'▾':'◂';
+      }
+      target.textContent=openAll?'طي الأشهر عدا الحالي':'فتح كل الأشهر';
+    }
     else if(a==='lesson-schedule-toggle'){
       busy=true;const next=target.dataset.checked!=='true';
       try{
@@ -667,6 +698,9 @@ document.addEventListener('click',async event=>{
         }
         const summary=document.querySelector('.lesson-schedule-summary-count');
         if(summary)summary.textContent=String(lessonScheduleData.entries.length);
+        const monthKey=target.closest('tr')?.dataset.month;
+        const planned=document.querySelector(`.lesson-schedule .month-toggle[data-month="${monthKey}"] .month-planned`);
+        if(planned)planned.textContent=String(document.querySelectorAll(`.lesson-schedule tr[data-month="${monthKey}"] .schedule-check.checked`).length);
         notify(next?'تمت إضافة تاريخ النشر إلى الجدول.':'أزيل تاريخ النشر من الجدول.');
       }catch(e){notify(e.message,true);}finally{busy=false;}
     }

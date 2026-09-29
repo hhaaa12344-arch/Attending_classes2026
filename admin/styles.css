@@ -194,10 +194,23 @@ dialog>header h2{margin:0;font-size:1.05rem}
 .lesson-schedule-wrap{max-height:70vh;overflow:auto;overscroll-behavior:contain;scroll-behavior:auto}
 .lesson-schedule{min-width:max-content}
 .lesson-schedule th{position:sticky;top:0;z-index:3;background:var(--surface,#fff)}
-.lesson-schedule th:first-child,.lesson-schedule td:first-child{position:sticky;right:0;z-index:2;background:var(--surface,#fff)}
-.lesson-schedule th:nth-child(2),.lesson-schedule td:nth-child(2){position:sticky;right:120px;z-index:2;background:var(--surface,#fff)}
-.lesson-schedule .month-cell{font-weight:700;min-width:120px}
+.lesson-schedule th:first-child,.lesson-schedule td:first-child{position:sticky;right:0;z-index:2;background:var(--surface,#fff);width:90px;min-width:90px}
+.lesson-schedule th:nth-child(2),.lesson-schedule td:nth-child(2){position:sticky;right:90px;z-index:2;background:var(--surface,#fff)}
+.lesson-schedule .day-cell{font-weight:700;white-space:nowrap;border-right:5px solid var(--day-strong,#c9d2de)}
 .lesson-schedule .date-cell{white-space:nowrap;min-width:105px}
-.lesson-schedule td:not(.month-cell):not(.date-cell){min-width:64px;text-align:center;vertical-align:middle;padding:.45rem .35rem}
+.lesson-schedule td:not(.day-cell):not(.date-cell){min-width:64px;text-align:center;vertical-align:middle;padding:.45rem .35rem}
+/* كل يوم بلون ثابت؛ الألوان معتمة كي لا تظهر الأعمدة الثابتة شفافة عند التمرير */
+.lesson-schedule tr.day-6{--day:#e3f2fd;--day-strong:#1e88e5}
+.lesson-schedule tr.day-0{--day:#fff9c4;--day-strong:#f9a825}
+.lesson-schedule tr.day-1{--day:#ffe9d6;--day-strong:#ef6c00}
+.lesson-schedule tr.day-2{--day:#ede7f6;--day-strong:#7e57c2}
+.lesson-schedule tr.day-3{--day:#fce4ec;--day-strong:#d81b60}
+.lesson-schedule tr.day-4{--day:#e0f2f1;--day-strong:#00897b}
+.lesson-schedule tr.day-5{--day:#eceff1;--day-strong:#78909c}
+.lesson-schedule tr[class^="day-"] td{background:var(--day)}
+.lesson-schedule tr[class^="day-"] .schedule-check{background:rgba(255,255,255,.6)}
+.lesson-schedule tr[class^="day-"] .schedule-check.checked{background:#fff}
+.lesson-schedule tr.month-row td.month-row-cell{position:static;width:auto;min-width:0;padding:0;background:var(--line,#e2e7ee);text-align:right}
+.lesson-schedule .month-toggle{position:sticky;right:0;display:inline-flex;align-items:center;gap:.4rem;border:0;background:transparent;font-weight:800;color:var(--ink);padding:.6rem .9rem;min-height:44px}
 .schedule-check{width:46px;height:46px;border:1px solid var(--line-strong,#c9d2de);border-radius:8px;background:transparent;cursor:pointer;font-size:22px;line-height:1;padding:0;display:inline-grid;place-items:center;font-weight:700;touch-action:manipulation}
 .schedule-check.checked{background:var(--success-soft,#e8f5e9);border-color:var(--success,#2e7d32);color:var(--success,#2e7d32);font-weight:800}
