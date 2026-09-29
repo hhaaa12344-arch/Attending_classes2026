@@ -253,6 +253,14 @@ async function initSchema() {
       PRIMARY KEY(student_id, message_id)
     );
 
+    -- ردود البوت العابرة في محادثات الطلبة والأساتذة؛ تُحذف عند أول تفاعل تالٍ (transientMessages.js).
+    CREATE TABLE IF NOT EXISTS transient_ui_messages (
+      chat_id BIGINT NOT NULL,
+      message_id BIGINT NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT now(),
+      PRIMARY KEY(chat_id, message_id)
+    );
+
     -- يمنع إرسال إشعار مستقل لكل درس؛ لكل طالب إشعار نشر واحد فقط يوميًا لكل مرحلة.
     CREATE TABLE IF NOT EXISTS student_daily_lesson_notifications (
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -2517,6 +2525,23 @@ const takeStudentUiMessages = (studentId, includeMenu = false) =>
     )
     .then((r) => r.rows.map((row) => Number(row.message_id)).filter(Number.isSafeInteger));
 
+// ردود عابرة: تُسجَّل عند إرسالها وتُؤخذ (وتُحذف من الجدول) عند التفاعل التالي.
+const recordTransientMessage = (chatId, messageId) =>
+  pool.query(
+    'INSERT INTO transient_ui_messages(chat_id, message_id) VALUES($1,$2) ON CONFLICT DO NOTHING',
+    [chatId, messageId]
+  );
+
+const takeTransientMessages = (chatId, keepMessageId = null) =>
+  pool
+    .query(
+      `DELETE FROM transient_ui_messages
+       WHERE chat_id=$1 AND ($2::bigint IS NULL OR message_id <> $2::bigint)
+       RETURNING message_id`,
+      [chatId, keepMessageId]
+    )
+    .then((r) => r.rows.map((row) => Number(row.message_id)).filter(Number.isSafeInteger));
+
 async function getStudentCurrentSeasonActivity(studentId, onDate = null) {
   const currentResult = await pool.query(
     `SELECT e.stage_season_id, e.started_at, e.ended_at,
@@ -2989,6 +3014,8 @@ module.exports = {
   markAdminAbsenceAlertsSent,
   recordStudentUiMessage,
   takeStudentUiMessages,
+  recordTransientMessage,
+  takeTransientMessages,
   getStudentCurrentSeasonActivity,
   getCurrentSeasonLeaveUsage,
   requestLeave,

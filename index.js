@@ -179,6 +179,13 @@ bot.use(async (ctx, next) => {
   return next();
 });
 
+// تنظيف ردود الطلبة والأساتذة العابرة: تُحذف نتائج الأزرار السابقة عند أول تفاعل جديد.
+bot.use(require('./transientMessages').createTransientCleaner({
+  db, isAdmin: (ctx) => isAdmin(ctx), isInPreview: (ctx) => isInPreview(ctx),
+  deleteMessage: (chatId, messageId) => deleteMessageQuietly(chatId, messageId),
+  onError: (err) => console.error('تعذر تنظيف الردود العابرة:', err.message),
+}));
+
 // حالة مؤقتة في الذاكرة لكل مستخدم لإدارة خطوات الإدخال المتعددة (تسجيل، إضافة، تعديل...)
 // يعمل بشكل صحيح طالما البوت يعمل على نسخة تشغيل واحدة (الوضع الافتراضي على Railway)
 const rawUserState = new Map();
