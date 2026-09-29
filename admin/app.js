@@ -50,10 +50,17 @@ async function api(route,body,method='GET',format='json'){
     throw error;
   }finally{clearTimeout(timeout);}
 }
-let confirmationPending=false,dismissedWhileBusy=false;
+let confirmationPending=false,dismissedWhileBusy=false,confirmSerial=0,cancelConfirm=null;
+// If Telegram never calls back (popup swallowed, app backgrounded), the panel used to stay locked
+// until it was reopened. Any later tap abandons the stale confirmation instead of being ignored.
+function abandonConfirm(){
+  if(!confirmationPending)return;
+  confirmSerial++;confirmationPending=false;
+  const cancel=cancelConfirm;cancelConfirm=null;cancel?.();
+}
 async function confirmAction(message){
   if(confirmationPending)return false;
-  confirmationPending=true;
+  confirmationPending=true;const serial=++confirmSerial;
   const focused=document.activeElement;
   focused?.blur?.();
   try{
@@ -61,6 +68,7 @@ async function confirmAction(message){
     // Use Telegram's asynchronous popup rather than blocking its WebView with confirm().
     if(typeof tg?.showConfirm==='function'&&message.length<=256){
       try{return await new Promise((resolve,reject)=>{
+        cancelConfirm=()=>resolve(false);
         try{tg.showConfirm(message,accepted=>resolve(Boolean(accepted)));}catch(e){reject(e);}
       });}catch{}
     }
@@ -73,10 +81,11 @@ async function confirmAction(message){
       const finish=accepted=>{panel.remove();document.removeEventListener('keydown',onKey,true);resolve(accepted);};
       const onKey=event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();finish(false);}};
       panel.addEventListener('click',event=>{const choice=event.target.closest('[data-confirm-choice]');if(choice){event.stopPropagation();finish(choice.dataset.confirmChoice==='yes');}});
+      cancelConfirm=()=>finish(false);
       document.addEventListener('keydown',onKey,true);host.prepend(panel);
       panel.scrollIntoView?.({block:'nearest'});panel.querySelector('[data-confirm-choice="no"]').focus();
     });
-  }finally{confirmationPending=false;if(focused?.isConnected)focused.focus?.({preventScroll:true});}
+  }finally{if(serial===confirmSerial){confirmationPending=false;cancelConfirm=null;}if(focused?.isConnected)focused.focus?.({preventScroll:true});}
 }
 function closeDetail(){
   dialogSequence++;
@@ -511,7 +520,7 @@ async function refresh(){if(view==='student-contact')return loadStudentContact()
 $('#detail').addEventListener('cancel',()=>{dismissedWhileBusy=busy;dialogSequence++;});
 document.addEventListener('click',async event=>{
   const target=event.target.closest('[data-action]');if(!target)return;const a=target.dataset.action;
-  if(confirmationPending)return;
+  if(confirmationPending)abandonConfirm();
   if(a==='close-dialog'){dismissedWhileBusy=busy;closeDetail();return;}
   if(busy){notify('جارٍ إكمال العملية. ستعود الأزرار تلقائيًا عند اكتمال الطلب أو انتهاء مهلة الاتصال.');return;}
   dismissedWhileBusy=false;
