@@ -27,7 +27,7 @@ Object.assign(actionLabels,{one_time_schedule_import_2026_09_24:'إدخال جد
 let contactQuery='',contactPage=0,contactStudent=null;
 const contactRequestKey=prefix=>prefix+':'+(globalThis.crypto?.randomUUID?.()||`${Date.now()}:${Math.random().toString(36).slice(2)}`);
 const contactStatuses={pending:'بانتظار الإرسال',sending:'قيد الإرسال',sent:'أُرسلت',failed:'تعذّر الإرسال',expired:'انتهت المهلة',archived:'سجل إرسال مؤرشف'};
-const lessonSource=value=>value==='channel_schedule_recovered'?'استرجاع منشور محفوظ؛ الترقيم بتاريخ نشره الأصلي':value==='channel_schedule'?'تم تحديد المادة اعتمادًا على الجدول (دون هاشتاغ)':value==='channel_hashtag'?'تم تحديد المادة من رسالة هاشتاغ':value==='channel'?'تفعيل من القناة':value==='manual'?'تفعيل يدوي':'مصدر التحديد غير موثق';
+const lessonSource=value=>value==='channel_schedule_recovered'?'استرجاع منشور محفوظ؛ الترقيم بتاريخ نشره الأصلي':value==='schedule_fallback'?'فُعّل من الجدول لأن المنشور لم يُعرف؛ يرتبط تلقائيًا بأول منشور مطابق':value==='channel_schedule'?'تم تحديد المادة اعتمادًا على الجدول (دون هاشتاغ)':value==='channel_hashtag'?'تم تحديد المادة من رسالة هاشتاغ':value==='channel'?'تفعيل من القناة':value==='manual'?'تفعيل يدوي':'مصدر التحديد غير موثق';
 let filters={q:'',status:'active',groupId:'',mode:''};
 function notify(text,error=false){const n=$('#detail').open?$('#dialog-notice'):$('#notice');n.hidden=false;n.className=error?'error':'';n.textContent=text;}
 function clearNotice(){$('#notice').hidden=true;$('#dialog-notice').hidden=true;}
@@ -393,7 +393,9 @@ async function publishScheduledLessonDialog(subjectId,date){
   const subject=data.subjects.find(s=>String(s.id)===String(subjectId));if(!subject)throw Error('المادة غير موجودة.');
   dialog('نشر درس من الجدول',`<p>${esc(subject.name)} · موعد الجدول ${esc(date)}</p>
     <p>اختر منشور هذا الدرس بعد فتحه والتأكد من محتواه. لن يتغير أي درس آخر أو حضور سابق.</p>
-    ${data.pendingRows?.length?`<form class="restore-pending-lesson"><input type="hidden" name="subjectId" value="${subject.id}"><input type="hidden" name="scheduleDate" value="${esc(date)}">
+    <form class="activate-scheduled-lesson"><input type="hidden" name="stageSeasonId" value="${esc(data.season.id)}"><input type="hidden" name="subjectId" value="${subject.id}"><input type="hidden" name="scheduleDate" value="${esc(date)}">
+    <button type="submit">تفعيل بدون منشور لمدة 24 ساعة</button><p class="subtle">للمادة التي لم يُعرف منشورها؛ يُربط أي منشور يصل لاحقًا بالدرس تلقائيًا.</p></form>
+        ${data.pendingRows?.length?`<form class="restore-pending-lesson"><input type="hidden" name="subjectId" value="${subject.id}"><input type="hidden" name="scheduleDate" value="${esc(date)}">
     ${table(['اختيار','المنشور المحفوظ'],data.pendingRows.map(x=>[`<input type="radio" name="id" value="${x.id}" required aria-label="المنشور ${x.source_message_id}">`,
       `الرسالة #${esc(x.source_message_id)} · ${esc(x.content_kind||'')} · وقت محفوظ: ${stamp(x.received_at)}${/^https:\/\//i.test(x.source_url||'')?` · <a href="${esc(x.source_url)}" target="_blank" rel="noopener noreferrer">فتح المنشور</a>`:''}<div>${esc(x.content_text||'')}</div>`]))}
     <label>تاريخ النشر الأصلي بتوقيت بغداد — إن كان الوقت المحفوظ غير صحيح<input type="datetime-local" name="originalPublishedAt"></label>
@@ -802,6 +804,10 @@ document.addEventListener('submit',async event=>{
     else if(form.id==='correct-lesson'){
       if(!await confirmAction('حفظ المادة الصحيحة مع الاحتفاظ بكل حضور الدرس؟'))return;
       await api('/lessons/'+form.dataset.id+'/subject',body,'PATCH');closeDetail();await loadLessonManagement();notify('حُفظت المادة وبقيت كل سجلات الحضور.');
+    }else if(form.classList.contains('activate-scheduled-lesson')){
+      if(!await confirmAction('تفعيل هذه المادة من الجدول بدون منشور؟ يُتاح الحضور 24 ساعة من الآن ويُبلَّغ الطلبة.'))return;
+      const r=await api('/scheduled-lessons/activate',{stageSeasonId:body.stageSeasonId,subjectId:body.subjectId,scheduleDate:body.scheduleDate},'POST');
+      closeDetail();await loadLessonManagement();notify('فُعّل الدرس وأتيح الحضور حتى '+stamp(r.lesson.active_until));
     }else if(form.classList.contains('restore-pending-lesson')){
       if(!body.subjectId)throw Error('اختر المادة الصحيحة.');
       if(!await confirmAction('ربط هذا المنشور بالمادة المختارة واسترجاعه؟ يبقى تاريخ نشره الأصلي للترقيم، ويتاح الحضور 24 ساعة من الآن.'))return;
