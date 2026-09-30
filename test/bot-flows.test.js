@@ -389,3 +389,46 @@ test('bot: teacher can edit a question and delete an untouched exam',async()=>{
   await send(80000,'',`ex_delete:${exam.id}`);await send(80000,'',`ex_delete_confirm:${exam.id}`);
   assert.equal(await studies.getExamById(exam.id),undefined);
 });
+test('bot: every role keeps a persistent reply keyboard that survives leaving the chat',async()=>{
+  for(const [id,label] of [[42,'admin'],[80000,'teacher'],[90000,'student']]){
+    await send(id,'/menu');
+    const menu=messages.find(m=>m.method==='sendMessage'&&Array.isArray(m.reply_markup?.keyboard));
+    assert.ok(menu,`${label} receives the main keyboard`);
+    assert.equal(menu.reply_markup.is_persistent,true,`${label} keyboard must stay visible after the chat is reopened`);
+    assert.equal(menu.reply_markup.resize_keyboard,true);
+  }
+});
+test('bot: cleaning the chat never deletes the message that carries the reply keyboard',async()=>{
+  const wrapped=Telegram.prototype.callApi,keyboardIds=[];
+  Telegram.prototype.callApi=async function(method,payload){
+    const result=await wrapped.call(this,method,payload);
+    if(method==='sendMessage'&&Array.isArray(payload.reply_markup?.keyboard))keyboardIds.push(result.message_id);
+    return result;
+  };
+  try{
+    await send(42,'/menu');const current=keyboardIds.at(-1);assert.ok(current);
+    // a main-menu button purges the bot's earlier messages; the keyboard carrier must survive
+    await send(42,'➕ إضافة مرحلة دراسية');
+    assert.ok(!messages.some(m=>m.method==='deleteMessage'&&Number(m.message_id)===current),'purge must not delete the keyboard message');
+    await send(42,'❌ إلغاء العملية');
+    assert.ok(!messages.some(m=>m.method==='deleteMessage'&&Number(m.message_id)===current));
+    // a newer keyboard replaces the previous one only after the new one has been delivered
+    await send(42,'/menu');const previous=keyboardIds.at(-1);
+    await send(42,'/menu');
+    const created=messages.findIndex(m=>m.method==='sendMessage'&&Array.isArray(m.reply_markup?.keyboard));
+    const removed=messages.findIndex(m=>m.method==='deleteMessage'&&Number(m.message_id)===previous);
+    assert.ok(created>=0&&removed>created,`old keyboard is removed after the new one is sent (send ${created}, delete ${removed})`);
+    assert.ok(!messages.some(m=>m.method==='deleteMessage'&&Number(m.message_id)===keyboardIds.at(-1)),'the newest keyboard is kept');
+  }finally{Telegram.prototype.callApi=wrapped;}
+});
+test('bot: a student menu is replaced send-first, so the chat never stays without buttons',async()=>{
+  await send(90000,'↩️ رجوع');
+  const before=(await db.pool.query("SELECT message_id FROM student_ui_messages WHERE student_id=$1 AND message_kind='menu'",[student.id])).rows.map(r=>Number(r.message_id));
+  assert.equal(before.length,1);
+  await send(90000,'↩️ رجوع');
+  const created=messages.findIndex(m=>m.method==='sendMessage'&&Array.isArray(m.reply_markup?.keyboard));
+  const removed=messages.findIndex(m=>m.method==='deleteMessage'&&Number(m.message_id)===before[0]);
+  assert.ok(created>=0&&removed>created,`new menu first, old one deleted afterwards (send ${created}, delete ${removed})`);
+  const after=(await db.pool.query("SELECT message_id FROM student_ui_messages WHERE student_id=$1 AND message_kind='menu'",[student.id])).rows.map(r=>Number(r.message_id));
+  assert.equal(after.length,1);assert.notEqual(after[0],before[0]);
+});
