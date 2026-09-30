@@ -59,6 +59,8 @@ function createInstituteLinks(pool) {
         SELECT 1 FROM group_memberships m JOIN students s ON s.id=m.student_id AND s.is_active=true
         JOIN enrollments e ON e.student_id=m.student_id AND e.stage_season_id=m.stage_season_id AND e.status='active'
         WHERE m.student_id=$1 AND m.group_id=g.id AND m.subject_id=g.subject_id AND m.stage_season_id=g.stage_season_id
+          AND NOT EXISTS (SELECT 1 FROM participation_modes pm WHERE pm.student_id=m.student_id
+            AND pm.subject_id=m.subject_id AND pm.stage_season_id=m.stage_season_id AND pm.mode='report')
       ) OR EXISTS (
         SELECT 1 FROM teaching_assignments ta JOIN teachers t ON t.id=ta.teacher_id AND t.is_active=true
         WHERE ta.teacher_id=$2 AND ta.subject_id=g.subject_id AND ta.stage_season_id=g.stage_season_id

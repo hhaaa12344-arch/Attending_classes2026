@@ -1754,7 +1754,7 @@ const getDeepChannelDiagnostics = async () => {
 };
 
 // ---------- الدروس ----------
-const activateLesson = (
+const activateLesson = async (
   subjectId,
   hours = 24,
   sourceType = 'manual',
@@ -1763,8 +1763,26 @@ const activateLesson = (
   sourceMessageId = null,
   activatedAt = null,
   options = {}
-) =>
-  (options.client || pool)
+) => {
+  // درس فُتح احتياطيًا من الجدول بلا منشور (schedule_fallback) ينتظر منشوره: عند وصول منشور
+  // المادة نفسها في اليوم نفسه يُربط به بدل إنشاء درس ثانٍ، فيحتفظ الحضور المسجّل ويظهر رابط الدرس.
+  if (sourceMessageId != null && sourceChatId != null && String(sourceType).startsWith('channel')) {
+    const adopted = (await (options.client || pool).query(
+      `UPDATE lessons SET source_type=$2, source_url=$3, source_chat_id=$4, source_message_id=$5
+       WHERE id=(
+         SELECT l.id FROM lessons l
+         JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true
+         WHERE l.subject_id=$1 AND l.source_type='schedule_fallback' AND l.source_message_id IS NULL
+           AND l.schedule_date=COALESCE($6::date,(now() AT TIME ZONE 'Asia/Baghdad')::date)
+           AND NOT EXISTS(SELECT 1 FROM lesson_corrections r WHERE r.lesson_id=l.id)
+           AND NOT EXISTS(SELECT 1 FROM lessons x WHERE x.source_chat_id=$4 AND x.source_message_id=$5)
+         ORDER BY l.id LIMIT 1 FOR UPDATE OF l SKIP LOCKED)
+       RETURNING *`,
+      [subjectId, sourceType, sourceUrl, sourceChatId, sourceMessageId, options.scheduleDate || null]
+    )).rows[0];
+    if (adopted) return adopted;
+  }
+  return (options.client || pool)
     .query(
       `INSERT INTO lessons(
          subject_id, stage_season_id, activated_at, active_until, source_type, source_url,
@@ -1785,6 +1803,7 @@ const activateLesson = (
       [subjectId, hours, sourceType, sourceUrl, sourceChatId, sourceMessageId, activatedAt, options.attendanceOpenedAt||null,options.scheduleDate||null]
     )
     .then((r) => r.rows[0]);
+};
 
 const getLessonBySource = (chatId, messageId) => pool.query(`
   SELECT resolved.*, (r.lesson_id IS NOT NULL AND r.canonical_lesson_id IS NULL) AS withdrawn
@@ -2875,6 +2894,7 @@ async function getPendingScheduledSubjectsForDate(stageSeasonId, lessonDate, que
         WHERE l.stage_season_id=$1
           AND l.subject_id=sub.id
           AND COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date)=$2::date
+          AND NOT (l.source_type='schedule_fallback' AND l.source_message_id IS NULL)
       )
     ORDER BY sub.id`, [stageSeasonId, lessonDate])).rows;
 }

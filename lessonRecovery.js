@@ -102,6 +102,6 @@ function createLessonRecovery(db){
       await c.query('COMMIT');return {lesson,created:true,queued:notices};
     }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
   }
-  return {restore,restoreExisting};
+  return {restore,restoreExisting,notice};
 }
 module.exports={createLessonRecovery};

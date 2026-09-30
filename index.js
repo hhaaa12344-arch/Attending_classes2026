@@ -96,7 +96,7 @@ let adminServer;
 // أزرار الاستعراض والتنقل تمر بحرية. القائمة تُبنى من بادئات معرّفات أزرار الكتابة.
 const PREVIEW_BLOCKED_ACTION_PREFIXES = [
   'attend', 'mub_attend', 'mub_end_attend', 'mub_finish',
-  'pm_set', 'pm_join', 'pm_switch', 'pm_switchok',
+  'pm_set', 'pm_join', 'pm_switch', 'pm_switchok', 'pc_req', 'pc_cancel', 'pc_approve', 'pc_reject',
   'rep_send', 'stex_start', 'stex_ans',
   'sr_item', 'sr_apply', 'sr_manual', 'lr_grade', 'gr_edit',
   'season_choice', 'leave_approve', 'leave_reject', 'leave_cancel', 'leave_open',
@@ -5150,14 +5150,15 @@ async function showMyParticipation(ctx) {
     ctx, student,
     withStudentName(student, `📖 المباحثات والتقارير في ${subjects[0].stage_name}:\n${lines.join('\n')}\n\n` +
       `اختر المادة لفتح المباحثات أو إرسال التقارير:\n\n${REPORT_WEEKLY_REMINDER}`),
-    Markup.inlineKeyboard(
-      subjects.map((s) => [
+    Markup.inlineKeyboard([
+      ...subjects.map((s) => [
         callbackButton(
           limitButtonText(`${s.subject_name} — ${modeLabel(s)}`, 55),
           `pm_subj:${s.subject_id}:${s.stage_season_id}`
         ),
-      ])
-    )
+      ]),
+      [callbackButton('🔁 تغيير الاشتراك', 'pc_list')],
+    ])
   );
 }
 
@@ -5282,6 +5283,165 @@ bot.action(/pm_switchok:(\d+):(\d+)/, async (ctx) => {
   await ctx.editMessageText('✅ تم تحويلك إلى نظام المباحثات. جارٍ فتح مباحثة المادة...');
   return joinMubahathaGroup(ctx, student, subjectId, ssId);
 });
+
+// ---------------------------------------------------------------------------
+// الطالب — طلب تغيير الاشتراك (مباحثات ⇄ تقارير) بموافقة الإدارة
+// ---------------------------------------------------------------------------
+const PARTICIPATION_MODE_NAME = { mubahatha: 'المباحثات', report: 'التقارير' };
+const participationModeIcon = (mode) => (mode === 'mubahatha' ? '👥 مباحثات' : '📄 تقارير');
+
+async function editStudentScreen(ctx, text, extra) {
+  try { return await ctx.editMessageText(text, extra); }
+  catch (err) {
+    if (String(err.description || err.message).includes('message is not modified')) return undefined;
+    return ctx.reply(text, extra);
+  }
+}
+
+async function showParticipationChangeList(ctx, student) {
+  const subjects = (await studies.listStudentSubjects(student.id)).filter((s) => s.mode);
+  if (!subjects.length) {
+    return editStudentScreen(ctx,
+      'لم تختر المباحثات أو التقارير في أي مادة بعد. اختر من «📖 المباحثات والتقارير» ثم عُد هنا لطلب التغيير.',
+      Markup.inlineKeyboard([[callbackButton('↩️ المباحثات والتقارير', 'pc_back')]]));
+  }
+  const pending = new Set((await studies.listPendingParticipationChanges(student.id))
+    .map((r) => `${r.subject_id}:${r.stage_season_id}`));
+  const lines = subjects.map((s) => `• ${s.subject_name}: ${participationModeIcon(s.mode)}` +
+    (pending.has(`${s.subject_id}:${s.stage_season_id}`) ? ' — ⏳ طلب قيد المراجعة' : ''));
+  const rows = subjects.map((s) => [callbackButton(limitButtonText(`✏️ تعديل — ${s.subject_name}`, 55),
+    `pc_subj:${s.subject_id}:${s.stage_season_id}`)]);
+  rows.push([callbackButton('↩️ المباحثات والتقارير', 'pc_back')]);
+  return editStudentScreen(ctx,
+    `🔁 تغيير الاشتراك\n${lines.join('\n')}\n\nاضغط «تعديل» بجانب المادة لطلب التحويل. يصل الطلب إلى الإدارة وتصلك رسالة بقرارها.`,
+    Markup.inlineKeyboard(rows));
+}
+
+bot.action('pc_list', async (ctx) => {
+  const student = await effectiveStudent(ctx);
+  if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
+  await ctx.answerCbQuery();
+  return showParticipationChangeList(ctx, student);
+});
+
+bot.action('pc_back', async (ctx) => {
+  await ctx.answerCbQuery();
+  return showMyParticipation(ctx);
+});
+
+bot.action(/^pc_subj:(\d+):(\d+)$/, async (ctx) => {
+  const student = await effectiveStudent(ctx);
+  if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
+  const subjectId = Number(ctx.match[1]);
+  const ssId = Number(ctx.match[2]);
+  const row = (await studies.listStudentSubjects(student.id)).find((s) => s.subject_id === subjectId && s.stage_season_id === ssId);
+  if (!row || !row.mode) return ctx.answerCbQuery('اختر نظام هذه المادة أولًا من «المباحثات والتقارير».', { show_alert: true });
+  await ctx.answerCbQuery();
+  const target = row.mode === 'mubahatha' ? 'report' : 'mubahatha';
+  const pending = (await studies.listPendingParticipationChanges(student.id))
+    .find((r) => r.subject_id === subjectId && r.stage_season_id === ssId);
+  if (pending) {
+    return editStudentScreen(ctx,
+      `📘 ${row.subject_name}\n⏳ طلبك للتحويل إلى ${PARTICIPATION_MODE_NAME[pending.to_mode]} قيد مراجعة الإدارة.\nيبقى اشتراكك الحالي (${participationModeIcon(row.mode)}) إلى حين اعتماده.`,
+      Markup.inlineKeyboard([
+        [callbackButton('❌ إلغاء الطلب', `pc_cancel:${pending.id}`)],
+        [callbackButton('↩️ تغيير الاشتراك', 'pc_list')],
+      ]));
+  }
+  const consequences = target === 'report'
+    ? '• بعد الاعتماد تتوقف عنك تنبيهات جلسات المباحثات لهذه المادة.\n• ترسل تقاريرك من «📖 المباحثات والتقارير» ← المادة ← «إرسال تقرير».\n• تبقى سجلاتك السابقة محفوظة.'
+    : '• بعد الاعتماد تُوزَّع على مجموعة المباحثة ويصلك رابطها.\n• لا تُحاسب على الجلسات التي سبقت اعتماد التحويل.\n• تبقى درجة تقاريرك المُسلَّمة محسوبة لك.';
+  return editStudentScreen(ctx,
+    `📘 ${row.subject_name}\nاشتراكك الحالي: ${participationModeIcon(row.mode)}\n\n🔁 طلب التحويل إلى ${PARTICIPATION_MODE_NAME[target]}:\n• يُرسل الطلب إلى الإدارة ولا يُنفَّذ إلا بعد اعتمادها.\n${consequences}`,
+    Markup.inlineKeyboard([
+      [callbackButton(`📨 إرسال طلب التحويل إلى ${PARTICIPATION_MODE_NAME[target]}`, `pc_req:${subjectId}:${ssId}`)],
+      [callbackButton('↩️ تغيير الاشتراك', 'pc_list')],
+    ]));
+});
+
+bot.action(/^pc_req:(\d+):(\d+)$/, async (ctx) => {
+  const student = await effectiveStudent(ctx);
+  if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
+  let result;
+  try {
+    result = await studies.requestParticipationChange(student.id, Number(ctx.match[1]), Number(ctx.match[2]));
+  } catch (err) {
+    if (err.code === 'CONFLICT') return ctx.answerCbQuery(err.message, { show_alert: true });
+    throw err;
+  }
+  const { request, created } = result;
+  if (created) {
+    const delivered = await notifyAdmins(
+      `🔁 طلب تغيير اشتراك جديد\nالطالب: ${student.full_name}\nالمرحلة: ${student.stage_name || '—'}\nالمادة: ${request.subject_name}\n` +
+        `من: ${participationModeIcon(request.from_mode)} ← إلى: ${participationModeIcon(request.to_mode)}`,
+      Markup.inlineKeyboard([[
+        callbackButton('✅ موافقة', `pc_approve:${request.id}`),
+        callbackButton('❌ رفض', `pc_reject:${request.id}`),
+      ]])
+    );
+    if (!delivered) {
+      await studies.cancelParticipationChange(request.id, student.id);
+      return ctx.answerCbQuery('تعذّر إبلاغ الإدارة الآن. أعد المحاولة لاحقًا.', { show_alert: true });
+    }
+  }
+  await ctx.answerCbQuery(created ? 'تم إرسال الطلب ✅' : 'طلبك قيد المراجعة بالفعل.');
+  return editStudentScreen(ctx,
+    `📨 ${created ? 'أُرسل طلبك إلى الإدارة' : 'طلبك قيد مراجعة الإدارة'}\nالمادة: ${request.subject_name}\nالتحويل إلى: ${PARTICIPATION_MODE_NAME[request.to_mode]}\n\nيبقى اشتراكك الحالي كما هو حتى يُعتمد الطلب، وستصلك رسالة بالقرار.`,
+    Markup.inlineKeyboard([
+      [callbackButton('❌ إلغاء الطلب', `pc_cancel:${request.id}`)],
+      [callbackButton('↩️ تغيير الاشتراك', 'pc_list')],
+    ]));
+});
+
+bot.action(/^pc_cancel:(\d+)$/, async (ctx) => {
+  const student = await effectiveStudent(ctx);
+  if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
+  const cancelled = await studies.cancelParticipationChange(Number(ctx.match[1]), student.id);
+  await ctx.answerCbQuery(cancelled ? 'أُلغي الطلب.' : 'عولج الطلب مسبقًا.');
+  return showParticipationChangeList(ctx, student);
+});
+
+async function decideParticipationChangeAction(ctx, requestId, approve) {
+  if (!isAdmin(ctx) || isInPreview(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  const result = await studies.decideParticipationChange(requestId, approve, ctx.from.id);
+  if (!result) {
+    await ctx.answerCbQuery('عولج الطلب مسبقًا أو ألغاه الطالب.');
+    return editStudentScreen(ctx, 'تم التعامل مع هذا الطلب مسبقًا أو ألغاه الطالب.');
+  }
+  const request = await studies.getParticipationChangeRequest(requestId);
+  const tell = async (text, extra) => {
+    try { await bot.telegram.sendMessage(request.telegram_id, text, extra); }
+    catch (err) { console.warn('تعذر إشعار الطالب بقرار تغيير الاشتراك:', err.description || err.message); }
+  };
+  if (result.stale) {
+    await ctx.answerCbQuery('تغيّر نمط الطالب؛ أُلغي الطلب.');
+    await editStudentScreen(ctx, `⚠️ تغيّر اشتراك «${request.full_name}» في «${request.subject_name}» قبل اعتماد الطلب، فأُلغي دون تنفيذ.`);
+    return tell(`ℹ️ أُلغي طلب تحويلك في «${request.subject_name}» لأن اشتراكك تغيّر قبل اعتماده. اطلب من جديد إن لزم.`);
+  }
+  await ctx.answerCbQuery(approve ? 'تم الاعتماد ✅' : 'تم الرفض');
+  await editStudentScreen(ctx,
+    `${approve ? '✅ اعتُمد' : '❌ رُفض'} طلب «${request.full_name}» في «${request.subject_name}»: ${participationModeIcon(request.from_mode)} ← ${participationModeIcon(request.to_mode)}.`);
+  if (!approve) {
+    return tell(`❌ لم تعتمد الإدارة طلب تحويلك إلى ${PARTICIPATION_MODE_NAME[request.to_mode]} في «${request.subject_name}». يبقى اشتراكك الحالي كما هو.`);
+  }
+  if (request.to_mode === 'report') {
+    return tell(`✅ اعتمدت الإدارة تحويلك إلى التقارير في «${request.subject_name}».\nأرسل تقاريرك من «📖 المباحثات والتقارير» ← المادة ← «إرسال تقرير».`);
+  }
+  const assigned = await studies.assignStudentToGroup(request.student_id, request.subject_id, request.stage_season_id);
+  if (!assigned.group) {
+    await notifyAdmins(`⚠️ اعتُمد تحويل «${request.full_name}» إلى المباحثات في «${request.subject_name}» لكن تعذر توزيعه.\n${assigned.message}`);
+    return tell(`✅ اعتمدت الإدارة تحويلك إلى المباحثات في «${request.subject_name}».\nسيصلك رابط المجموعة بعد توفيرها.`);
+  }
+  if (!assigned.group.invite_link) {
+    await notifyAdmins(`⚠️ «${assigned.group.title}» بلا رابط دعوة، وطالب ينتظر الانضمام إليها.`);
+    return tell(`✅ اعتمدت الإدارة تحويلك إلى المباحثات في «${request.subject_name}» وسُجّلت في «${assigned.group.title}».\nسيصلك رابط الدعوة قريبًا.`);
+  }
+  return tell(`✅ اعتمدت الإدارة تحويلك إلى المباحثات في «${request.subject_name}».\n👥 مجموعتك: ${assigned.group.title}\nانضم من الرابط أدناه.`,
+    Markup.inlineKeyboard([[Markup.button.url('🔗 الدخول إلى المباحثة', assigned.group.invite_link)]]));
+}
+
+bot.action(/^pc_approve:(\d+)$/, (ctx) => decideParticipationChangeAction(ctx, Number(ctx.match[1]), true));
+bot.action(/^pc_reject:(\d+)$/, (ctx) => decideParticipationChangeAction(ctx, Number(ctx.match[1]), false));
 
 // ---------------------------------------------------------------------------
 // الطالب — إرسال التقارير
@@ -6541,6 +6701,11 @@ async function main() {
   timers.push(setInterval(()=>runScheduleTick().catch(err=>console.error('Schedule failed:',err.message)), 30 * 1000));
   // إعادة فحص الملفات التي وصلت قبل إدخال جدول اليوم.
   timers.push(setInterval(()=>recoverPendingChannelLessonsToday(), 15 * 1000));
+  // مواد اليوم المجدولة التي لم يُعرف منشورها تُفتح تلقائيًا بعد مهلة قصيرة من أول درس معروف.
+  const scheduledFallback = require('./scheduledFallback').createScheduledFallback(db);
+  if (scheduledFallback.graceMinutes !== null) {
+    timers.push(setInterval(() => scheduledFallback.sweepToday().catch((err) => console.error('Schedule fallback failed:', err.message)), 60 * 1000));
+  }
   // تنظيف الذاكرة كل خمس دقائق: حالات إدخال منتهية، وسجلات مجموعات قديمة
   timers.push(setInterval(cleanupMemory, 5 * 60 * 1000));
   const tick=()=>runScheduleTick().catch(err=>console.error('Schedule failed:',err.message));

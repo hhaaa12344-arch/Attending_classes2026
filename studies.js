@@ -41,6 +41,23 @@ async function initStudiesSchema() {
       UNIQUE(student_id, subject_id, stage_season_id)
     );
 
+    -- طلبات الطالب لتغيير اشتراكه في مادة (مباحثات ⇄ تقارير)؛ لا تُنفَّذ إلا باعتماد الإدارة.
+    CREATE TABLE IF NOT EXISTS participation_change_requests (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+      stage_season_id INTEGER NOT NULL REFERENCES stage_seasons(id) ON DELETE CASCADE,
+      from_mode TEXT NOT NULL CHECK (from_mode IN ('mubahatha','report')),
+      to_mode TEXT NOT NULL CHECK (to_mode IN ('mubahatha','report')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','cancelled')),
+      requested_at TIMESTAMP NOT NULL DEFAULT now(),
+      decided_at TIMESTAMP,
+      decided_by BIGINT,
+      CHECK (from_mode <> to_mode)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_participation_change_one_pending
+      ON participation_change_requests(student_id, subject_id, stage_season_id) WHERE status='pending';
+
     -- ---------- مجموعات المباحثات ----------
     -- لكل مادة في الموسم مجموعة أو أكثر على تليجرام، لكل واحدة سعة قصوى.
     -- عند امتلاء المجموعة يوجّه البوت الطالب تلقائيًا إلى المجموعة التالية.
@@ -390,6 +407,82 @@ async function changeParticipationMode(studentId, subjectId, stageSeasonId, mode
 async function switchToMubahatha(studentId,subjectId,stageSeasonId) {
   try {return await changeParticipationMode(studentId,subjectId,stageSeasonId,'mubahatha',{expectedMode:'report'});}
   catch(e){if(e.code==='CONFLICT')return undefined;throw e;}
+}
+
+// ---------------------------------------------------------------------------
+// طلبات تغيير الاشتراك (مباحثات ⇄ تقارير) بموافقة الإدارة
+// ---------------------------------------------------------------------------
+const OPPOSITE_MODE = { mubahatha: 'report', report: 'mubahatha' };
+
+async function requestParticipationChange(studentId, subjectId, stageSeasonId) {
+  [studentId, subjectId, stageSeasonId].forEach(positiveInt);
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query('SELECT id FROM students WHERE id=$1 FOR UPDATE', [studentId]);
+    const row = (await c.query(`SELECT sub.name AS subject_name, pm.mode FROM students st
+      JOIN enrollments e ON e.student_id=st.id AND e.status='active'
+      JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+      JOIN subjects sub ON sub.stage_id=ss.stage_id
+      JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=sub.id AND pm.stage_season_id=ss.id
+      WHERE st.id=$1 AND st.is_active=true AND st.stage_id=ss.stage_id AND sub.id=$2 AND ss.id=$3
+        AND participation_enabled(sub.id,ss.id)`, [studentId, subjectId, stageSeasonId])).rows[0];
+    if (!row) throw appError('اختر نظام هذه المادة أولًا من «المباحثات والتقارير»، أو أنها ليست ضمن موادك الحالية.', 'CONFLICT', 409);
+    const existing = (await c.query(`SELECT * FROM participation_change_requests
+      WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3 AND status='pending' FOR UPDATE`,
+    [studentId, subjectId, stageSeasonId])).rows[0];
+    if (existing && existing.from_mode === row.mode) {
+      await c.query('COMMIT');
+      return { request: { ...existing, subject_name: row.subject_name }, created: false };
+    }
+    // طلب قديم لم يعد يوافق النمط الحالي (غيّره الأدمن مثلًا) يُلغى ويُنشأ طلب جديد.
+    if (existing) await c.query("UPDATE participation_change_requests SET status='cancelled',decided_at=now() WHERE id=$1", [existing.id]);
+    const request = (await c.query(`INSERT INTO participation_change_requests(student_id,subject_id,stage_season_id,from_mode,to_mode)
+      VALUES($1,$2,$3,$4,$5) RETURNING *`, [studentId, subjectId, stageSeasonId, row.mode, OPPOSITE_MODE[row.mode]])).rows[0];
+    await c.query('COMMIT');
+    return { request: { ...request, subject_name: row.subject_name }, created: true };
+  } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
+}
+
+const getParticipationChangeRequest = (id) => pool.query(`SELECT r.*, st.full_name, st.telegram_id,
+    COALESCE(ss.stage_name_snapshot, sg.name) AS stage_name, sub.name AS subject_name
+  FROM participation_change_requests r
+  JOIN students st ON st.id=r.student_id
+  JOIN subjects sub ON sub.id=r.subject_id
+  JOIN stage_seasons ss ON ss.id=r.stage_season_id
+  JOIN stages sg ON sg.id=ss.stage_id
+  WHERE r.id=$1`, [id]).then((r) => r.rows[0]);
+
+const listPendingParticipationChanges = (studentId) => pool.query(
+  `SELECT * FROM participation_change_requests WHERE student_id=$1 AND status='pending' ORDER BY id`, [studentId]
+).then((r) => r.rows);
+
+const cancelParticipationChange = (id, studentId) => pool.query(
+  `UPDATE participation_change_requests SET status='cancelled', decided_at=now()
+   WHERE id=$1 AND student_id=$2 AND status='pending' RETURNING *`, [id, studentId]
+).then((r) => r.rows[0]);
+
+// قرار الإدارة: يُحسم الطلب ذريًا مرة واحدة فقط. null = عولج سابقًا أو ألغاه الطالب.
+// stale = تغيّر نمط الطالب قبل الاعتماد فلم يُنفَّذ شيء.
+async function decideParticipationChange(id, approve, actorId) {
+  positiveInt(id);
+  const claimed = (await pool.query(`UPDATE participation_change_requests
+    SET status=$2, decided_at=now(), decided_by=$3 WHERE id=$1 AND status='pending' RETURNING *`,
+  [id, approve ? 'approved' : 'rejected', actorId])).rows[0];
+  if (!claimed) return null;
+  if (!approve) return { request: claimed, applied: false };
+  try {
+    await changeParticipationMode(claimed.student_id, claimed.subject_id, claimed.stage_season_id, claimed.to_mode,
+      { actorId, expectedMode: claimed.from_mode });
+    return { request: claimed, applied: true };
+  } catch (e) {
+    if (e.code === 'CONFLICT') {
+      await pool.query("UPDATE participation_change_requests SET status='cancelled' WHERE id=$1", [id]);
+      return { request: { ...claimed, status: 'cancelled' }, applied: false, stale: true, reason: e.message };
+    }
+    await pool.query("UPDATE participation_change_requests SET status='pending',decided_at=NULL,decided_by=NULL WHERE id=$1", [id]).catch(() => {});
+    throw e;
+  }
 }
 
 const countParticipationBySubject = (subjectId, stageSeasonId) =>
@@ -2055,6 +2148,11 @@ async function finalizeSeasonGrades(subjectId, stageSeasonId) {
 }
 
 module.exports = {
+  requestParticipationChange,
+  getParticipationChangeRequest,
+  listPendingParticipationChanges,
+  cancelParticipationChange,
+  decideParticipationChange,
   listStudentGradeOverview,
   GRADE_WEIGHTS,
   SCHEDULE_HOURS,

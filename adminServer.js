@@ -19,6 +19,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
   const overrides=require('./adminOverrides').createAdminOverrides(db.pool);
   const discussionAttendance=require('./discussionAttendance').createDiscussionAttendance(db.pool);
   const lessonRecovery=require('./lessonRecovery').createLessonRecovery(db);
+  const scheduledFallback=require('./scheduledFallback').createScheduledFallback(db);
   const historicalRepair=require('./historicalLessonRepair').createHistoricalLessonRepair(db);
   const studentContact=require('./studentContact').createStudentContact(db.pool);
   const oneTimeCohortMove=require('./oneTimeCohortMove').createOneTimeCohortMove(db.pool);
@@ -306,6 +307,10 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if((m=/^\/pending-lessons\/(\d+)\/restore$/.exec(route))&&req.method==='POST'){
           result=await lessonRecovery.restore(positiveInt(m[1]),positiveInt(body.subjectId),{actorId:actor.id,originalPublishedAt:body.originalPublishedAt,targetScheduleDate:body.scheduleDate});
           if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Lesson recovery delivery failed:',err.code||'DELIVERY_ERROR'));
+        }
+        else if(route==='/scheduled-lessons/activate'&&req.method==='POST'){
+          result=await scheduledFallback.activateManually({stageSeasonId:body.stageSeasonId,subjectId:body.subjectId,scheduleDate:body.scheduleDate,actorId:actor.id,notice:lessonRecovery.notice});
+          if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Scheduled lesson delivery failed:',err.code||'DELIVERY_ERROR'));
         }
         else if((m=/^\/sessions\/(\d+)\/(reopen|retry-notifications|mark-all|cancel)$/.exec(route))&&req.method==='POST'){
           result=await adminData.manageSession(positiveInt(m[1]),m[2],actor.id);
