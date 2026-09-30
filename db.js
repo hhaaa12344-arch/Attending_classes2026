@@ -2515,13 +2515,14 @@ const recordStudentUiMessage = (studentId, messageId, messageKind = 'screen') =>
   );
 
 // رسائل القائمة السفلية تُحفظ عند فتح الشاشات الداخلية، وتُستبدل فقط عند إرسال قائمة جديدة.
-const takeStudentUiMessages = (studentId, includeMenu = false) =>
+const takeStudentUiMessages = (studentId, includeMenu = false, exceptMessageId = null) =>
   pool
     .query(
       `DELETE FROM student_ui_messages
        WHERE student_id=$1 AND ($2::boolean OR message_kind <> 'menu')
+         AND ($3::bigint IS NULL OR message_id <> $3::bigint)
        RETURNING message_id`,
-      [studentId, Boolean(includeMenu)]
+      [studentId, Boolean(includeMenu), exceptMessageId]
     )
     .then((r) => r.rows.map((row) => Number(row.message_id)).filter(Number.isSafeInteger));
 

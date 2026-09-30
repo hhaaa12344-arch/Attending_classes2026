@@ -379,7 +379,7 @@ function studentMainMenu(student = null) {
   }
   rows.push([replyButton('🔗 روابط المعهد'),replyButton(GUIDE_BUTTON)]);
   rows.push([replyButton(BACK_BUTTON)]);
-  return Markup.keyboard(rows).resize();
+  return Markup.keyboard(rows).resize().persistent();
 }
 
 // حارس مشترك: يمنع ميزات المباحثات في مرحلة «حضور دروس فقط»
@@ -388,7 +388,7 @@ function stageSupportsStudies(student) {
 }
 
 function backOnlyMenu() {
-  return Markup.keyboard([[replyButton(BACK_BUTTON)]]).resize();
+  return Markup.keyboard([[replyButton(BACK_BUTTON)]]).resize().persistent();
 }
 
 function officialConfirmationKeyboard() {
@@ -416,7 +416,7 @@ function teacherMainMenu() {
     [replyButton('💬 التواصل مع طالب معين'), replyButton('📣 رسالة جماعية')],
     [replyButton('🖥️ فتح لوحة الأستاذ')],
     [replyButton(TEACHER_MENU_SPACER)],
-  ]).resize();
+  ]).resize().persistent();
 }
 
 function adminMainMenu() {
@@ -441,7 +441,7 @@ function adminMainMenu() {
     [GUIDE_ADMIN_BUTTON],
     [BACK_BUTTON, '❌ إلغاء العملية'],
   ];
-  return Markup.keyboard(rows.map((row) => row.map((text) => replyButton(text)))).resize();
+  return Markup.keyboard(rows.map((row) => row.map((text) => replyButton(text)))).resize().persistent();
 }
 
 function studentActionsKeyboard(studentId, isActive = true) {
@@ -640,10 +640,16 @@ async function replyStudentScreen(ctx, student, text, extra = undefined, options
   if(isInPreview(ctx))return ctx.reply(text,extra);
   const messageKind = studentUiMessageKind(extra);
   if (options.clear !== false) {
-    await beginStudentScreen(ctx, student, { includeMenu: messageKind === 'menu' });
+    await beginStudentScreen(ctx, student, { includeMenu: false });
   }
   const message = await ctx.reply(text, extra);
-  return trackStudentUiMessage(student, message, messageKind);
+  await trackStudentUiMessage(student, message, messageKind);
+  if (messageKind === 'menu' && options.clear !== false && message && message.message_id) {
+    // القائمة السابقة تُحذف بعد وصول الجديدة، فلا تبقى المحادثة بلا أزرار إن فشل الإرسال.
+    const stale = await db.takeStudentUiMessages(student.id, true, Number(message.message_id));
+    for (const messageId of stale) await deleteMessageQuietly(ctx.chat.id, messageId);
+  }
+  return message;
 }
 
 function withStudentName(student, text) {
@@ -5582,7 +5588,16 @@ bot.action(/admin_stage_type_set:(\d+):(lessons_only|full)/, async (ctx) => {
 // عند الضغط على أي زر من القائمة تُحذف رسائل البوت السابقة، فلا تتراكم المحادثة.
 // نتتبّع معرّفات رسائل البوت لكل محادثة في الذاكرة (تليجرام لا يسمح بحذف ما مضى عليه 48 ساعة).
 const botMessages = new Map(); // chatId -> [messageId]
+const botMenuMessage = new Map(); // chatId -> آخر رسالة تحمل لوحة الأزرار السفلية
 const MAX_TRACKED = 60;
+
+// لوحة الأزرار السفلية مرتبطة برسالتها في تليجرام: حذف تلك الرسالة قد يخفي الأزرار.
+// لذلك لا تدخل قائمة التنظيف؛ وعند إرسال لوحة جديدة تُحذف اللوحة السابقة بعد وصول الجديدة فقط.
+async function rememberMenuMessage(chatId, messageId) {
+  const previous = botMenuMessage.get(chatId);
+  botMenuMessage.set(chatId, messageId);
+  if (previous && previous !== messageId) await deleteMessageQuietly(chatId, previous);
+}
 
 function trackBotMessage(chatId, messageId) {
   if (!chatId || !messageId) return;
@@ -5614,7 +5629,10 @@ bot.use(async (ctx, next) => {
       const original = ctx[method].bind(ctx);
       ctx[method] = async (...args) => {
         const sent = await original(...args);
-        if (sent && sent.message_id) trackBotMessage(ctx.chat.id, sent.message_id);
+        if (sent && sent.message_id) {
+          if (require('./transientMessages').isMenuMessage(args[1])) await rememberMenuMessage(ctx.chat.id, sent.message_id);
+          else trackBotMessage(ctx.chat.id, sent.message_id);
+        }
         return sent;
       };
     }
@@ -5895,11 +5913,11 @@ bot.action('pv_exit', async (ctx) => {
 // قوائم المعاينة: نفس قوائم الطالب/الأستاذ مع زر خروج ظاهر دائمًا
 function studentPreviewMenu(student) {
   const base = studentMainMenu(student).reply_markup.keyboard;
-  return Markup.keyboard([...base, ['🚪 الخروج من المعاينة']]).resize();
+  return Markup.keyboard([...base, ['🚪 الخروج من المعاينة']]).resize().persistent();
 }
 function teacherPreviewMenu() {
   const base = teacherMainMenu().reply_markup.keyboard;
-  return Markup.keyboard([...base, ['🚪 الخروج من المعاينة']]).resize();
+  return Markup.keyboard([...base, ['🚪 الخروج من المعاينة']]).resize().persistent();
 }
 
 bot.hears('🚪 الخروج من المعاينة', async (ctx) => {
