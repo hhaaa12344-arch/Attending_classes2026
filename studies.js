@@ -8,6 +8,9 @@ const {startOrResumeAttempt,submitAnswer,finalizeAttempt,isExamAvailable,overrid
 // توزيع الدرجات في الموسم (قابل للتغيير من مكان واحد)
 // الامتحان يفتح ليلًا في الساعة المحددة من اليوم المختار ويستمر عدد الساعات المُدخَل.
 const SCHEDULE_TZ = process.env.SCHEDULE_TIMEZONE || 'Asia/Baghdad';
+const confirmationSetting = String(process.env.SCHEDULE_REQUIRE_CONFIRMATION ?? 'true').trim().toLowerCase();
+if (!['true','false'].includes(confirmationSetting)) throw new Error('SCHEDULE_REQUIRE_CONFIRMATION must be true or false');
+const SCHEDULE_REQUIRE_CONFIRMATION = confirmationSetting === 'true';
 const EXAM_START_HOUR = Number(process.env.EXAM_START_HOUR || 22);
 // لا يظهر حضور البداية فور بدء المباحثة؛ يفتح بعد عشر دقائق من الموعد الأصلي.
 const START_ATTENDANCE_DELAY_MINUTES = Number(process.env.START_ATTENDANCE_DELAY_MINUTES || 10);
@@ -1861,7 +1864,7 @@ const getSlotDecision = (slotId, scheduledDate) =>
     .query('SELECT * FROM slot_decisions WHERE slot_id=$1 AND scheduled_date=$2::date', [slotId, scheduledDate])
     .then((r) => r.rows[0]);
 
-// المواعيد المؤكَّدة التي حان وقتها ولم تُفتح جلستها بعد.
+// عند تعطيل اشتراط التأكيد يبدأ الموعد الصامت أيضًا؛ التأجيل الصريح يمنعه دائمًا.
 const getSlotsReadyToStart = () =>
   pool
     .query(
@@ -1879,11 +1882,11 @@ const getSlotsReadyToStart = () =>
        CROSS JOIN dates
        LEFT JOIN slot_decisions d ON d.slot_id=s.id AND d.scheduled_date=dates.day
        WHERE s.is_active=true AND participation_enabled(s.subject_id,s.stage_season_id) AND d.session_id IS NULL
-         AND d.decision='confirmed'
+         AND (d.decision='confirmed' OR ($2::boolean=false AND d.decision IS NULL))
          AND EXTRACT(DOW FROM dates.day)::int=s.day_of_week
          AND loc.ln >= (dates.day + make_time(s.hour, s.minute, 0))
          AND loc.ln < (dates.day + make_time(s.hour, s.minute, 0)+make_interval(hours=>s.duration_hours))`,
-      [SCHEDULE_TZ]
+      [SCHEDULE_TZ, SCHEDULE_REQUIRE_CONFIRMATION]
     )
     .then((r) => r.rows);
 
@@ -1899,9 +1902,9 @@ async function startSessionFromSlot(slot) {
       `SELECT d.id FROM slot_decisions d JOIN schedule_slots sl ON sl.id=d.slot_id
        JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
        WHERE participation_enabled(sl.subject_id,sl.stage_season_id) AND d.slot_id=$1 AND d.scheduled_date=$2 AND d.session_id IS NULL AND sl.is_active=true
-         AND d.decision='confirmed'
-         AND $3::timestamp > now() FOR UPDATE OF d`,
-      [slot.id, slot.scheduled_date, slot.scheduled_end]
+         AND (d.decision='confirmed' OR ($4::boolean=false AND d.decision IS NULL))
+         AND $3::timestamp > now() AND $5::timestamp <= now() FOR UPDATE OF d`,
+      [slot.id, slot.scheduled_date, slot.scheduled_end, SCHEDULE_REQUIRE_CONFIRMATION, slot.scheduled_start]
     );
     if (!claim.rows[0]) {
       await client.query('ROLLBACK');
@@ -2174,6 +2177,7 @@ module.exports = {
   setSlotDecisionReason,
   getSlotDecision,
   getSlotsReadyToStart,
+  SCHEDULE_REQUIRE_CONFIRMATION,
   startSessionFromSlot,
   listGroupStudents,
   listSeasonStudents,

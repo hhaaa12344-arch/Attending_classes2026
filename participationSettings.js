@@ -48,7 +48,7 @@ async function ensureWholeStageGroup(c,subjectId,seasonId){
     VALUES($1,$2,1,'المرحلة كاملة',10000) RETURNING *`,[subjectId,seasonId])).rows[0];
 }
 function createParticipationSettings(pool){
-  async function save(seasonId,{grouped,enabledSubjectIds},actor){
+  async function save(seasonId,{grouped,enabledSubjectIds,expectedSettings},actor){
     positiveInt(seasonId);
     if(typeof grouped!=='boolean'||!Array.isArray(enabledSubjectIds)||enabledSubjectIds.length>500)throw appError('حدد تنظيم المباحثات والمواد المشمولة.');
     const ids=[...new Set(enabledSubjectIds.map(id=>positiveInt(id)))];
@@ -62,6 +62,12 @@ function createParticipationSettings(pool){
       const subjects=(await c.query('SELECT id FROM subjects WHERE stage_id=$1',[season.stage_id])).rows;
       if(ids.some(id=>!subjects.some(s=>s.id===id)))throw appError('إحدى المواد لا تنتمي إلى المرحلة.');
       const previous=(await c.query('SELECT * FROM subject_study_settings WHERE stage_season_id=$1',[seasonId])).rows;
+      if(expectedSettings!==undefined){
+        if(typeof expectedSettings?.grouped!=='boolean'||!Array.isArray(expectedSettings.enabledSubjectIds)||expectedSettings.enabledSubjectIds.length>500)throw appError('أعد تحميل إعدادات الموسم قبل الحفظ.','CONFLICT',409);
+        const expectedIds=[...new Set(expectedSettings.enabledSubjectIds.map(positiveInt))].sort((a,b)=>a-b);
+        const currentIds=subjects.filter(s=>previous.find(p=>p.subject_id===s.id)?.enabled!==false).map(s=>s.id).sort((a,b)=>a-b);
+        if(season.discussion_grouping!==expectedSettings.grouped||JSON.stringify(expectedIds)!==JSON.stringify(currentIds))throw appError('تغيّرت إعدادات الموسم من مسؤول آخر. أعد تحميل الصفحة وراجع التغييرات.','CONFLICT',409);
+      }
       // Do not remove participation in the middle of a live attendance window.
       const live=(await c.query(`SELECT 1 FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id
         WHERE g.stage_season_id=$1 AND NOT(g.subject_id=ANY($2::int[]))

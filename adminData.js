@@ -141,6 +141,32 @@ function createAdminData(db, studies) {
       return after;
     } catch(e) {await c.query('ROLLBACK');throw e;} finally {c.release();}
   }
+  async function updateSubject(id,{name,expectedName,stageSeasonId},actor) {
+    id=positiveInt(id);stageSeasonId=positiveInt(stageSeasonId);actor=positiveInt(actor);
+    if(typeof name!=='string'||name.trim().length<2||name.length>100)throw appError('أدخل اسم مادة من حرفين إلى 100 حرف.');
+    if(typeof expectedName!=='string'||expectedName.length>100)throw appError('أعد فتح المادة لتحميل اسمها الحالي.','CONFLICT',409);
+    name=name.trim();
+    const c=await pool.connect();
+    try {
+      await c.query('BEGIN');
+      const origin=(await c.query('SELECT stage_id FROM stage_seasons WHERE id=$1',[stageSeasonId])).rows[0];
+      if(!origin)throw appError('لا يوجد موسم متاح لتعديل المادة.','ARCHIVED',409);
+      // Stage first, like starting a season and renaming a stage: avoid inverse lock order.
+      const stage=(await c.query('SELECT id,is_active FROM stages WHERE id=$1 FOR UPDATE',[origin.stage_id])).rows[0];
+      if(!stage?.is_active)throw appError('المرحلة مؤرشفة.','ARCHIVED',409);
+      const season=(await c.query('SELECT * FROM stage_seasons WHERE id=$1 AND stage_id=$2 FOR SHARE',[stageSeasonId,stage.id])).rows[0];
+      if(!season?.is_active)throw appError('لا يمكن تعديل مادة من موسم مؤرشف.','ARCHIVED',409);
+      const before=(await c.query('SELECT * FROM subjects WHERE id=$1 AND stage_id=$2 FOR UPDATE',[id,stage.id])).rows[0];
+      if(!before)throw appError('المادة غير موجودة في هذه المرحلة.','NOT_FOUND',404);
+      if(before.name!==expectedName)throw appError('تغيّر اسم المادة من مسؤول آخر. أعد تحميلها.','CONFLICT',409);
+      if((await c.query('SELECT 1 FROM subjects WHERE stage_id=$1 AND id<>$2 AND lower(btrim(name))=lower($3)',[stage.id,id,name])).rows.length)throw appError('توجد مادة بهذا الاسم في المرحلة نفسها.','DUPLICATE',409);
+      if(before.name===name){await c.query('COMMIT');return before;}
+      const after=(await c.query('UPDATE subjects SET name=$2 WHERE id=$1 RETURNING *',[id,name])).rows[0];
+      await c.query(`INSERT INTO admin_audit_log(actor_id,action,entity_type,entity_id,before_data,after_data)
+        VALUES($1,'update_subject','subject',$2,$3::jsonb,$4::jsonb)`,[actor,id,JSON.stringify(before),JSON.stringify(after)]);
+      await c.query('COMMIT');return after;
+    }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+  }
   async function leaves({stageId=null,page=0,status='pending'}={}) {
     if (!['pending','approved','rejected','ended','cancelled','all'].includes(status)) throw appError('الحالة غير صالحة.');
     const p=pageOptions(page,25);
@@ -340,7 +366,7 @@ function createAdminData(db, studies) {
     }
     yield count?`\n**عدد تسجيلات الحضور:** ${count}\n`:'\nلا توجد تسجيلات حضور لهذا الموسم.\n';
   }
-  return {stages,stage,students,student,updateStudent,leaves,reports,sessions,attendanceCsv,attendanceMarkdown,managedItems,manageSession,sessionNotifications,
+  return {stages,stage,students,student,updateStudent,updateSubject,leaves,reports,sessions,attendanceCsv,attendanceMarkdown,managedItems,manageSession,sessionNotifications,
     lessonAttendanceMarkdown:require('./lessonAttendance').createLessonAttendance(pool).markdown,
     lessonAttendance:require('./lessonAttendance').createLessonAttendance(pool).matrix,
     saveParticipationSettings:require('./participationSettings').createParticipationSettings(pool).save};

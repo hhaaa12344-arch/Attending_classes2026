@@ -143,7 +143,7 @@ function createScheduler({ pool, studies }) {
         try {
           await c.query('BEGIN');
           await enqueueNotification(c, { key:`slot:${slot.id}:${date}:prompt`,chatId:slot.teacher_telegram_id,
-            text:`⏰ بعد ${promptLeadMinutes} دقائق موعد مباحثة المرحلة «${slot.stage_name}» في مادة «${slot.subject_name}» — ${slot.group_title}.\nهل أنت مستعد للمباحثة؟ لن تبدأ جلسة اليوم ما لم تؤكدها.`,
+            text:`⏰ بعد ${promptLeadMinutes} دقائق موعد مباحثة المرحلة «${slot.stage_name}» في مادة «${slot.subject_name}» — ${slot.group_title}.\nهل أنت مستعد للمباحثة؟ ${studies.SCHEDULE_REQUIRE_CONFIRMATION?'لن تبدأ جلسة اليوم ما لم تؤكدها.':'ستبدأ الجلسة في موعدها تلقائيًا، ويمكنك تأجيلها قبل البداية.'}`,
             extra:{ reply_markup:{inline_keyboard:[[{text:'✅ نعم، ستكون هناك مباحثة',callback_data:`slot_yes:${slot.id}:${date}`},{text:'🕓 تأجيل',callback_data:`slot_no:${slot.id}:${date}`}]]}},
             expiresAt: new Date(Date.now()+promptLeadMinutes*60000) });
           await c.query(`INSERT INTO slot_decisions(slot_id,scheduled_date) VALUES($1,$2) ON CONFLICT DO NOTHING`,[slot.id,date]);

@@ -154,7 +154,12 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           if(!Object.prototype.hasOwnProperty.call(body,'expectedMode'))throw appError('أعد تحميل نوع المتابعة الحالي.');
           result=await studies.changeParticipationMode(positiveInt(m[1]),positiveInt(m[2]),positiveInt(body.seasonId),body.mode,{actorId:actor.id,expectedMode:body.expectedMode});
         }
-        else if((m=/^\/stage-seasons\/(\d+)\/participation-settings$/.exec(route))&&req.method==='PATCH')result=await adminData.saveParticipationSettings(positiveInt(m[1]),body,actor.id);
+        else if((m=/^\/subjects\/(\d+)$/.exec(route))&&req.method==='PATCH')result=await adminData.updateSubject(positiveInt(m[1]),body,actor.id);
+        else if((m=/^\/stage-seasons\/(\d+)\/participation-settings$/.exec(route))&&req.method==='PATCH'){
+          if(!body.expectedSettings)throw appError('أعد تحميل إعدادات الموسم قبل الحفظ.','CONFLICT',409);
+          if(body.grouped!==body.expectedSettings.grouped&&body.confirmGroupingChange!==true)throw appError('راجع تغيير تقسيم الطلبة وأكّد آثاره أولًا.');
+          result=await adminData.saveParticipationSettings(positiveInt(m[1]),body,actor.id);
+        }
         else if(route==='/teachers'&&req.method==='POST'){
           if(typeof body.fullName!=='string'||body.fullName.trim().length<3||body.fullName.length>200)throw appError('اسم الأستاذ غير صالح.');
           if(body.phone&&(typeof body.phone!=='string'||body.phone.length>30))throw appError('رقم الهاتف غير صالح.');
