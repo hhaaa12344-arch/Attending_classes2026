@@ -4,35 +4,51 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>شؤون الطلبة | لوحة إدارة المعهد</title>
   <meta name="description" content="إدارة مراحل المعهد وطلبته وأساتذته ومجموعاته وجداول مباحثاته والحضور والإجازات والتقارير.">
-  <meta name="theme-color" content="#101b2b">
+  <meta name="theme-color" content="#244643">
   <meta name="color-scheme" content="light">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23101b2b'/%3E%3Cpath d='M8 8h16v18H8zM12 13h8M12 18h8' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/admin/styles.css?v=20260929-04">
+  <link rel="stylesheet" href="/admin/styles.css?v=20261001-01">
   <script src="https://telegram.org/js/telegram-web-app.js?63" defer></script>
-  <script src="/admin/app.js?v=20260930-06" defer></script>
+  <script src="/admin/app.js?v=20261001-01" defer></script>
 </head>
 <body>
-  <aside class="sidebar"><div class="brand"><span class="brand-mark">ت</span><div>شؤون الطلبة<small>إدارة المعهد</small></div></div>
+  <svg class="icon-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+    <symbol id="i-stages" viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></symbol>
+    <symbol id="i-students" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6M18 15a5 5 0 0 1 3 5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M9 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-4M9 2h6v4H9zM7 14l3 3 7-7"/></symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 2v6M17 2v6M3 11h18M8 15h2M14 15h2M8 18h2"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 5c-3-2-7-2-10-1v15c3-1 7-1 10 1 3-2 7-2 10-1V4c-3-1-7-1-10 1ZM12 5v15M5 8h4M5 12h4M15 8h4M15 12h4"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m10 8 6 4-6 4z"/></symbol>
+    <symbol id="i-channel" viewBox="0 0 24 24"><path d="M3 11v4h4l12 5V4L7 11H3ZM7 15l2 6M22 8v8"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v18h18M7 17v-4M12 17V8M17 17V5"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM9 21h6M12 2V1"/></symbol>
+    <symbol id="i-leave" viewBox="0 0 24 24"><path d="M6 2h9l4 4v16H6zM15 2v5h4M9 12h7M9 16h5"/></symbol>
+    <symbol id="i-message" viewBox="0 0 24 24"><path d="M21 11a9 9 0 0 1-9 9H4l-2 2V11a9 9 0 0 1 19 0ZM7 10h10M7 14h6"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2 7M3 5v6h6M12 7v5l3 2"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4L22 2ZM11 13 22 2"/></symbol>
+    <symbol id="i-exit" viewBox="0 0 24 24"><path d="M10 3H4v18h6M8 12h13M16 7l5 5-5 5"/></symbol>
+  </defs></svg>
+  <aside class="sidebar"><div class="brand"><span class="brand-mark"><svg aria-hidden="true"><use href="#i-book"></use></svg></span><div>شؤون الطلبة<small>لوحة إدارة المعهد</small></div></div>
     <nav aria-label="القائمة الرئيسية">
-      <button class="nav active" data-action="home">المراحل والطلبة</button>
-      <button class="nav" data-action="lesson-attendance">حضور الدروس</button>
-      <button class="nav" data-action="teachers">الأساتذة</button>
-      <button class="nav" data-action="schedule-matrix">جداول المباحثات</button>
-      <button class="nav" data-action="lesson-schedule">جدول الدروس</button>
-      <button class="nav" data-action="lesson-management">الدروس المفعّلة</button>
-      <button class="nav" data-action="channels">القنوات</button>
-      <button class="nav" data-action="stats">الإحصائيات</button>
-      <button class="nav" data-action="watchlist">التنبيهات والإنذارات</button>
-      <button class="nav" data-action="all-leaves">طلبات الإجازة</button>
-      <button class="nav" data-action="student-contact">💬 التواصل مع طالب معين</button>
-      <button class="nav" data-action="audit">سجل التعديلات</button>
-      <button class="nav" data-action="notifications">حالة الإشعارات</button>
+      <button class="nav active" data-action="home"><svg aria-hidden="true"><use href="#i-stages"></use></svg>المراحل والطلبة</button>
+      <button class="nav" data-action="lesson-attendance"><svg aria-hidden="true"><use href="#i-check"></use></svg>حضور الدروس</button>
+      <button class="nav" data-action="teachers"><svg aria-hidden="true"><use href="#i-students"></use></svg>الأساتذة</button>
+      <button class="nav" data-action="schedule-matrix"><svg aria-hidden="true"><use href="#i-calendar"></use></svg>جداول المباحثات</button>
+      <button class="nav" data-action="lesson-schedule"><svg aria-hidden="true"><use href="#i-book"></use></svg>جدول الدروس</button>
+      <button class="nav" data-action="lesson-management"><svg aria-hidden="true"><use href="#i-play"></use></svg>الدروس المفعّلة</button>
+      <button class="nav" data-action="channels"><svg aria-hidden="true"><use href="#i-channel"></use></svg>القنوات</button>
+      <button class="nav" data-action="stats"><svg aria-hidden="true"><use href="#i-chart"></use></svg>الإحصائيات</button>
+      <button class="nav" data-action="watchlist"><svg aria-hidden="true"><use href="#i-bell"></use></svg>التنبيهات والإنذارات</button>
+      <button class="nav" data-action="all-leaves"><svg aria-hidden="true"><use href="#i-leave"></use></svg>طلبات الإجازة</button>
+      <button class="nav" data-action="student-contact"><svg aria-hidden="true"><use href="#i-message"></use></svg>التواصل مع طالب معين</button>
+      <button class="nav" data-action="audit"><svg aria-hidden="true"><use href="#i-history"></use></svg>سجل التعديلات</button>
+      <button class="nav" data-action="notifications"><svg aria-hidden="true"><use href="#i-send"></use></svg>حالة الإشعارات</button>
     </nav>
-    <p class="side-note">حضور الدروس حسب المرحلة. وتقسيم المباحثات إلى مجموعات اختياري لكل موسم.</p>
-    <button class="quiet" data-action="logout">إنهاء جلسة الإدارة</button>
+    <p class="side-note"><span>متابعة أوضح، كل يوم.</span>حضور الدروس وتنظيم المباحثات والتقارير حسب كل موسم.</p>
+    <button class="quiet" data-action="logout"><svg aria-hidden="true"><use href="#i-exit"></use></svg>إنهاء جلسة الإدارة</button>
   </aside>
   <main>
-    <header class="topbar"><div id="breadcrumb">المعهد / الإدارة</div><select id="season-select" hidden></select><span id="identity">الدخول من تليجرام</span></header>
+    <header class="topbar"><div class="topbar-title"><span class="eyebrow">مساحة إدارة المعهد</span><div id="breadcrumb">المعهد / الإدارة</div></div><div class="topbar-tools"><select id="season-select" aria-label="الموسم المعروض" hidden></select><span id="identity">الدخول من تليجرام</span></div></header>
     <div id="notice" role="status" aria-live="polite" hidden></div>
     <section id="content" aria-busy="true"><div class="empty"><h1>لوحة إدارة المعهد</h1><p>جارٍ التحقق من حساب الإدارة…</p></div></section>
   </main>

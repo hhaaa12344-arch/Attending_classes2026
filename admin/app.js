@@ -20,6 +20,8 @@ const DAY_ORDER=[6,0,1,2,3,4,5];
 let token='',stages=[],teachers=[],seasons=[],currentSeasonId='',currentStage=null,currentStudent=null,currentExam=null,currentTeacher=null,matrixStageId=null,matrixDay=new Date().getDay(),matrixEligible=[],tab='students',page=0,view='home',sequence=0,dialogSequence=0,busy=false;
 let lessonScheduleStageId=null,lessonScheduleData=null;
 let adminSelection=null;
+let participationDraft=null;
+actionLabels.update_subject='تعديل اسم المادة';
 Object.assign(actionLabels,{correct_lesson_subject:'تصحيح مادة الدرس',late_lesson_attendance:'حضور إداري متأخر',remove_lesson_attendance:'حذف حضور طالب من درس',reopen_student_exam:'فتح امتحان لطالب واحد'});
 Object.assign(actionLabels,{contact_student_admin:'رسالة إدارية لطالب',contact_student_teacher:'رسالة أستاذ لطالب'});
 Object.assign(actionLabels,{one_time_preliminary_22_group_1_to_2:'نقل 13 طالبًا من المجموعة 1 إلى 2'});
@@ -109,7 +111,12 @@ async function home(){view='home';currentStage=null;page=0;setNav('home');const 
   $('#breadcrumb').textContent='المعهد / المراحل والطلبة';
   const historical=Boolean(currentSeasonId);
   setContent((historical?`<div class="empty" style="border-color:#e2b8b8;background:var(--danger-soft);color:var(--danger);text-align:right;padding:1rem 1.3rem;margin-bottom:1.2rem"><p style="margin:0">تعرض بيانات موسم سابق للاطلاع فقط؛ أزرار الإضافة والتعديل مخفية.</p></div>`:'')+
-    head('المراحل الدراسية','اختر المرحلة للاطلاع على طلبتها وموادها ومجموعاتها.',historical?'':button('إضافة مرحلة','new-stage','','primary'))+
+    head('المراحل الدراسية','كل ما تحتاجه لمتابعة طلبة المعهد، في مكان واحد.',historical?'':button('إضافة مرحلة','new-stage','','primary'))+
+    `<section class="overview-grid" aria-label="ملخص المراحل المعروضة">
+      <div class="overview-card overview-primary"><span class="overview-icon" aria-hidden="true"><svg><use href="#i-students"></use></svg></span><p>الطلبة في المراحل المعروضة</p><b class="overview-number">${stages.reduce((n,s)=>n+Number(s.student_count||0),0)}</b><small>متابعة الحضور والتقارير من ملف كل مرحلة</small></div>
+      <div class="overview-card overview-pink"><span class="overview-icon" aria-hidden="true"><svg><use href="#i-stages"></use></svg></span><p>المراحل المعروضة</p><b class="overview-number">${stages.length}</b><small>اختر المرحلة لعرض تفاصيلها وإدارتها</small></div>
+      <div class="overview-card overview-sage"><span class="overview-icon" aria-hidden="true"><svg><use href="#i-book"></use></svg></span><p>المواد الدراسية</p><b class="overview-number">${stages.reduce((n,s)=>n+Number(s.subject_count||0),0)}</b><small>الدروس والمباحثات والتقارير حسب المادة</small></div>
+    </section><div class="section-heading stage-list-heading"><h2>مراحل المعهد</h2><span class="subtle">اختر مرحلة للاطلاع على طلبتها</span></div>`+
     (stages.length?`<div class="cards">${stages.map(s=>`<div class="stage-card-shell ${s.registration_visible===false?'registration-hidden':''}"><button class="stage-card" data-action="stage" data-id="${s.id}"><div><h2>${esc(s.name)}</h2><small>${esc(s.season_name||'لا يوجد موسم نشط')}</small></div><div class="stats"><div><span class="metric">${s.student_count}</span><small>طالب</small></div><div><span class="metric">${s.subject_count}</span><small>مادة</small></div><div><span class="metric">${s.discussion_grouping===false?'—':s.group_count}</span><small>${s.discussion_grouping===false?'دون تقسيم':'مجموعة مباحثة'}</small></div></div><div class="card-footer"><span>${s.is_active?'مرحلة نشطة':'مرحلة مؤرشفة'}</span><span>${s.registration_visible===false?'🚫 محجوبة عن الطلبة الجدد':'👁️ ظاهرة للطلبة الجدد'}</span><span>عرض التفاصيل ←</span></div></button>${!historical&&s.is_active?button(s.registration_visible===false?'👁️ إظهار للطلبة الجدد':'🚫 حجب عن الطلبة الجدد','stage-registration-toggle',`data-id="${s.id}" data-name="${esc(s.name)}" data-visible="${s.registration_visible!==false}"`,s.registration_visible===false?'':'danger'):''}</div>`).join('')}</div>`:empty('لا توجد بيانات لهذا الموسم','اختر موسمًا آخر أو أضف المرحلة الأولى.')));
 }
 let attendanceStageId='',attendanceFilters={q:'',status:'all'};
@@ -131,7 +138,35 @@ async function attendanceContent(stageId){
     (data.subjects.length?table(['تسلسل','الاسم الرباعي للطالب',...data.subjects.map(sub=>sub.name),'إجمالي الحضور'],data.rows.map(st=>[esc(st.sequence),esc(st.full_name),...st.attendance.map(a=>`<bdi class="attendance-ratio" dir="ltr" title="حضر ${Number(a.attended)} من أصل ${Number(a.total)}">${Number(a.attended)} / ${Number(a.total)}</bdi>`),`<bdi dir="ltr">${st.attendance.reduce((n,a)=>n+Number(a.attended),0)} / ${st.attendance.reduce((n,a)=>n+Number(a.total),0)}</bdi>`])):empty('لا توجد مواد لهذه المرحلة'))+pager(data.total,data.size);
 }
 function participationForm(s){
-  return `<form id="participation-settings" class="detail-section"><h2>تنظيم المباحثات والتقارير</h2><p class="subtle">هذه الإعدادات تخص الموسم المعروض فقط. جميع مواد المرحلة تبقى في حضور الدروس.</p><label>تنظيم المباحثات<select name="grouped"><option value="true" ${s.discussion_grouping!==false?'selected':''}>تقسيم الطلبة إلى مجموعات مرقمة</option><option value="false" ${s.discussion_grouping===false?'selected':''}>المرحلة كاملة — دون تقسيم</option></select></label><fieldset><legend>المواد المشمولة بالمباحثات والتقارير</legend>${s.subjects.map(sub=>`<label class="study-choice">${esc(sub.name)}<select name="study-${sub.id}" data-study-id="${sub.id}"><option value="true" ${sub.participation_enabled!==false?'selected':''}>تشمل مباحثات وتقارير</option><option value="false" ${sub.participation_enabled===false?'selected':''}>بدون مباحثات وتقارير</option></select></label>`).join('')}</fieldset><p class="subtle">اختيار «بدون مباحثات وتقارير» يخفي المادة من قائمة المباحثات والتقارير ويوقف المشاركة الجديدة فيها، مع حفظ سجلاتها السابقة. عند اختيار المرحلة كاملة تُدمج المجموعات وينتقل أعضاؤها تلقائيًا، مع حفظ الحضور والتقارير السابقة. تتوقف مواعيد المادة ذات المجموعات المتعددة حتى تحدد موعدًا موحّدًا؛ رابطها الموحد يكون رابط أول مجموعة نشطة ويمكن تعديله.</p><button class="primary" type="submit">حفظ إعدادات الموسم</button></form>`;
+  return `<form id="participation-settings" class="detail-section settings-panel"><h2>تنظيم المباحثات والتقارير</h2>
+    <p class="subtle">إعدادات الموسم: ${esc(s.season_name)}. حضور الدروس يشمل جميع المواد.</p>
+    <p class="settings-status" id="participation-status" role="status">التنظيم المحفوظ: ${s.discussion_grouping!==false?'مجموعات مرقمة':'المرحلة كاملة'}. تغيير الخيارات لا يحفظها؛ راجع التغييرات ثم أكّد الحفظ.</p>
+    <label>تنظيم المباحثات<select name="grouped"><option value="true" ${s.discussion_grouping!==false?'selected':''}>تقسيم الطلبة إلى مجموعات مرقمة</option><option value="false" ${s.discussion_grouping===false?'selected':''}>المرحلة كاملة — دون تقسيم</option></select></label>
+    <fieldset><legend>المواد المشمولة بالمباحثات والتقارير</legend>${s.subjects.map(sub=>`<label class="study-choice">${esc(sub.name)}<select name="study-${sub.id}" data-study-id="${sub.id}"><option value="true" ${sub.participation_enabled!==false?'selected':''}>تشمل مباحثات وتقارير</option><option value="false" ${sub.participation_enabled===false?'selected':''}>بدون مباحثات وتقارير</option></select></label>`).join('')}</fieldset>
+    <button class="primary" type="submit">مراجعة التغييرات قبل الحفظ</button></form>`;
+}
+function participationChanges(form){
+  const s=currentStage,grouped=form.elements.grouped.value==='true';
+  const enabledSubjectIds=[...form.querySelectorAll('[data-study-id]')].filter(el=>el.value==='true').map(el=>Number(el.dataset.studyId));
+  const expectedSettings={grouped:s.discussion_grouping!==false,enabledSubjectIds:s.subjects.filter(sub=>sub.participation_enabled!==false).map(sub=>sub.id)};
+  const rows=[];
+  if(grouped!==expectedSettings.grouped)rows.push(['تنظيم المباحثات',expectedSettings.grouped?'مجموعات مرقمة':'المرحلة كاملة',grouped?'مجموعات مرقمة':'المرحلة كاملة']);
+  for(const sub of s.subjects){const enabled=enabledSubjectIds.includes(sub.id),before=sub.participation_enabled!==false;if(enabled!==before)rows.push([sub.name,before?'تشمل مباحثات وتقارير':'بدون مباحثات وتقارير',enabled?'تشمل مباحثات وتقارير':'بدون مباحثات وتقارير']);}
+  return {seasonId:s.stage_season_id,stageName:s.name,seasonName:s.season_name,grouped,enabledSubjectIds,expectedSettings,rows};
+}
+function reviewParticipation(form){
+  const draft=participationChanges(form);
+  if(!draft.rows.length){notify('لم تتغير الإعدادات المحفوظة.');return;}
+  participationDraft=draft;
+  const groupingChanged=draft.grouped!==draft.expectedSettings.grouped;
+  const impact=groupingChanged?(draft.grouped?
+    'لن يُعاد توزيع الطلبة إلى مجموعاتهم السابقة تلقائيًا. يُفعّل التقسيم على المجموعات الحالية، ويُرفض الحفظ إذا كانت السعات أو أرقام المجموعات غير متوافقة.':
+    'ستُدمج مجموعات كل مادة في مجموعة واحدة، وينتقل أعضاؤها إليها مع حفظ الحضور والتقارير السابقة. تتوقف مواعيد المواد ذات المجموعات المتعددة حتى تحدد لها موعدًا موحّدًا. يُستخدم رابط أول مجموعة نشطة.'):
+    'المادة المستبعدة تختفي من خيارات المباحثات والتقارير، وتبقى سجلاتها السابقة محفوظة.';
+  dialog('مراجعة إعدادات الموسم',`<p>${esc(draft.stageName)} · ${esc(draft.seasonName)}</p>${table(['الإعداد','المحفوظ حاليًا','بعد الحفظ'],draft.rows.map(row=>row.map(esc)))}
+    <div class="settings-impact"><h3>أثر التغيير</h3><p>${esc(impact)}</p><p>لا يُسمح بدمج المجموعات أو استبعاد مادة أثناء حضور مباحثة مفتوح.</p></div>
+    <form id="apply-participation-settings"><label class="acknowledgement"><input type="checkbox" name="acknowledged" required>راجعت التغييرات وأفهم أثرها على الطلبة والمواعيد.</label>
+    <div class="form-actions"><button class="primary" type="submit">تأكيد وحفظ التغييرات</button>${button('إلغاء دون حفظ','close-dialog')}</div></form>`);
 }
 async function openStage(id){view='stage';tab='students';page=0;sessionSubjectId='';sessionPage=0;filters={q:'',status:'active',groupId:'',mode:''};const n=++sequence;const s=await api('/stages/'+id+(currentSeasonId?'?seasonId='+currentSeasonId:''));if(n!==sequence)return;currentStage=s;await renderStage();}
 async function renderStage(){
@@ -145,7 +180,7 @@ async function renderStage(){
   }else if(tab==='attendance'){body=await attendanceContent(s.id);
   }else if(tab==='subjects'){
     body=(ro?'':`<div class="toolbar">${button('إضافة مادة','new-subject','','primary')}${s.stage_type!=='lessons_only'?(s.discussion_grouping!==false?button('إضافة مجموعة','new-group'):'')+button('إسناد أستاذ لمادة','new-assignment'):''}</div>`)+
-      (!ro&&s.stage_type!=='lessons_only'?participationForm(s):'')+s.subjects.map(sub=>`<section class="detail-section"><h2>${esc(sub.name)}</h2><p class="subtle">الأستاذ: ${esc(sub.teacher_name||'لم يُسنَد')} · الهاشتاغ: #${esc(sub.hashtag)}</p><p>${sub.participation_enabled===false?'غير مشمولة بالمباحثات والتقارير · سجلاتها السابقة محفوظة<br>':''}${modeTag('mubahatha')} ${sub.mubahatha_count} طالب · ${modeTag('report')} ${sub.report_count} طالب · ${modeTag(null)} ${sub.undecided_count} طالب</p>`+table([s.discussion_grouping===false?'مباحثة المادة':'المجموعة',s.discussion_grouping===false?'عدد الطلبة':'الأعضاء / المحجوز / السعة','رابط المجموعة','الحالة',...(ro?[]:['الإجراء'])],s.groups.filter(g=>g.subject_id===sub.id).map(g=>[esc(g.title),s.discussion_grouping===false?esc(g.member_count):`${esc(g.member_count)} / ${esc(g.reserved_count)} / ${esc(g.capacity)}`,g.invite_link&&/^https:\/\/t\.me\//.test(g.invite_link)?`<a href="${esc(g.invite_link)}" target="_blank" rel="noopener noreferrer">فتح المجموعة</a>`:'لم يُضف',g.is_active?'<span class="tag ok">نشطة</span>':'<span class="tag danger">معطّلة</span>',...(ro?[]:[button('تعديل','edit-group',`data-id="${g.id}"`)])]))+'</section>').join('');
+      (!ro&&s.stage_type!=='lessons_only'?participationForm(s):'')+s.subjects.map(sub=>`<section class="detail-section subject-panel"><div class="section-heading"><h2>${esc(sub.name)}</h2>${ro?'':button('تعديل اسم المادة','edit-subject',`data-id="${sub.id}"`)}</div><p class="subtle">الأستاذ: ${esc(sub.teacher_name||'لم يُسنَد')} · الهاشتاغ: #${esc(sub.hashtag)}</p><p>${sub.participation_enabled===false?'غير مشمولة بالمباحثات والتقارير · سجلاتها السابقة محفوظة<br>':''}${modeTag('mubahatha')} ${sub.mubahatha_count} طالب · ${modeTag('report')} ${sub.report_count} طالب · ${modeTag(null)} ${sub.undecided_count} طالب</p>`+table([s.discussion_grouping===false?'مباحثة المادة':'المجموعة',s.discussion_grouping===false?'عدد الطلبة':'الأعضاء / المحجوز / السعة','رابط المجموعة','الحالة',...(ro?[]:['الإجراء'])],s.groups.filter(g=>g.subject_id===sub.id).map(g=>[esc(g.title),s.discussion_grouping===false?esc(g.member_count):`${esc(g.member_count)} / ${esc(g.reserved_count)} / ${esc(g.capacity)}`,g.invite_link&&/^https:\/\/t\.me\//.test(g.invite_link)?`<a href="${esc(g.invite_link)}" target="_blank" rel="noopener noreferrer">فتح المجموعة</a>`:'لم يُضف',g.is_active?'<span class="tag ok">نشطة</span>':'<span class="tag danger">معطّلة</span>',...(ro?[]:[button('تعديل','edit-group',`data-id="${g.id}"`)])]))+'</section>').join('');
     if(!s.subjects.length)body+=empty('لا توجد مواد في المرحلة');
   }else if(tab==='leaves')body=await leavesContent(s.id,ro);
   else if(tab==='reports'){
@@ -743,6 +778,11 @@ document.addEventListener('click',async event=>{
       if(!await confirmAction('إلغاء إسناد هذه المادة عن الأستاذ؟'))return;busy=true;await api('/assignments/'+target.dataset.id+'/remove',{},'POST');
       if(currentTeacher){const subjects=await api('/teachers/'+currentTeacher.id+'/subjects');dialog('مواد '+currentTeacher.full_name,subjects.length?table(['المادة','المرحلة','الموسم','الطلبة النشطون','إلغاء الإسناد'],subjects.map(sj=>[esc(sj.subject_name),esc(sj.stage_name),esc(sj.season_name),esc(sj.student_count),button('إلغاء','unassign-teacher',`data-id="${sj.assignment_id}"`,'danger')])):empty('لا توجد مواد مسندة لهذا الأستاذ حاليًا'));}
       notify('أُلغي إسناد المادة.');
+    }else if(a==='edit-subject'){
+      const sub=currentStage?.subjects.find(x=>String(x.id)===target.dataset.id);if(!sub||currentStage.is_historical)return;
+      dialog('تعديل اسم المادة',`<p>يتحدث اسم المادة في الشاشات والتقارير لكل مواسمها. هاشتاغ النشر الحالي: <bdi>#${esc(sub.hashtag)}</bdi>.</p>
+        <form id="edit-subject" data-id="${sub.id}"><input type="hidden" name="expectedName" value="${esc(sub.name)}"><input type="hidden" name="stageSeasonId" value="${currentStage.stage_season_id}">
+        <label>اسم المادة<input name="name" value="${esc(sub.name)}" minlength="2" maxlength="100" required></label><div class="form-actions"><button class="primary" type="submit">حفظ اسم المادة</button>${button('إلغاء','close-dialog')}</div></form>`);
     }else if(a==='edit-group'){
       const g=currentStage?.groups.find(x=>String(x.id)===target.dataset.id);if(!g)return;
       dialog('تعديل '+g.title,`<p>${currentStage.discussion_grouping===false?`الأعضاء في هذه المادة: ${esc(g.member_count)}`:`الأعضاء في هذه المادة: ${esc(g.member_count)} · المقاعد المحجوزة لرقم المجموعة عبر المواد: ${esc(g.reserved_count)} من ${esc(g.capacity)}`}</p><form id="edit-group" data-id="${g.id}"><div class="form-grid"><label>السعة<input name="capacity" type="number" min="1" max="10000" value="${g.capacity}" required></label><label>رابط المجموعة<input name="inviteLink" type="url" value="${esc(g.invite_link||'')}" placeholder="https://t.me/..."></label></div><div class="form-actions"><button class="primary">حفظ</button>${button(g.is_active?'تعطيل المجموعة':'تفعيل المجموعة','toggle-group',`data-id="${g.id}" data-active="${!g.is_active}"`,g.is_active?'danger':'')}</div></form>`);
@@ -758,6 +798,11 @@ document.addEventListener('click',async event=>{
 });
 document.addEventListener('change',async event=>{
   if(confirmationPending)return;
+  if(event.target.closest('#participation-settings')){
+    const changes=participationChanges(event.target.closest('form'));
+    $('#participation-status').textContent=changes.rows.length?`لديك ${changes.rows.length} تغيير غير محفوظ. اضغط «مراجعة التغييرات قبل الحفظ» لعرض أثره.`:'لم تتغير الإعدادات المحفوظة.';
+    return;
+  }
   if(event.target.name==='studentId'&&event.target.closest('#one-time-cohort-move')){
     const count=document.querySelectorAll('#one-time-cohort-move input[name="studentId"]:checked').length;
     $('#one-time-move-count').textContent=`المحدد: ${count} من 13`;return;
@@ -838,7 +883,14 @@ document.addEventListener('submit',async event=>{
       }
     }
     else if(form.id==='attendance-filter'){attendanceFilters={q:body.q,status:body.status};page=0;await refresh();}
-    else if(form.id==='participation-settings'){if(body.grouped==='false'&&currentStage.discussion_grouping!==false&&!await confirmAction('تحويل مباحثات المرحلة إلى تنظيم موحّد؟ ينتقل أعضاء المجموعات تلقائيًا مع حفظ سجلاتهم. عند وجود مجموعات متعددة للمادة تتوقف مواعيدها لتحديد موعد موحد.'))return;const saved=await api('/stage-seasons/'+currentStage.stage_season_id+'/participation-settings',{grouped:body.grouped==='true',enabledSubjectIds:[...form.querySelectorAll('[data-study-id]')].filter(el=>el.value==='true').map(el=>Number(el.dataset.studyId))},'PATCH');await refresh();notify(saved.pausedSlots?'حُفظت الإعدادات ونُقل الطلبة. حُفظت المواعيد السابقة وتوقفت؛ حدّد موعدًا موحدًا لكل مادة مدمجة من جداول المباحثات.':'حُفظت إعدادات المباحثات والتقارير لهذا الموسم.');}
+    else if(form.id==='participation-settings')reviewParticipation(form);
+    else if(form.id==='apply-participation-settings'){
+      const draft=participationDraft;
+      if(!draft||!body.acknowledged)throw Error('راجع التغييرات وضع علامة التأكيد أولًا.');
+      if(!await confirmAction(`حفظ التغييرات المعروضة في موسم «${draft.seasonName}» للمرحلة «${draft.stageName}»؟`))return;
+      const saved=await api('/stage-seasons/'+draft.seasonId+'/participation-settings',{grouped:draft.grouped,enabledSubjectIds:draft.enabledSubjectIds,expectedSettings:draft.expectedSettings,confirmGroupingChange:true},'PATCH');
+      participationDraft=null;closeDetail();await refresh();notify(saved.pausedSlots?'حُفظت الإعدادات ونُقل الطلبة. توقفت المواعيد المتعددة؛ حدّد موعدًا موحدًا لكل مادة مدمجة من جداول المباحثات.':'حُفظت إعدادات المباحثات والتقارير لهذا الموسم.');
+    }
     else if(form.id==='search'){filters={...filters,...body};page=0;await renderStage();}
     else if(form.id==='leave-filter'){filters.leaveStatus=body.leaveStatus;page=0;await refresh();}
     else if(form.id==='report-filter'){filters.groupId=body.groupId;page=0;await renderStage();}
@@ -858,6 +910,7 @@ document.addEventListener('submit',async event=>{
     else if(form.id==='postpone-exam'){if(!await confirmAction('تغيير موعد الامتحان؟'))return;await api('/exams/'+currentExam.id+'/postpone',body,'POST');await showExam(currentExam.id);notify('حُفظ الموعد.');}
     else if(form.id==='cancel-exam'){if(!await confirmAction('إلغاء الامتحان وإشعار الطلبة؟ لا يمكن إلغاء امتحان بدأه طالب.'))return;const result=await api('/exams/'+currentExam.id+'/cancel',body,'POST');await showExam(currentExam.id);notify(`أُلغي الامتحان وحُفظ إشعار ${result.recipientCount} طالبًا للإرسال.`);}
     else if(form.id==='grade-report'){await api('/reports/'+form.dataset.id+'/score',body,'POST');closeDetail();await refresh();notify('حُفظ تقييم التقرير.');}
+    else if(form.id==='edit-subject'){await api('/subjects/'+form.dataset.id,body,'PATCH');closeDetail();await refresh();notify('حُفظ اسم المادة.');}
     else if(form.id==='edit-teacher'){await api('/teachers/'+form.dataset.id,body,'PATCH');closeDetail();await loadTeachers();notify('حُفظ اسم الأستاذ.');}
     else if(form.id==='edit-group'){await api('/groups/'+form.dataset.id,{capacity:body.capacity,inviteLink:body.inviteLink||null},'PATCH');closeDetail();await refresh();notify('حُفظت بيانات المجموعة.');}
     else if(form.id.startsWith('create-')){
@@ -872,8 +925,8 @@ document.addEventListener('submit',async event=>{
   const tg=window.Telegram?.WebApp;
   tg?.ready();tg?.expand();
   try{tg?.disableVerticalSwipes?.();}catch{}
-  try{tg?.setHeaderColor?.('#101b2b');}catch{}
-  try{tg?.setBackgroundColor?.('#f4f6f9');}catch{}
+  try{tg?.setHeaderColor?.('#244643');}catch{}
+  try{tg?.setBackgroundColor?.('#faf7f2');}catch{}
   try{tg?.requestFullscreen?.();}catch{}
   if(!tg?.initData){setContent(empty('افتح اللوحة من البوت','سجّل دخولك إلى تليجرام، ثم اضغط «لوحة الإدارة» في حساب الأدمن. فتح الرابط وحده لا يمنح صلاحية الاطلاع على بيانات الطلبة.'));return;}
   try{
