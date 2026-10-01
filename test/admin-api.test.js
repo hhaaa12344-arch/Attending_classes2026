@@ -85,10 +85,50 @@ test('admin HTTP: attendance endpoint and season participation configuration req
   assert.equal((await request('/lesson-attendance?stageId=bad')).status,400);
   const route='/stage-seasons/'+ss+'/participation-settings';
   assert.equal((await request(route,{grouped:true,enabledSubjectIds:[subject.id]},'PATCH',null)).status,401);
-  assert.equal((await request(route,{grouped:'false',enabledSubjectIds:[subject.id]},'PATCH')).status,400);
-  assert.equal((await request(route,{grouped:true,enabledSubjectIds:[]},'PATCH')).status,200);
+  const expectedSettings={grouped:true,enabledSubjectIds:[subject.id]};
+  assert.equal((await request(route,{grouped:'false',enabledSubjectIds:[subject.id],expectedSettings},'PATCH')).status,400);
+  assert.equal((await request(route,{grouped:true,enabledSubjectIds:[],expectedSettings},'PATCH')).status,200);
   assert.equal((await (await request('/stages/'+stage.id)).json()).subjects[0].participation_enabled,false);
-  assert.equal((await request(route,{grouped:true,enabledSubjectIds:[subject.id]},'PATCH')).status,200);
+  assert.equal((await request(route,{grouped:true,enabledSubjectIds:[subject.id],expectedSettings:{grouped:true,enabledSubjectIds:[]}},'PATCH')).status,200);
+});
+test('admin HTTP: renaming a subject preserves identifiers, attendance, groups, schedule and exams; stale and foreign edits fail',async()=>{
+  const sg=await db.addStage('مرحلة تعديل اسم المادة'),seasonId=(await db.listStageSeasons(sg.id))[0].id;
+  const sub=await db.addSubject(sg.id,'اسم المادة القديم','هاشتاغ_ثابت'),other=await db.addSubject(sg.id,'مادة أخرى','مادة_أخرى');
+  const st=await db.createStudent(99331,'طالب تعديل اسم المادة',sg.id);
+  const g=await studies.createMubahathaGroup(sub.id,seasonId,{title:'الأولى'});
+  await studies.setParticipationMode(st.id,sub.id,seasonId,'report');await studies.assignStudentToGroup(st.id,sub.id,seasonId);
+  const report=await studies.submitReport(st.id,sub.id,seasonId,{kind:'text',note:'التقرير المحفوظ'});
+  const l=await db.activateLesson(sub.id);await db.markAllPresentForLesson(l.id);
+  const ex=await studies.createExam(sub.id,seasonId,null,{examNumber:1,dateIso:'2030-01-01',hours:2});
+  await db.pool.query('INSERT INTO schedule_slots(group_id,subject_id,stage_season_id,day_of_week,hour) VALUES($1,$2,$3,0,19)',[g.id,sub.id,seasonId]);
+  const snapshot=async()=>{
+    const values={};for(const [table,field,value] of [['attendance','lesson_id',l.id],['group_memberships','subject_id',sub.id],['student_reports','id',report.id],['schedule_slots','subject_id',sub.id],['exams','id',ex.id]])values[table]=(await db.pool.query(`SELECT * FROM ${table} WHERE ${field}=$1 ORDER BY id`,[value])).rows;
+    return values;
+  };
+  const before=await snapshot(),route='/subjects/'+sub.id,body={name:'اسم المادة الجديد',expectedName:sub.name,stageSeasonId:seasonId};
+  assert.equal((await request(route,body,'PATCH',null)).status,401);
+  assert.equal((await request(route,{...body,stageSeasonId:ss},'PATCH')).status,404);
+  assert.equal((await request(route,{...body,name:' '},'PATCH')).status,400);
+  assert.equal((await request(route,{...body,name:other.name},'PATCH')).status,409);
+  const saved=await request(route,body,'PATCH');assert.equal(saved.status,200);const result=await saved.json();
+  assert.equal(result.id,sub.id);assert.equal(result.name,body.name);assert.equal(result.hashtag,sub.hashtag);
+  assert.deepEqual(await snapshot(),before);
+  assert.equal((await request(route,{...body,name:'اسم قديم من شاشة ثانية'},'PATCH')).status,409);
+  const entry=(await db.pool.query("SELECT * FROM admin_audit_log WHERE action='update_subject' AND entity_id=$1",[sub.id])).rows[0];
+  assert.equal(entry.before_data.name,sub.name);assert.equal(entry.after_data.name,body.name);
+  await db.pool.query('UPDATE stage_seasons SET is_active=false WHERE id=$1',[seasonId]);
+  assert.equal((await request(route,{...body,expectedName:body.name},'PATCH')).status,409);
+});
+test('admin HTTP: participation changes require a reviewed snapshot and reject stale settings atomically',async()=>{
+  const sg=await db.addStage('مرحلة حماية التقسيم'),seasonId=(await db.listStageSeasons(sg.id))[0].id;
+  const sub=await db.addSubject(sg.id,'مادة حماية التقسيم','حماية_التقسيم');
+  const route='/stage-seasons/'+seasonId+'/participation-settings',expectedSettings={grouped:true,enabledSubjectIds:[sub.id]};
+  assert.equal((await request(route,{grouped:false,enabledSubjectIds:[sub.id]},'PATCH')).status,409);
+  assert.equal((await request(route,{grouped:false,enabledSubjectIds:[sub.id],expectedSettings},'PATCH')).status,400);
+  assert.equal((await request(route,{grouped:true,enabledSubjectIds:[],expectedSettings},'PATCH')).status,200);
+  assert.equal((await request(route,{grouped:false,enabledSubjectIds:[sub.id],expectedSettings,confirmGroupingChange:true},'PATCH')).status,409);
+  const current=await (await request('/stages/'+sg.id)).json();assert.equal(current.discussion_grouping,true);assert.equal(current.subjects[0].participation_enabled,false);assert.equal(current.groups.length,0);
+  assert.equal((await request(route,{grouped:false,enabledSubjectIds:[sub.id],expectedSettings:{grouped:true,enabledSubjectIds:[]},confirmGroupingChange:true},'PATCH')).status,200);
 });
 test('admin HTTP: exam editor, edits before attempts, postponement and logout',async()=>{
   const dateIso=new Date(Date.now()+86400000).toISOString().slice(0,10);

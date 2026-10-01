@@ -2,7 +2,8 @@
 const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const {JSDOM}=require('jsdom');
 const stage={id:1,name:'المرحلة التمهيدية',is_active:true,stage_type:'full',stage_season_id:1,season_name:'الموسم الأول',student_count:35,subject_count:1,group_count:1,
   subjects:[{id:1,name:'الفقه',hashtag:'فقه',teacher_name:'الأستاذ الأول',teachers:[{id:1,name:'الأستاذ الأول'}]}],groups:[{id:1,title:'الأولى',subject_id:1,subject_name:'الفقه',member_count:35,reserved_count:38,capacity:40}],seasons:[{id:1,name:'الأول',is_active:true}]};
-async function setup({authorized=true,noticeState=null}={}){
+async function setup({authorized=true,noticeState=null,grouped=true}={}){
+  const fixture=JSON.parse(JSON.stringify(stage));fixture.discussion_grouping=grouped;
   const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../admin/index.html'),'utf8'),{url:'https://institute.example/admin/',runScripts:'outside-only'});
   const w=dom.window;w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};w.confirm=()=>true;
   w.Telegram={WebApp:{showConfirm(message,done){done(w.confirm(message));},ready(){},expand(){},initData:authorized?'signed-test-data':''}};
@@ -27,7 +28,8 @@ async function setup({authorized=true,noticeState=null}={}){
     else if(u.pathname.endsWith('/lessons/71/attendance'))data={lesson:{id:71,subject_name:'الفقه',activated_at:'2026-09-22T12:00:00Z'},rows:[{student_id:1,full_name:'طالب اختبار اسم رباعي',listened_at:'2026-09-22T13:00:00Z',marking_kind:'student'}],total:1,page:0,size:25};
     else if(u.pathname.endsWith('/lessons/71/attendance/1/remove'))data={removed:true};
     else if(u.pathname.endsWith('/participation-settings'))data={grouped:false,pausedSlots:0};
-    else if(u.pathname.endsWith('/stages'))data=[stage];else if(u.pathname.endsWith('/stages/1'))data=stage;
+    else if(u.pathname.endsWith('/subjects/1')&&options.method==='PATCH'){const body=JSON.parse(options.body);fixture.subjects[0].name=body.name;data=fixture.subjects[0];}
+    else if(u.pathname.endsWith('/stages'))data=[fixture];else if(u.pathname.endsWith('/stages/1'))data=fixture;
     else if(u.pathname.endsWith('/students/1/subjects/1/participation')){subjects[0].mode=JSON.parse(options.body).mode;data=subjects[0];}
     else if(u.pathname.endsWith('/students/1')){
       if(options.method==='PATCH'){data={error:'أدخل اسمًا رباعيًا'};status=400;}
@@ -273,10 +275,33 @@ test('admin participation settings: explicit subject exclusion and whole-stage o
   assert.match(w.document.querySelector('#content').textContent,/35 \/ 38 \/ 40/);
   const form=w.document.querySelector('#participation-settings');
   form.querySelector('[name="grouped"]').value='false';form.querySelector('[data-study-id="1"]').value='false';
+  form.querySelector('[name="grouped"]').dispatchEvent(new w.Event('change',{bubbles:true}));
+  assert.match(w.document.querySelector('#participation-status').textContent,/غير محفوظ/);assert.ok(!requests.some(r=>r.url.includes('/participation-settings')));
   form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+  await until(()=>w.document.querySelector('#apply-participation-settings'));assert.ok(!requests.some(r=>r.url.includes('/participation-settings')));
+  const review=w.document.querySelector('#apply-participation-settings');review.elements.acknowledged.checked=true;review.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
   await until(()=>requests.some(r=>r.url.includes('/participation-settings')));
-  const req=requests.find(r=>r.url.includes('/participation-settings'));assert.equal(req.options.method,'PATCH');assert.deepEqual(JSON.parse(req.options.body),{grouped:false,enabledSubjectIds:[]});
+  const req=requests.find(r=>r.url.includes('/participation-settings'));assert.equal(req.options.method,'PATCH');assert.deepEqual(JSON.parse(req.options.body),{grouped:false,enabledSubjectIds:[],expectedSettings:{grouped:true,enabledSubjectIds:[1]},confirmGroupingChange:true});
   await until(()=>w.document.querySelector('#notice').textContent.includes('حُفظت إعدادات')); 
+ }finally{dom.window.close();}
+});
+test('admin settings: review cancellation and a declined confirmation never save; numbered mode also requires review',async()=>{
+ const {dom,w,requests,until,click}=await setup({grouped:false});try{
+  await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));click('[data-tab="subjects"]');await until(()=>w.document.querySelector('#participation-settings'));
+  const form=w.document.querySelector('#participation-settings');form.elements.grouped.value='true';form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+  await until(()=>w.document.querySelector('#apply-participation-settings'));assert.match(w.document.querySelector('#dialog-body').textContent,/لن يُعاد توزيع/);click('[data-action="close-dialog"]');assert.ok(!requests.some(r=>r.url.includes('/participation-settings')));
+  form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await until(()=>w.document.querySelector('#detail').open);
+  let review=w.document.querySelector('#apply-participation-settings');review.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await until(()=>w.document.querySelector('#dialog-notice').textContent.includes('علامة التأكيد'));
+  w.confirm=()=>false;review.elements.acknowledged.checked=true;review.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await new Promise(r=>setTimeout(r,10));assert.ok(!requests.some(r=>r.url.includes('/participation-settings')));
+  w.confirm=()=>true;review.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await until(()=>requests.some(r=>r.url.includes('/participation-settings')));assert.equal(JSON.parse(requests.find(r=>r.url.includes('/participation-settings')).options.body).grouped,true);
+ }finally{dom.window.close();}
+});
+test('admin subject: the name can be edited explicitly and the refreshed screen uses the saved name',async()=>{
+ const {dom,w,requests,until,click}=await setup();try{
+  await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));click('[data-tab="subjects"]');await until(()=>w.document.querySelector('[data-action="edit-subject"]'));
+  click('[data-action="edit-subject"]');const form=w.document.querySelector('#edit-subject');assert.match(w.document.querySelector('#dialog-body').textContent,/#فقه/);form.elements.name.value='الفقه الميسر';form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+  await until(()=>requests.some(r=>r.url.endsWith('/subjects/1')));const saved=requests.find(r=>r.url.endsWith('/subjects/1'));assert.equal(saved.options.method,'PATCH');assert.deepEqual(JSON.parse(saved.options.body),{name:'الفقه الميسر',expectedName:'الفقه',stageSeasonId:'1'});
+  await until(()=>w.document.querySelector('#content').textContent.includes('الفقه الميسر'));assert.equal(w.document.querySelector('#detail').open,false);
  }finally{dom.window.close();}
 });
 
