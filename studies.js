@@ -1865,6 +1865,7 @@ const getSlotDecision = (slotId, scheduledDate) =>
     .then((r) => r.rows[0]);
 
 // عند تعطيل اشتراط التأكيد يبدأ الموعد الصامت أيضًا؛ التأجيل الصريح يمنعه دائمًا.
+// ولا يبدأ بأثر رجعي موعد أُنشئ بعد وقت بدايته (إضافة موعد أو تعديله أثناء الحصة لا يُرسل إشعارات مفاجئة).
 const getSlotsReadyToStart = () =>
   pool
     .query(
@@ -1882,7 +1883,8 @@ const getSlotsReadyToStart = () =>
        CROSS JOIN dates
        LEFT JOIN slot_decisions d ON d.slot_id=s.id AND d.scheduled_date=dates.day
        WHERE s.is_active=true AND participation_enabled(s.subject_id,s.stage_season_id) AND d.session_id IS NULL
-         AND (d.decision='confirmed' OR ($2::boolean=false AND d.decision IS NULL))
+         AND (d.decision='confirmed' OR ($2::boolean=false AND d.decision IS NULL
+              AND s.created_at <= (((dates.day+make_time(s.hour,s.minute,0)) AT TIME ZONE $1) AT TIME ZONE 'UTC')))
          AND EXTRACT(DOW FROM dates.day)::int=s.day_of_week
          AND loc.ln >= (dates.day + make_time(s.hour, s.minute, 0))
          AND loc.ln < (dates.day + make_time(s.hour, s.minute, 0)+make_interval(hours=>s.duration_hours))`,
@@ -1902,7 +1904,7 @@ async function startSessionFromSlot(slot) {
       `SELECT d.id FROM slot_decisions d JOIN schedule_slots sl ON sl.id=d.slot_id
        JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
        WHERE participation_enabled(sl.subject_id,sl.stage_season_id) AND d.slot_id=$1 AND d.scheduled_date=$2 AND d.session_id IS NULL AND sl.is_active=true
-         AND (d.decision='confirmed' OR ($4::boolean=false AND d.decision IS NULL))
+         AND (d.decision='confirmed' OR ($4::boolean=false AND d.decision IS NULL AND sl.created_at <= $5::timestamp))
          AND $3::timestamp > now() AND $5::timestamp <= now() FOR UPDATE OF d`,
       [slot.id, slot.scheduled_date, slot.scheduled_end, SCHEDULE_REQUIRE_CONFIRMATION, slot.scheduled_start]
     );

@@ -106,6 +106,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           const [sessions,reportStats,examStats]=await Promise.all([db.getTeacherSessionLog(id),db.getTeacherReportStats(id),db.getTeacherExamStats(id)]);
           result={sessions,reportStats,examStats};
         }
+        else if((m=/^\/stage-seasons\/(\d+)\/grouping-impact$/.exec(route)))result=await adminData.groupingImpact(positiveInt(m[1]),q.grouped==='true'?true:q.grouped==='false'?false:undefined);
         else if(route==='/seasons')result=await db.listSeasons();
         else if(route==='/stats/stage-breakdown')result=await db.getStageStudentBreakdown();
         else if(route==='/stats/watchlist'){

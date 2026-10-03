@@ -116,6 +116,45 @@ function createParticipationSettings(pool){
       await c.query('COMMIT');return {grouped,enabledSubjectIds:ids,mergedGroups,movedMemberships,pausedSlots};
     }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
   }
-  return {save};
+  // معاينة أثر تغيير التنظيم دون تنفيذ أي شيء؛ تعرض الأرقام نفسها التي سيعيدها save().
+  async function impact(seasonId, grouped) {
+    positiveInt(seasonId);
+    if (typeof grouped !== 'boolean') throw appError('حدد التنظيم المطلوب.');
+    const season = (await pool.query('SELECT id,is_active,discussion_grouping FROM stage_seasons WHERE id=$1', [seasonId])).rows[0];
+    if (!season) throw appError('الموسم غير موجود.', 'NOT_FOUND', 404);
+    const result = { current: season.discussion_grouping, target: grouped, changing: season.discussion_grouping !== grouped,
+      blocked: null, subjectsAffected: 0, groupsToMerge: 0, membershipsToMove: 0, slotsToPause: 0, studentsWithNumbers: 0 };
+    if (!result.changing) return result;
+    if (!season.is_active) { result.blocked = 'إعدادات الموسم المؤرشف متاحة للاطلاع فقط.'; return result; }
+    if (!grouped) {
+      const running = (await pool.query(`SELECT 1 FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id
+        WHERE g.stage_season_id=$1 AND ((s.is_closed=false AND s.closes_at>now()) OR s.end_closes_at>now()) LIMIT 1`, [seasonId])).rows[0];
+      if (running) result.blocked = 'انتظر انتهاء المباحثة الجارية ومهلة حضور النهاية قبل دمج المجموعات.';
+      const row = (await pool.query(`WITH g AS (
+          SELECT g.id,g.subject_id,
+            row_number() OVER (PARTITION BY g.subject_id ORDER BY (NOT g.is_active), g.id) AS rn,
+            count(*) OVER (PARTITION BY g.subject_id) AS n
+          FROM mubahatha_groups g WHERE g.stage_season_id=$1 AND g.merged_into_id IS NULL)
+        SELECT COUNT(*) FILTER (WHERE rn>1)::int AS groups_to_merge,
+          COUNT(DISTINCT subject_id) FILTER (WHERE n>1)::int AS subjects,
+          (SELECT COUNT(*) FROM group_memberships m WHERE m.group_id IN (SELECT id FROM g WHERE n>1 AND rn>1))::int AS memberships,
+          (SELECT COUNT(*) FROM schedule_slots sl WHERE sl.stage_season_id=$1 AND sl.is_active=true
+             AND sl.subject_id IN (SELECT subject_id FROM g WHERE n>1))::int AS slots
+        FROM g`, [seasonId])).rows[0];
+      Object.assign(result, { groupsToMerge: row.groups_to_merge, subjectsAffected: row.subjects, membershipsToMove: row.memberships, slotsToPause: row.slots });
+    } else {
+      const mixed = (await pool.query(`SELECT 1 FROM group_memberships m JOIN mubahatha_groups g ON g.id=m.group_id
+        WHERE m.stage_season_id=$1 GROUP BY m.student_id HAVING COUNT(DISTINCT g.group_number)>1 LIMIT 1`, [seasonId])).rows[0];
+      if (mixed) result.blocked = 'المواد الحالية تحمل أرقام مجموعات مختلفة لبعض الطلبة؛ لا يمكن إعادة التقسيم الآن.';
+      else {
+        const full = (await pool.query(`SELECT 1 FROM mubahatha_groups g WHERE g.stage_season_id=$1
+          AND g.capacity<(SELECT COUNT(*) FROM group_memberships m WHERE m.group_id=g.id) LIMIT 1`, [seasonId])).rows[0];
+        if (full) result.blocked = 'ارفع سعة المجموعات لتناسب أعداد الطلبة قبل تفعيل التقسيم.';
+      }
+      result.studentsWithNumbers = (await pool.query('SELECT COUNT(*)::int AS n FROM student_group_numbers WHERE stage_season_id=$1', [seasonId])).rows[0].n;
+    }
+    return result;
+  }
+  return {save, impact};
 }
 module.exports={initParticipationSettings,createParticipationSettings,ensureWholeStageGroup};

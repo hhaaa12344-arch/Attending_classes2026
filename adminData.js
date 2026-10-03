@@ -1,5 +1,6 @@
 'use strict';
 const { pageOptions, positiveInt, appError } = require('./integrity');
+const { normalizeHashtag } = require('./utils');
 
 function createAdminData(db, studies) {
   const pool = db.pool;
@@ -145,7 +146,9 @@ function createAdminData(db, studies) {
     id=positiveInt(id);stageSeasonId=positiveInt(stageSeasonId);actor=positiveInt(actor);
     if(typeof name!=='string'||name.trim().length<2||name.length>100)throw appError('أدخل اسم مادة من حرفين إلى 100 حرف.');
     if(typeof expectedName!=='string'||expectedName.length>100)throw appError('أعد فتح المادة لتحميل اسمها الحالي.','CONFLICT',409);
-    name=name.trim();
+    name=name.trim().replace(/\s+/g,' ');
+    const nameKey=normalizeHashtag(name);
+    if(!nameKey)throw appError('يجب أن يحتوي اسم المادة على حروف أو أرقام.');
     const c=await pool.connect();
     try {
       await c.query('BEGIN');
@@ -160,6 +163,10 @@ function createAdminData(db, studies) {
       if(!before)throw appError('المادة غير موجودة في هذه المرحلة.','NOT_FOUND',404);
       if(before.name!==expectedName)throw appError('تغيّر اسم المادة من مسؤول آخر. أعد تحميلها.','CONFLICT',409);
       if((await c.query('SELECT 1 FROM subjects WHERE stage_id=$1 AND id<>$2 AND lower(btrim(name))=lower($3)',[stage.id,id,name])).rows.length)throw appError('توجد مادة بهذا الاسم في المرحلة نفسها.','DUPLICATE',409);
+      // البوت يطابق منشورات القناة بالاسم والهاشتاغ معًا: يُرفض اسم يتطابق (بعد التطبيع) مع اسم أو هاشتاغ مادة أخرى.
+      const others=(await c.query('SELECT id,name,hashtag FROM subjects WHERE stage_id=$1 AND id<>$2',[stage.id,id])).rows;
+      const clash=others.find(o=>normalizeHashtag(o.name)===nameKey||normalizeHashtag(o.hashtag||'')===nameKey);
+      if(clash)throw appError(`الاسم يتطابق مع مادة أخرى في المرحلة («${clash.name}») من حيث الاسم أو الهاشتاغ. اختر اسمًا مختلفًا.`,'DUPLICATE',409);
       if(before.name===name){await c.query('COMMIT');return before;}
       const after=(await c.query('UPDATE subjects SET name=$2 WHERE id=$1 RETURNING *',[id,name])).rows[0];
       await c.query(`INSERT INTO admin_audit_log(actor_id,action,entity_type,entity_id,before_data,after_data)
@@ -366,9 +373,10 @@ function createAdminData(db, studies) {
     }
     yield count?`\n**عدد تسجيلات الحضور:** ${count}\n`:'\nلا توجد تسجيلات حضور لهذا الموسم.\n';
   }
+  const participation=require('./participationSettings').createParticipationSettings(pool);
   return {stages,stage,students,student,updateStudent,updateSubject,leaves,reports,sessions,attendanceCsv,attendanceMarkdown,managedItems,manageSession,sessionNotifications,
     lessonAttendanceMarkdown:require('./lessonAttendance').createLessonAttendance(pool).markdown,
     lessonAttendance:require('./lessonAttendance').createLessonAttendance(pool).matrix,
-    saveParticipationSettings:require('./participationSettings').createParticipationSettings(pool).save};
+    saveParticipationSettings:participation.save,groupingImpact:participation.impact};
 }
 module.exports={createAdminData};
