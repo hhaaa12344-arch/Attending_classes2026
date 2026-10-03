@@ -296,3 +296,17 @@ test('admin HTTP: historical publication repair is private and refuses an unrela
  assert.equal((await request('/lesson-publication-repair',{stageId:stage.id,token:'x'},'POST',null)).status,401);
  assert.equal((await request('/lesson-publication-repair?stageId='+stage.id)).status,404);
 });
+test('admin HTTP: grouping impact preview is admin-only, validates its input and changes nothing',async()=>{
+  const sg=await db.addStage('مرحلة معاينة الأثر'),seasonId=(await db.listStageSeasons(sg.id))[0].id;
+  await db.addSubject(sg.id,'مادة المعاينة','معاينة_م');
+  const route='/stage-seasons/'+seasonId+'/grouping-impact';
+  assert.equal((await request(route+'?grouped=false',null,'GET',null)).status,401);
+  assert.equal((await request(route)).status,400);
+  assert.equal((await request(route+'?grouped=maybe')).status,400);
+  assert.equal((await request('/stage-seasons/99999999/grouping-impact?grouped=false')).status,404);
+  const same=await (await request(route+'?grouped=true')).json();assert.equal(same.changing,false);
+  const preview=await request(route+'?grouped=false');assert.equal(preview.status,200);
+  const body=await preview.json();
+  assert.deepEqual([body.changing,body.blocked,body.groupsToMerge,body.membershipsToMove,body.slotsToPause],[true,null,0,0,0]);
+  assert.equal((await (await request('/stages/'+sg.id)).json()).discussion_grouping,true,'previewing never changes the stage');
+});
