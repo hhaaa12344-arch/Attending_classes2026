@@ -274,3 +274,5 @@ dialog>header h2{margin:0;font-size:1.05rem}
 .lesson-schedule .month-toggle{position:sticky;right:0;display:inline-flex;align-items:center;gap:.4rem;border:0;background:transparent;font-weight:800;color:var(--ink);padding:.6rem .9rem;min-height:44px}
 .schedule-check{width:46px;height:46px;border:1px solid var(--line-strong,#c9d2de);border-radius:8px;background:transparent;cursor:pointer;font-size:22px;line-height:1;padding:0;display:inline-grid;place-items:center;font-weight:700;touch-action:manipulation}
 .schedule-check.checked{background:var(--success-soft,#e8f5e9);border-color:var(--success,#2e7d32);color:var(--success,#2e7d32);font-weight:800}
+.settings-impact ul{margin:.3rem 0 .6rem;padding-inline-start:1.2rem}
+.blocked-note{margin:1rem 0;padding:.85rem 1.1rem;border:1px solid #e1b9b9;border-radius:var(--radius);background:#fbe9e9;color:var(--danger);font-weight:700}

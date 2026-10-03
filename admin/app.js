@@ -154,19 +154,31 @@ function participationChanges(form){
   for(const sub of s.subjects){const enabled=enabledSubjectIds.includes(sub.id),before=sub.participation_enabled!==false;if(enabled!==before)rows.push([sub.name,before?'تشمل مباحثات وتقارير':'بدون مباحثات وتقارير',enabled?'تشمل مباحثات وتقارير':'بدون مباحثات وتقارير']);}
   return {seasonId:s.stage_season_id,stageName:s.name,seasonName:s.season_name,grouped,enabledSubjectIds,expectedSettings,rows};
 }
-function reviewParticipation(form){
+async function reviewParticipation(form){
   const draft=participationChanges(form);
   if(!draft.rows.length){notify('لم تتغير الإعدادات المحفوظة.');return;}
   participationDraft=draft;
   const groupingChanged=draft.grouped!==draft.expectedSettings.grouped;
-  const impact=groupingChanged?(draft.grouped?
-    'لن يُعاد توزيع الطلبة إلى مجموعاتهم السابقة تلقائيًا. يُفعّل التقسيم على المجموعات الحالية، ويُرفض الحفظ إذا كانت السعات أو أرقام المجموعات غير متوافقة.':
-    'ستُدمج مجموعات كل مادة في مجموعة واحدة، وينتقل أعضاؤها إليها مع حفظ الحضور والتقارير السابقة. تتوقف مواعيد المواد ذات المجموعات المتعددة حتى تحدد لها موعدًا موحّدًا. يُستخدم رابط أول مجموعة نشطة.'):
-    'المادة المستبعدة تختفي من خيارات المباحثات والتقارير، وتبقى سجلاتها السابقة محفوظة.';
+  const subjectChanged=draft.rows.length>(groupingChanged?1:0);
+  const effects=[];let blocked=null;
+  if(groupingChanged){
+    // أرقام الأثر الفعلية من الخادم (قراءة فقط؛ لا يتغير شيء قبل التأكيد).
+    const impact=await api('/stage-seasons/'+draft.seasonId+'/grouping-impact?grouped='+draft.grouped);
+    const num=n=>String(Number(n)||0);
+    blocked=impact.blocked||null;
+    if(draft.grouped){
+      effects.push(`تُحذف أرقام المجموعات المحفوظة للطلبة في هذا الموسم (${num(impact.studentsWithNumbers)} سجلًا) ويُفعّل التقسيم على المجموعات الحالية.`,'لن يُعاد توزيع الطلبة إلى مجموعاتهم السابقة تلقائيًا، ويُرفض الحفظ إذا كانت السعات أو أرقام المجموعات غير متوافقة.');
+    }else{
+      effects.push(`تُدمج مجموعات كل مادة في مجموعة واحدة: ${num(impact.groupsToMerge)} مجموعة في ${num(impact.subjectsAffected)} مادة، وينتقل ${num(impact.membershipsToMove)} طالبًا إلى المجموعة المتبقية.`,`يتوقف ${num(impact.slotsToPause)} موعد مباحثة حتى تحدد موعدًا موحدًا لكل مادة مدمجة. يُستخدم رابط أول مجموعة نشطة.`,'تبقى سجلات الحضور والتقارير السابقة محفوظة، لكن لا يمكن استرجاع توزيع المجموعات القديم تلقائيًا.');
+    }
+  }
+  if(subjectChanged)effects.push('المادة المستبعدة تختفي من خيارات المباحثات والتقارير، وتبقى سجلاتها السابقة محفوظة.');
+  const apply=blocked
+    ?`<p class="blocked-note" role="alert">لا يمكن الحفظ الآن: ${esc(blocked)}</p><div class="form-actions">${button('إغلاق','close-dialog')}</div>`
+    :`<form id="apply-participation-settings"><label class="acknowledgement"><input type="checkbox" name="acknowledged" required>راجعت التغييرات وأفهم أثرها على الطلبة والمواعيد.</label>
+    <div class="form-actions"><button class="primary" type="submit">تأكيد وحفظ التغييرات</button>${button('إلغاء دون حفظ','close-dialog')}</div></form>`;
   dialog('مراجعة إعدادات الموسم',`<p>${esc(draft.stageName)} · ${esc(draft.seasonName)}</p>${table(['الإعداد','المحفوظ حاليًا','بعد الحفظ'],draft.rows.map(row=>row.map(esc)))}
-    <div class="settings-impact"><h3>أثر التغيير</h3><p>${esc(impact)}</p><p>لا يُسمح بدمج المجموعات أو استبعاد مادة أثناء حضور مباحثة مفتوح.</p></div>
-    <form id="apply-participation-settings"><label class="acknowledgement"><input type="checkbox" name="acknowledged" required>راجعت التغييرات وأفهم أثرها على الطلبة والمواعيد.</label>
-    <div class="form-actions"><button class="primary" type="submit">تأكيد وحفظ التغييرات</button>${button('إلغاء دون حفظ','close-dialog')}</div></form>`);
+    <div class="settings-impact"><h3>أثر التغيير</h3><ul>${effects.map(t=>`<li>${esc(t)}</li>`).join('')}</ul><p>لا يُسمح بدمج المجموعات أو استبعاد مادة أثناء حضور مباحثة مفتوح.</p></div>${apply}`);
 }
 async function openStage(id){view='stage';tab='students';page=0;sessionSubjectId='';sessionPage=0;filters={q:'',status:'active',groupId:'',mode:''};const n=++sequence;const s=await api('/stages/'+id+(currentSeasonId?'?seasonId='+currentSeasonId:''));if(n!==sequence)return;currentStage=s;await renderStage();}
 async function renderStage(){
@@ -883,7 +895,7 @@ document.addEventListener('submit',async event=>{
       }
     }
     else if(form.id==='attendance-filter'){attendanceFilters={q:body.q,status:body.status};page=0;await refresh();}
-    else if(form.id==='participation-settings')reviewParticipation(form);
+    else if(form.id==='participation-settings')await reviewParticipation(form);
     else if(form.id==='apply-participation-settings'){
       const draft=participationDraft;
       if(!draft||!body.acknowledged)throw Error('راجع التغييرات وضع علامة التأكيد أولًا.');
