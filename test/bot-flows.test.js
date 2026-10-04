@@ -77,6 +77,25 @@ test('student lesson schedule shows the immediate coming Saturday on Thursday an
 async function send(id,text,data){messages.length=0;const from={id,is_bot:false,first_name:'test'};const message={message_id:messageId++,date:Math.floor(Date.now()/1000),from,chat:{id,type:'private'},text,...(text&&text.startsWith('/')?{entities:[{offset:0,length:text.split(/\s/)[0].length,type:'bot_command'}]}:{})};
   await app.bot.handleUpdate(data?{update_id:messageId,callback_query:{id:'cb'+messageId,from,data,message}}:{update_id:messageId,message});return messages;
 }
+test('bot: emergency leave appears only after normal quota; explicit admin exception approval and leave corrections work',async()=>{
+  const st=await db.createStudent(1987011,'طالب إجازات طارئة للتجربة',stage.id);await db.confirmOfficialStudent(st.id);
+  const buttons=()=>messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]).map(b=>b.callback_data);
+  await send(st.telegram_id,'🌴 طلب إجازة');assert.ok(!buttons().includes('leave_exception'));
+  await send(st.telegram_id,'','leave_exception');assert.ok(messages.some(m=>m.text?.includes('بعد استنفاد')));
+  const normal=await db.requestLeave(st.id,'2020-01-01',10,null);await db.decideLeave(normal.id,true,42);
+  await send(st.telegram_id,'🌴 طلب إجازة');assert.ok(buttons().includes('leave_exception'));assert.ok(messages.some(m=>m.text?.includes('الحرجة جدًا')));
+  await send(st.telegram_id,'','leave_exception');await send(st.telegram_id,'2');assert.ok(messages.some(m=>m.text?.includes('سبب طلب الاستثناء')));
+  await send(st.telegram_id,'حالة صحية طارئة وحرجة');
+  const l=(await db.pool.query('SELECT * FROM student_leaves WHERE student_id=$1 AND is_exception=true',[st.id])).rows[0];assert.ok(l);assert.equal(l.status,'pending');assert.ok(buttons().includes('leave_exception_approve:'+l.id));
+  await send(42,'','leave_approve:'+l.id);assert.equal((await db.getLeaveById(l.id)).status,'pending');assert.ok(messages.some(m=>m.text?.includes('موافقة استثنائية')));
+  await send(42,'','leave_exception_approve:'+l.id);assert.equal((await db.getLeaveById(l.id)).status,'approved');
+  await send(st.telegram_id,'','admin_leave_reduce:'+l.id);assert.equal((await db.getLeaveById(l.id)).days,2);
+  await send(42,'','admin_student_leaves:'+st.id);assert.ok(buttons().includes('admin_leave_reduce:'+l.id));
+  await send(42,'','admin_leave_reduce:'+l.id);await send(42,'1');assert.equal((await db.getLeaveById(l.id)).days,1);
+  await send(42,'','admin_leave_cancel:'+l.id);assert.equal((await db.getLeaveById(l.id)).status,'approved');
+  await send(42,'','admin_leave_cancel_ok:'+l.id);assert.equal((await db.getLeaveById(l.id)).status,'cancelled');
+  assert.equal((await db.getCurrentSeasonLeaveUsage(st.id)).approvedDays,10);
+});
 test('bot: /start guide has a text fallback and gates registration behind its button',async()=>{
   await send(77777,'/start');
   const screen=messages.find(m=>m.method==='sendMessage'&&m.text?.includes('دليل الطالب'));

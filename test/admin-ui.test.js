@@ -2,7 +2,7 @@
 const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const {JSDOM}=require('jsdom');
 const stage={id:1,name:'المرحلة التمهيدية',is_active:true,stage_type:'full',stage_season_id:1,season_name:'الموسم الأول',student_count:35,subject_count:1,group_count:1,
   subjects:[{id:1,name:'الفقه',hashtag:'فقه',teacher_name:'الأستاذ الأول',teachers:[{id:1,name:'الأستاذ الأول'}]}],groups:[{id:1,title:'الأولى',subject_id:1,subject_name:'الفقه',member_count:35,reserved_count:38,capacity:40}],seasons:[{id:1,name:'الأول',is_active:true}]};
-async function setup({authorized=true,noticeState=null,grouped=true,impact=null}={}){
+async function setup({authorized=true,noticeState=null,grouped=true,impact=null,leaves=[]}={}){
   const fixture=JSON.parse(JSON.stringify(stage));fixture.discussion_grouping=grouped;
   const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../admin/index.html'),'utf8'),{url:'https://institute.example/admin/',runScripts:'outside-only'});
   const w=dom.window;w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};w.confirm=()=>true;
@@ -16,6 +16,13 @@ async function setup({authorized=true,noticeState=null,grouped=true,impact=null}
     else if(u.pathname.endsWith('/seasons'))data=[{id:1,name:'الموسم الأول',is_current:true}];
     else if(u.pathname.endsWith('/lesson-attendance'))data={season:{season_name:'الموسم الأول',as_of:'2026-09-14T12:00:00Z'},subjects:[{id:1,name:'الفقه'},{id:2,name:'العقائد'}],rows:[{id:1,sequence:1,full_name:'طالب <img src=x> اسم رباعي',attendance:[{attended:40,total:42},{attended:0,total:0}]}],total:1,page:0,size:50};
     else if(u.pathname.endsWith('/lesson-attendance.md'))data='حضور الدروس';
+    else if(u.pathname.endsWith('/leaves'))data={rows:leaves,total:leaves.length,page:0,size:25};
+    else if(/\/leaves\/\d+(?:\/decision|\/cancel)?$/.test(u.pathname)){
+      const id=Number(u.pathname.match(/\/leaves\/(\d+)/)[1]),l=leaves.find(l=>l.id===id),body=JSON.parse(options.body);
+      if(u.pathname.endsWith('/decision'))l.status=body.approve?'approved':'rejected';
+      else if(u.pathname.endsWith('/cancel'))l.status='cancelled';else l.days=body.days;
+      data=l;
+    }
     else if(u.pathname.endsWith('/lesson-management')||u.pathname.endsWith('/session-management')){
       const subject=u.searchParams.get('subjectId'),page=Number(u.searchParams.get('page')||0);
       data={season:{is_active:true},subjects:[{id:1,name:'الفقه',total:26,open_count:1}],total:subject?1:26,page,size:25,
@@ -74,6 +81,24 @@ test('admin DOM: Telegram entry, stages, pagination, escaped names and visible m
     click('[data-action="exam"]');await until(()=>w.document.querySelector('#exam-question'));assert.equal(w.document.querySelector('#dialog-body script'),null);
     click('[data-action="close-dialog"]');click('[data-action="logout"]');await until(()=>w.document.querySelector('#content').textContent.includes('انتهت جلسة'));
     assert.ok(!w.document.querySelector('#content').textContent.includes('طالب <img'));
+  }finally{dom.window.close();}
+});
+test('admin DOM: emergency request has explicit approval; reduce and cancel use reviewed current values and unlock the UI',async()=>{
+  const {dom,w,requests,until,click}=await setup({leaves:[{id:7,student_id:1,full_name:'طالب <img src=x> إجازة',stage_name:'التمهيدية',days:3,status:'pending',is_exception:true,reason:'حالة طارئة <script>bad()</script>',start_date:'2026-10-05',end_date:'2026-10-07'}]});
+  try{
+    await until(()=>w.document.querySelector('.stage-card'));click('[data-action="all-leaves"]');await until(()=>w.document.querySelector('#leave-filter'));
+    assert.match(w.document.querySelector('[data-action="leave"][data-approve="true"]').textContent,/موافقة استثنائية/);assert.equal(w.document.querySelector('#content script'),null);
+    click('[data-action="leave"][data-approve="true"]');await until(()=>requests.some(r=>r.url.endsWith('/7/decision')));await until(()=>w.document.querySelector('#content').textContent.includes('معتمدة'));
+    assert.equal(JSON.parse(requests.find(r=>r.url.endsWith('/7/decision')).options.body).exceptionApproval,true);
+    click('[data-action="leave-reduce"]');await until(()=>w.document.querySelector('#reduce-leave'));
+    const form=w.document.querySelector('#reduce-leave');form.querySelector('[name="days"]').value='1';form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+    await until(()=>!w.document.querySelector('#detail').open);await until(()=>w.document.querySelector('[data-action="leave-cancel-admin"]')?.dataset.days==='1');
+    click('[data-action="leave-cancel-admin"]');await until(()=>requests.some(r=>r.url.endsWith('/7/cancel')));await until(()=>w.document.querySelector('#content').textContent.includes('ملغاة'));
+    const cancel=JSON.parse(requests.find(r=>r.url.endsWith('/7/cancel')).options.body);assert.equal(cancel.expectedDays,1);assert.equal(cancel.expectedStatus,'approved');
+    const select=w.document.querySelector('#leave-filter select');select.value='all';select.dispatchEvent(new w.Event('change',{bubbles:true}));w.document.querySelector('#leave-filter').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+    await until(()=>requests.some(r=>r.url.includes('status=all')));
+    await until(()=>w.document.querySelector('#leave-filter select')!==select);
+    await new Promise(r=>setTimeout(r,10));
   }finally{dom.window.close();}
 });
 test('admin DOM: each subject has its own confirmation and switch; the other row stays unchanged',async()=>{

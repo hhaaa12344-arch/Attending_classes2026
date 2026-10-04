@@ -70,6 +70,18 @@ test('admin HTTP: leave double decision, export date columns, archived access an
   assert.equal((await (await request('/students?status=active')).json()).total,0);
   assert.equal((await request('/students/'+student.id,{active:true},'PATCH')).status,200);
 });
+test('admin HTTP: exception approval is explicit, leave corrections reject stale edits and require admin access',async()=>{
+  const st=await db.createStudent(1987012,'طالب استثناءات واجهة الإدارة',stage.id);
+  const l=await db.requestLeave(st.id,'2020-03-01',10,null);await db.decideLeave(l.id,true,42);
+  const extra=await db.requestLeave(st.id,'2020-04-01',3,'حالة طارئة وحرجة جدًا',{exception:true});
+  assert.equal((await request('/leaves/'+extra.id,{days:1,expectedDays:3,expectedStatus:'pending'},'PATCH',null)).status,401);
+  assert.equal((await request('/leaves/'+extra.id+'/decision',{approve:true})).status,400);
+  assert.equal((await request('/leaves/'+extra.id+'/decision',{approve:true,exceptionApproval:true})).status,200);
+  assert.equal((await request('/leaves/'+extra.id,{days:2,expectedDays:3,expectedStatus:'approved'},'PATCH')).status,200);
+  assert.equal((await request('/leaves/'+extra.id,{days:1,expectedDays:3,expectedStatus:'approved'},'PATCH')).status,409);
+  assert.equal((await request('/leaves/'+extra.id+'/cancel',{expectedDays:2,expectedStatus:'approved'})).status,200);
+  const profile=await (await request('/students/'+st.id)).json();assert.equal(profile.activity.approvedLeaveDays,10);assert.equal(profile.activity.exceptionLeaveDays,0);assert.equal(profile.leaves.find(v=>v.id===extra.id).is_exception,true);
+});
 test('admin HTTP: group edits validate together and cannot reduce capacity below membership',async()=>{
   const extra=await db.createStudent(99907,'طالب فحص سعة مجموعة',stage.id);
   await studies.assignStudentToGroup(extra.id,subject.id,ss);
