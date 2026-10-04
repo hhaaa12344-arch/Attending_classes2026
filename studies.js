@@ -770,7 +770,8 @@ async function openEndAttendance(sessionId, automatic = false) {
        AND closes_at > now()
        AND (NOT $3 OR closes_at - make_interval(mins => $2::int) <= now())
        AND EXISTS (SELECT 1 FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id
-         WHERE g.id=mubahatha_sessions.group_id AND g.is_active=true AND ss.is_active=true)
+         WHERE g.id=mubahatha_sessions.group_id AND g.is_active=true AND ss.is_active=true
+           AND participation_enabled(g.subject_id,g.stage_season_id))
      RETURNING *`,
     [sessionId, END_ATTENDANCE_MINUTES, automatic, START_ATTENDANCE_DELAY_MINUTES]
   );

@@ -109,7 +109,7 @@ function createAdminData(db, studies) {
     const groups = await studies.listStudentGroups(id);
     const subjects = await studies.listStudentSubjects(id,{includeDisabled:true});
     const attendance = activity ? await db.getStudentSeasonReport(id,activity.stageSeasonId) : [];
-    const leaves = (await pool.query(`SELECT id,stage_season_id,start_date,end_date,days,status,reason,requested_at,decided_at
+    const leaves = (await pool.query(`SELECT id,stage_season_id,start_date,end_date,days,status,reason,is_exception,requested_at,decided_at
       FROM student_leaves WHERE student_id=$1 ORDER BY requested_at DESC,id DESC LIMIT 100`,[id])).rows;
     const grades = await studies.getStudentFinalGrades(id);
     return { id,full_name,telegram_id,stage_id,stage_name,is_active,official_confirmed_at,activity,groups,subjects,attendance,leaves,grades };

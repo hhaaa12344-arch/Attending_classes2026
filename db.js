@@ -275,6 +275,7 @@ async function initSchema() {
     ALTER TABLE student_ui_messages ADD COLUMN IF NOT EXISTS message_kind TEXT;
     ALTER TABLE student_leaves
       ADD COLUMN IF NOT EXISTS stage_season_id INTEGER REFERENCES stage_seasons(id) ON DELETE SET NULL;
+    ALTER TABLE student_leaves ADD COLUMN IF NOT EXISTS is_exception BOOLEAN NOT NULL DEFAULT false;
     UPDATE student_ui_messages SET message_kind='menu' WHERE message_kind IS NULL;
     ALTER TABLE student_ui_messages ALTER COLUMN message_kind SET DEFAULT 'screen';
     ALTER TABLE student_ui_messages ALTER COLUMN message_kind SET NOT NULL;
@@ -1973,9 +1974,13 @@ const canStudentAttendLesson = (studentId, lessonId) =>
 
 // ---------- الإجازات ----------
 // الطالب يحدد تاريخ البداية وعدد الأيام؛ مجموع الموافق عليه والمعلّق لا يتجاوز 10 أيام في الموسم.
-async function requestLeave(studentId, startDate, days, reason) {
+async function requestLeave(studentId, startDate, days, reason, {exception=false}={}) {
   const d = Number(days);
-  if (!Number.isInteger(d) || d < 1) throw new Error('عدد أيام الإجازة يجب أن يكون رقمًا صحيحًا موجبًا.');
+  if (!Number.isInteger(d) || d < 1 || d > MAX_LEAVE_DAYS_PER_SEASON) throw new Error('عدد أيام الطلب يجب أن يكون بين 1 و10.');
+  if(typeof exception!=='boolean')throw new Error('نوع طلب الإجازة غير صالح.');
+  const note=String(reason||'').trim();
+  if(note.length>1000)throw new Error('سبب الإجازة طويل جدًا (الحد 1000 حرف).');
+  if(exception&&note.length<5)throw new Error('بيّن الحالة الطارئة والحرجة في سبب طلب الاستثناء.');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1985,7 +1990,8 @@ async function requestLeave(studentId, startDate, days, reason) {
 
     const enrollment = await client.query(
       `SELECT e.stage_season_id
-       FROM enrollments e
+       FROM enrollments e JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+       JOIN students st ON st.id=e.student_id AND st.is_active=true
        WHERE e.student_id=$1 AND e.status='active'
        ORDER BY e.started_at DESC, e.id DESC LIMIT 1`,
       [studentId]
@@ -1997,14 +2003,18 @@ async function requestLeave(studentId, startDate, days, reason) {
     }
     const stageSeasonId = Number(enrollment.rows[0].stage_season_id);
     const usage = await client.query(
-      `SELECT COALESCE(SUM(days), 0)::integer AS used_days
+      `SELECT COALESCE(SUM(days), 0)::integer AS used_days,
+        COALESCE(SUM(days) FILTER (WHERE status IN ('approved','ended')),0)::integer AS approved_days
        FROM student_leaves
-       WHERE student_id=$1 AND stage_season_id=$2 AND status IN ('pending','approved','ended')`,
+       WHERE student_id=$1 AND stage_season_id=$2 AND is_exception=false AND status IN ('pending','approved','ended')`,
       [studentId, stageSeasonId]
     );
     const usedDays = Number(usage.rows[0].used_days);
     const remainingDays = Math.max(0, MAX_LEAVE_DAYS_PER_SEASON - usedDays);
-    if (d > remainingDays) {
+    if(exception&&Number(usage.rows[0].approved_days)<MAX_LEAVE_DAYS_PER_SEASON){
+      const err=new Error('يظهر طلب الاستثناء بعد استنفاد الأيام العشرة المعتمدة فقط.');err.code='LEAVE_EXCEPTION_NOT_ELIGIBLE';throw err;
+    }
+    if (!exception && d > remainingDays) {
       const err = new Error(
         remainingDays === 0
           ? `استنفدت رصيد الإجازات للموسم الحالي (${MAX_LEAVE_DAYS_PER_SEASON} أيام).`
@@ -2032,17 +2042,17 @@ async function requestLeave(studentId, startDate, days, reason) {
 
     const result = await client.query(
       `INSERT INTO student_leaves(
-         student_id, stage_season_id, start_date, end_date, days, reason, status
+         student_id, stage_season_id, start_date, end_date, days, reason, status, is_exception
        )
-       VALUES($1, $2, $3::date, ($3::date + ($4 - 1) * interval '1 day')::date, $4, $5, 'pending')
+       VALUES($1, $2, $3::date, ($3::date + ($4 - 1) * interval '1 day')::date, $4, $5, 'pending', $6)
        RETURNING *`,
-      [studentId, stageSeasonId, startDate, d, reason || null]
+      [studentId, stageSeasonId, startDate, d, note || null, exception]
     );
     await client.query('COMMIT');
     return {
       ...result.rows[0],
-      used_days: usedDays + d,
-      remaining_days: remainingDays - d,
+      used_days: usedDays + (exception?0:d),
+      remaining_days: remainingDays - (exception?0:d),
       max_days: MAX_LEAVE_DAYS_PER_SEASON,
     };
   } catch (err) {
@@ -2057,8 +2067,9 @@ const getCurrentSeasonLeaveUsage = (studentId) =>
   pool
     .query(
       `SELECT e.stage_season_id,
-              COALESCE(SUM(sl.days) FILTER (WHERE sl.status IN ('approved','ended')), 0)::integer AS approved_days,
-              COALESCE(SUM(sl.days) FILTER (WHERE sl.status='pending'), 0)::integer AS pending_days
+              COALESCE(SUM(sl.days) FILTER (WHERE sl.status IN ('approved','ended') AND NOT sl.is_exception), 0)::integer AS approved_days,
+              COALESCE(SUM(sl.days) FILTER (WHERE sl.status='pending' AND NOT sl.is_exception), 0)::integer AS pending_days,
+              COALESCE(SUM(sl.days) FILTER (WHERE sl.status IN ('approved','ended') AND sl.is_exception), 0)::integer AS exception_days
        FROM enrollments e
        LEFT JOIN student_leaves sl
          ON sl.student_id=e.student_id AND sl.stage_season_id=e.stage_season_id
@@ -2075,6 +2086,8 @@ const getCurrentSeasonLeaveUsage = (studentId) =>
       return {
         stageSeasonId: Number(row.stage_season_id),
         approvedDays,
+        exceptionDays: Number(row.exception_days),
+        exceptionEligible: approvedDays >= MAX_LEAVE_DAYS_PER_SEASON,
         pendingDays,
         reservedDays: approvedDays + pendingDays,
         remainingDays: Math.max(0, MAX_LEAVE_DAYS_PER_SEASON - approvedDays - pendingDays),
@@ -2094,7 +2107,7 @@ const getLeaveById = (leaveId) =>
     )
     .then((r) => r.rows[0]);
 
-async function decideLeave(leaveId, approve, adminTelegramId) {
+async function decideLeave(leaveId, approve, adminTelegramId, {exceptionApproval=false}={}) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -2106,8 +2119,12 @@ async function decideLeave(leaveId, approve, adminTelegramId) {
         JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
         WHERE e.student_id=$1 AND e.stage_season_id=$2 AND e.status='active'`,[before.student_id,before.stage_season_id])).rows[0];
       if(!valid)throw new Error('الطالب غير مسجل في موسم الإجازة النشط.');
-      const used=Number((await client.query("SELECT COALESCE(SUM(days),0) AS n FROM student_leaves WHERE student_id=$1 AND stage_season_id=$2 AND status IN ('approved','ended')",[before.student_id,before.stage_season_id])).rows[0].n);
-      if(used+Number(before.days)>MAX_LEAVE_DAYS_PER_SEASON)throw new Error('تتجاوز الموافقة رصيد الإجازات: عشرة أيام للموسم.');
+      const {appError}=require('./integrity');
+      const used=Number((await client.query("SELECT COALESCE(SUM(days),0) AS n FROM student_leaves WHERE student_id=$1 AND stage_season_id=$2 AND NOT is_exception AND status IN ('approved','ended')",[before.student_id,before.stage_season_id])).rows[0].n);
+      if(before.is_exception){
+        if(exceptionApproval!==true)throw appError('هذا طلب استثناء طارئ؛ يحتاج موافقة استثنائية صريحة.');
+        if(used<MAX_LEAVE_DAYS_PER_SEASON)throw appError('عاد للطالب رصيد اعتيادي؛ اسحب طلب الاستثناء وقدّم طلبًا اعتياديًا.','CONFLICT',409);
+      }else if(used+Number(before.days)>MAX_LEAVE_DAYS_PER_SEASON)throw appError('تتجاوز الموافقة رصيد الإجازات: عشرة أيام للموسم.');
     }
     const result = await client.query(
       `UPDATE student_leaves
@@ -2145,6 +2162,13 @@ async function decideLeave(leaveId, approve, adminTelegramId) {
     }
     if(leave)await client.query(`INSERT INTO admin_audit_log(actor_id,action,entity_type,entity_id,before_data,after_data)
       VALUES($1,'leave_decision','leave',$2,$3::jsonb,$4::jsonb)`,[adminTelegramId,leaveId,JSON.stringify(before),JSON.stringify(leave)]);
+    if(leave){
+      const st=(await client.query('SELECT telegram_id FROM students WHERE id=$1',[leave.student_id])).rows[0];
+      const range=`${leave.start_date.toISOString().slice(0,10)} → ${leave.end_date.toISOString().slice(0,10)}`;
+      await require('./outbox').enqueueNotification(client,{key:`leave:${leaveId}:decision`,chatId:st.telegram_id,
+        text:approve?`✅ تمت الموافقة${leave.is_exception?' الاستثنائية':''} على إجازتك (${range}).\nلا تحتسب هذه الفترة غيابًا ولا تصلك خلالها إشعارات الدروس. تسجيل الحضور يبقى ضمن مهلة الدرس فقط.`:
+          `❌ لم تتم الموافقة على طلب إجازتك (${range}).`});
+    }
     await client.query('COMMIT');
     return leave;
   } catch (err) {
@@ -2159,6 +2183,8 @@ async function cancelLeave(studentId, leaveId, returnDate = null) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(734221,1)');
+    await client.query('SELECT id FROM students WHERE id=$1 FOR UPDATE',[studentId]);
     const found = await client.query(
       `SELECT * FROM student_leaves
        WHERE id=$1 AND student_id=$2 AND status IN ('pending','approved') FOR UPDATE`,
@@ -2180,7 +2206,7 @@ async function cancelLeave(studentId, leaveId, returnDate = null) {
       const effectiveReturnDate = returnDate || new Date().toISOString().slice(0, 10);
       result = await client.query(
         `UPDATE student_leaves
-         SET status='ended',
+         SET status=CASE WHEN $2::date <= start_date THEN 'cancelled' ELSE 'ended' END,
              end_date=CASE
                WHEN $2::date <= start_date THEN start_date
                ELSE LEAST(end_date, ($2::date - interval '1 day')::date)
@@ -2194,6 +2220,7 @@ async function cancelLeave(studentId, leaveId, returnDate = null) {
         [leaveId, effectiveReturnDate]
       );
     }
+    if(leave.status==='approved')await require('./leaveManagement').refreshLeaveAttendance(client,result.rows[0]);
     await client.query('COMMIT');
     return result.rows[0];
   } catch (err) {
@@ -2580,7 +2607,7 @@ async function getStudentCurrentSeasonActivity(studentId, onDate = null) {
 
   const [leaveResult, warningResult] = await Promise.all([
     pool.query(
-      `SELECT sl.id, sl.start_date, sl.end_date, sl.days
+      `SELECT sl.id, sl.start_date, sl.end_date, sl.days, sl.is_exception
        FROM student_leaves sl
        WHERE sl.student_id=$1 AND sl.status IN ('approved','ended')
          AND (
@@ -2609,7 +2636,8 @@ async function getStudentCurrentSeasonActivity(studentId, onDate = null) {
     stageName: current.stage_name,
     seasonName: current.season_name,
     leaves: leaveResult.rows,
-    approvedLeaveDays: leaveResult.rows.reduce((sum, leave) => sum + Number(leave.days), 0),
+    approvedLeaveDays: leaveResult.rows.filter(l=>!l.is_exception).reduce((sum, leave) => sum + Number(leave.days), 0),
+    exceptionLeaveDays: leaveResult.rows.filter(l=>l.is_exception).reduce((sum, leave) => sum + Number(leave.days), 0),
     maxLeaveDays: MAX_LEAVE_DAYS_PER_SEASON,
     warnings: warningResult.rows,
   };
@@ -2636,12 +2664,12 @@ const getStageSeasonReport = (stageSeasonId, timeZone = 'Asia/Baghdad') =>
               ) AS attendance_dates,
               COALESCE((
                 SELECT SUM(sl.days) FROM student_leaves sl
-                WHERE sl.student_id=st.id AND sl.stage_season_id=r.id AND sl.status IN ('approved','ended')
+                WHERE sl.student_id=st.id AND sl.stage_season_id=r.id AND NOT sl.is_exception AND sl.status IN ('approved','ended')
               ), 0)::integer AS approved_leave_days,
               COALESCE((
                 SELECT STRING_AGG(
                   TO_CHAR(sl.start_date, 'YYYY-MM-DD') || ' → ' || TO_CHAR(sl.end_date, 'YYYY-MM-DD') ||
-                  ' (' || sl.days || ' يوم)',
+                  ' (' || sl.days || ' يوم' || CASE WHEN sl.is_exception THEN '، استثناء طارئ' ELSE '' END || ')',
                   ' | ' ORDER BY sl.start_date, sl.id
                 )
                 FROM student_leaves sl
@@ -2686,12 +2714,12 @@ const getStudentSeasonReport = (studentId, stageSeasonId = null, timeZone = 'Asi
               ) AS attendance_dates,
               COALESCE((
                 SELECT SUM(sl.days) FROM student_leaves sl
-                WHERE sl.student_id=st.id AND sl.stage_season_id=r.id AND sl.status IN ('approved','ended')
+                WHERE sl.student_id=st.id AND sl.stage_season_id=r.id AND NOT sl.is_exception AND sl.status IN ('approved','ended')
               ), 0)::integer AS approved_leave_days,
               COALESCE((
                 SELECT STRING_AGG(
                   TO_CHAR(sl.start_date, 'YYYY-MM-DD') || ' → ' || TO_CHAR(sl.end_date, 'YYYY-MM-DD') ||
-                  ' (' || sl.days || ' يوم)',
+                  ' (' || sl.days || ' يوم' || CASE WHEN sl.is_exception THEN '، استثناء طارئ' ELSE '' END || ')',
                   ' | ' ORDER BY sl.start_date, sl.id
                 )
                 FROM student_leaves sl
@@ -3042,6 +3070,7 @@ module.exports = {
   requestLeave,
   getLeaveById,
   decideLeave,
+  adjustLeave: require('./leaveManagement').createLeaveManagement(pool).adjustLeave,
   cancelLeave,
   isStudentOnLeave,
   getActiveOrUpcomingLeave,

@@ -11,6 +11,7 @@ const scheduledPublication = require('./scheduledPublication').createScheduledPu
 const stageCorrections = require('./stageCorrections').createStageCorrections(db);
 const adminData = require('./adminData').createAdminData(db, studies);
 const scheduler = require('./scheduler').createScheduler({pool:db.pool,studies});
+const {editDiscussionMessage,answerDiscussionCallback,endAttendanceMessage}=require('./discussionFlow');
 const studentReminders = require('./studentReminders');
 const { randomUUID } = require('node:crypto');
 const {
@@ -99,13 +100,13 @@ const PREVIEW_BLOCKED_ACTION_PREFIXES = [
   'pm_set', 'pm_join', 'pm_switch', 'pm_switchok', 'pc_req', 'pc_cancel', 'pc_approve', 'pc_reject',
   'rep_send', 'stex_start', 'stex_ans',
   'sr_item', 'sr_apply', 'sr_manual', 'lr_grade', 'gr_edit',
-  'season_choice', 'leave_approve', 'leave_reject', 'leave_cancel', 'leave_open',
+  'season_choice', 'leave_approve', 'leave_reject', 'leave_cancel', 'leave_open', 'leave_exception', 'leave_exception_approve', 'admin_leave_reduce', 'admin_leave_cancel', 'admin_leave_cancel_ok',
   'noop_activity',
   'slot_yes', 'slot_no', 'confirm_official_student',
 ];
 // خطوات الإدخال النصي التي تكتب في القاعدة (تُمنع في المعاينة)
 const PREVIEW_BLOCKED_TEXT_ACTIONS = new Set([
-  'leave_awaiting_days', 'leave_awaiting_reason', 'student_report_upload',
+  'leave_awaiting_days', 'leave_awaiting_reason', 'admin_leave_days', 'student_report_upload',
   'report_item_score', 'teacher_report_score', 'grade_override', 'lessons_score',
   'teacher_slot_postpone_reason', 'stage_correction_reason',
 ]);
@@ -450,6 +451,7 @@ function studentActionsKeyboard(studentId, isActive = true) {
     [callbackButton('✏️ تعديل الاسم', `stu_edit_name:${studentId}`)],
     [callbackButton('🔁 تغيير المرحلة', `stu_edit_stage:${studentId}`)],
     [callbackButton('📊 تقرير كل المواسم', `stu_report:${studentId}`)],
+    [callbackButton('🌴 إدارة إجازات الطالب', `admin_student_leaves:${studentId}`)],
     [callbackButton('📣 إرسال تذكير بالمطلوب', `stu_remind:${studentId}`)],
   ];
   if (isActive) {
@@ -665,7 +667,7 @@ function formatStudentSeasonActivity(activity) {
   const leaveLines = leaves.length
     ? leaves.map(
         (leave, index) =>
-          `${index + 1}. ${dateOnly(leave.start_date)} → ${dateOnly(leave.end_date)} (${Number(leave.days)} يومًا)`
+          `${index + 1}. ${dateOnly(leave.start_date)} → ${dateOnly(leave.end_date)} (${Number(leave.days)} يومًا${leave.is_exception?'، استثناء طارئ':''})`
       )
     : ['لا توجد إجازات معتمدة.'];
   const approvedLeaveDays = Number.isFinite(Number(activity.approvedLeaveDays))
@@ -677,10 +679,11 @@ function formatStudentSeasonActivity(activity) {
     `المرحلة: ${activity.stageName || '—'}\n` +
     `الموسم: ${activity.seasonName || '—'}\n\n` +
     `🌴 الإجازات المعتمدة (${leaves.length}):\n` +
-    `الأيام المستخدمة: ${approvedLeaveDays} من ${maxLeaveDays} — المتبقي: ${Math.max(
+    `الأيام الاعتيادية المستخدمة: ${approvedLeaveDays} من ${maxLeaveDays} — المتبقي: ${Math.max(
       0,
       maxLeaveDays - approvedLeaveDays
     )}\n` +
+    (activity.exceptionLeaveDays?`أيام استثنائية معتمدة خارج الرصيد: ${activity.exceptionLeaveDays}\n`:'')+
     leaveLines.join('\n');
   if (warnings.length) {
     const notificationLines = warnings.map(
@@ -702,7 +705,7 @@ function formatAdminStudentDetails(student, activity, attendanceRows = []) {
   const approvedLeaveDays = Number(activity.approvedLeaveDays || 0);
   const leaveLines = (activity.leaves || []).map(
     (leave) =>
-      `• ${dateOnly(leave.start_date)} → ${dateOnly(leave.end_date)} (${Number(leave.days)} يومًا)`
+      `• ${dateOnly(leave.start_date)} → ${dateOnly(leave.end_date)} (${Number(leave.days)} يومًا${leave.is_exception?'، استثناء طارئ':''})`
   );
   const attendanceLines = attendanceRows.map(
     (row) => `• ${row.subject_name}: ${Number(row.attended_lessons)} من ${Number(row.total_lessons)}`
@@ -712,6 +715,7 @@ function formatAdminStudentDetails(student, activity, attendanceRows = []) {
     `\n\n📊 الحضور:\n${attendanceLines.length ? attendanceLines.join('\n') : 'لا توجد دروس مسجلة.'}` +
     `\n\n🌴 الإجازات المعتمدة: ${approvedLeaveDays} من ${MAX_LEAVE_DAYS_PER_SEASON} أيام` +
     `\nالمتبقي: ${Math.max(0, MAX_LEAVE_DAYS_PER_SEASON - approvedLeaveDays)} أيام` +
+    (activity.exceptionLeaveDays?`\nأيام استثنائية معتمدة خارج الرصيد: ${activity.exceptionLeaveDays}`:'')+
     `\n${leaveLines.length ? leaveLines.join('\n') : 'لا توجد إجازات معتمدة.'}`;
   return text;
 }
@@ -1526,43 +1530,26 @@ bot.on('text', async (ctx, next) => {
       userState.delete(ctx.from.id);
       return ctx.reply('الرجاء التسجيل أولًا عبر /start');
     }
-    try {
-      const leave = await db.requestLeave(
-        student.id,
-        currentDateInTimeZone(ATTENDANCE_TIME_ZONE),
-        days,
-        null
-      );
-      userState.delete(ctx.from.id);
-      await replyStudentScreen(
-        ctx,
-        student,
-        `تم إرسال طلب إجازتك ✅\nمن ${leave.start_date.toISOString().slice(0, 10)} ` +
-          `إلى ${leave.end_date.toISOString().slice(0, 10)} (${days} يومًا).\n` +
-          `الرصيد المتبقي في هذا الموسم: ${Number(leave.remaining_days)} من ${Number(leave.max_days)} أيام.\n` +
-          'سيصلك إشعار عند قبول الأدمن للطلب. عند الموافقة لا تُحسب أيام الإجازة غيابًا، ' +
-          'ويبقى التأشير ممكنًا خلال مهلة كل درس فقط.',
-        studentMainMenu(await effectiveStudent(ctx))
-      );
-      // إشعار الأدمن مع أزرار الموافقة/الرفض
-      await notifyAdmins(
-        `🌴 طلب إجازة جديد\nالطالب: ${student.full_name}\nالمرحلة: ${student.stage_name || '—'}\n` +
-          `المدة: ${days} يومًا (${leave.start_date.toISOString().slice(0, 10)} → ${leave.end_date
-            .toISOString()
-            .slice(0, 10)})\n` +
-          `الرصيد المحجوز بعد الطلب: ${Number(leave.used_days)} من ${Number(leave.max_days)} أيام`,
-        Markup.inlineKeyboard([
-          [
-            callbackButton('✅ موافقة', `leave_approve:${leave.id}`),
-            callbackButton('❌ رفض', `leave_reject:${leave.id}`),
-          ],
-        ])
-      );
-      return undefined;
-    } catch (err) {
-      userState.delete(ctx.from.id);
-      return replyStudentScreen(ctx, student, `تعذّر تسجيل الإجازة: ${err.message}`, studentMainMenu(await effectiveStudent(ctx)));
+    if(state.exception){
+      userState.set(ctx.from.id,{action:'leave_awaiting_reason',days,exception:true});
+      return ctx.reply('أرسل سبب طلب الاستثناء، موضحًا الحالة الطارئة والحرجة جدًا (من 5 إلى 1000 حرف). الطلب لا يصبح إجازة إلا بموافقة استثنائية من الإدارة.');
     }
+    return submitStudentLeaveRequest(ctx,student,days,null,false);
+  }
+  if(state.action==='leave_awaiting_reason'){
+    const reason=ctx.message.text.trim();
+    if(reason.length<5||reason.length>1000)return ctx.reply('وضّح سبب الحالة الطارئة من 5 إلى 1000 حرف.');
+    const student=await effectiveStudent(ctx);if(!student)return ctx.reply('الرجاء التسجيل أولًا.');
+    return submitStudentLeaveRequest(ctx,student,state.days,reason,true);
+  }
+  if(state.action==='admin_leave_days'){
+    if(!isAdmin(ctx))return denyUnauthorized(ctx);
+    const days=parseLeaveDays(ctx.message.text);
+    if(days===null||days>=state.expectedDays)return ctx.reply(`أرسل عددًا صحيحًا من 1 إلى ${state.expectedDays-1}.`);
+    try{
+      await db.adjustLeave(state.leaveId,{days,expectedDays:state.expectedDays,expectedStatus:state.expectedStatus},ctx.from.id);
+      userState.delete(ctx.from.id);return ctx.reply('✅ قُلّلت أيام الإجازة وحُفظ إشعار الطالب.');
+    }catch(e){userState.delete(ctx.from.id);return ctx.reply(e.message);}
   }
 
   // -------- الأستاذ: سعة المجموعة الجديدة --------
@@ -2249,6 +2236,29 @@ bot.hears(LEGACY_STUDENT_ACTIVITY_BUTTON_2, openStudentSeasonActivity);
 // ---------------------------------------------------------------------------
 // الطالب — طلب إجازة / إلغاؤها
 // ---------------------------------------------------------------------------
+function adminLeaveKeyboard(leave){
+  const rows=[];
+  if(leave.status==='pending')rows.push([
+    callbackButton(leave.is_exception?'✅ موافقة استثنائية':'✅ موافقة',`${leave.is_exception?'leave_exception_approve':'leave_approve'}:${leave.id}`),
+    callbackButton('❌ رفض',`leave_reject:${leave.id}`)]);
+  if(['pending','approved','ended'].includes(leave.status)){
+    if(Number(leave.days)>1)rows.push([callbackButton('تقليل أيام الإجازة',`admin_leave_reduce:${leave.id}`)]);
+    rows.push([callbackButton('إلغاء الإجازة من الإدارة',`admin_leave_cancel:${leave.id}`)]);
+  }
+  rows.push([callbackButton('💬 الرد على الطالب',`contact:leave:${leave.id}`)]);
+  return Markup.inlineKeyboard(rows);
+}
+async function submitStudentLeaveRequest(ctx,student,days,reason,exception){
+  try{
+    const leave=await db.requestLeave(student.id,currentDateInTimeZone(ATTENDANCE_TIME_ZONE),days,reason,{exception});
+    userState.delete(ctx.from.id);
+    const range=`${dateOnly(leave.start_date)} → ${dateOnly(leave.end_date)}`;
+    await replyStudentScreen(ctx,student,`✅ أُرسل طلب إجازتك${exception?' الاستثنائية الطارئة':''} (${range}، ${days} يومًا).\n`+
+      (exception?'الطلب قيد المراجعة ولا يعفي من الغياب إلا بعد موافقة استثنائية من الإدارة.':`الرصيد المتبقي في هذا الموسم: ${leave.remaining_days} من ${leave.max_days} أيام.\nعند موافقة الإدارة لا تُحسب أيام الإجازة غيابًا. تسجيل الحضور يبقى ضمن مهلة كل درس.`),studentMainMenu(await effectiveStudent(ctx)));
+    await notifyAdmins(`🌴 طلب إجازة جديد${exception?' — استثناء طارئ من الضوابط':''}\nالطالب: ${student.full_name}\nالمرحلة: ${student.stage_name||'—'}\nالمدة: ${days} يومًا (${range})\n`+
+      (exception?`السبب: ${reason}\nيحتاج موافقة استثنائية صريحة؛ استُنفد الرصيد الاعتيادي.`:`الرصيد المحجوز بعد الطلب: ${leave.used_days} من ${leave.max_days} أيام`),adminLeaveKeyboard(leave));
+  }catch(e){userState.delete(ctx.from.id);return replyStudentScreen(ctx,student,`تعذّر تسجيل الإجازة: ${e.message}`,studentMainMenu(await effectiveStudent(ctx)));}
+}
 async function openLeaveRequest(ctx) {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.reply('الرجاء التسجيل أولًا عبر /start');
@@ -2292,8 +2302,10 @@ async function openLeaveRequest(ctx) {
     return replyStudentScreen(
       ctx,
       student,
-      withStudentName(student, `استنفدت رصيد الإجازات للموسم الحالي (${usage.maxDays} أيام)، ولا يمكن تقديم طلب جديد حتى الموسم القادم.`),
-      studentMainMenu(await effectiveStudent(ctx))
+      withStudentName(student, usage.exceptionEligible
+        ? `استنفدت رصيد الإجازات الاعتيادية (${usage.maxDays} أيام).\nيمكنك طلب إجازة استثناء من الضوابط ولكن للحالات الطارئة والحرجة جدًا. يلزم بيان السبب وموافقة استثنائية من الإدارة.`
+        : 'رصيد الإجازات محجوز في طلبات معلّقة. انتظر قرار الإدارة.'),
+      usage.exceptionEligible?Markup.inlineKeyboard([[callbackButton('طلب إجازة استثنائية طارئة','leave_exception')]]):studentMainMenu(await effectiveStudent(ctx))
     );
   }
   userState.set(ctx.from.id, { action: 'leave_awaiting_days' });
@@ -2309,8 +2321,16 @@ async function openLeaveRequest(ctx) {
 }
 
 bot.hears('🌴 طلب إجازة', openLeaveRequest);
+bot.action('leave_exception',async ctx=>{
+  const student=await effectiveStudent(ctx);if(!student)return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
+  const usage=await db.getCurrentSeasonLeaveUsage(student.id);
+  if(!usage?.exceptionEligible)return ctx.answerCbQuery('يظهر الاستثناء بعد استنفاد الأيام العشرة المعتمدة فقط.',{show_alert:true});
+  if(await db.getPendingLeave(student.id)||await db.getActiveOrUpcomingLeave(student.id,currentDateInTimeZone(ATTENDANCE_TIME_ZONE)))return ctx.answerCbQuery('لديك إجازة أو طلب قائم. راجعه أولًا.',{show_alert:true});
+  userState.set(ctx.from.id,{action:'leave_awaiting_days',exception:true});
+  await ctx.answerCbQuery();return ctx.reply('طلب إجازة استثنائية للحالات الطارئة والحرجة جدًا.\nأرسل عدد الأيام المطلوبة من 1 إلى 10. بعدها يُطلب منك السبب، ثم يُعرض الطلب على الإدارة للموافقة الاستثنائية.');
+});
 
-bot.action(/leave_cancel:(\d+)/, async (ctx) => {
+bot.action(/^leave_cancel:(\d+)$/, async (ctx) => {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   const cancelled = await db.cancelLeave(
@@ -2336,22 +2356,45 @@ async function openLeaveRequests(ctx) {
   for (const leave of pending) {
     await ctx.reply(
       `🌴 طلب إجازة\nالطالب: ${leave.full_name}\nالمرحلة: ${leave.stage_name}\n` +
-        `المدة: ${leave.days} يومًا (${leave.start_date.toISOString().slice(0, 10)} → ${leave.end_date
+        `${leave.is_exception?'⚠️ استثناء طارئ من الضوابط\nالسبب: '+leave.reason+'\n':''}المدة: ${leave.days} يومًا (${leave.start_date.toISOString().slice(0, 10)} → ${leave.end_date
           .toISOString()
           .slice(0, 10)})`,
-      Markup.inlineKeyboard([
-        [
-          callbackButton('✅ موافقة', `leave_approve:${leave.id}`),
-          callbackButton('❌ رفض', `leave_reject:${leave.id}`),
-        ],
-        [callbackButton('💬 الرد على الطالب',`contact:leave:${leave.id}`)],
-      ])
+      adminLeaveKeyboard(leave)
     );
   }
   return undefined;
 }
 
 bot.hears('🌴 طلبات الإجازة', openLeaveRequests);
+bot.action(/^admin_student_leaves:(\d+)$/,async ctx=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();
+  const studentId=Number(ctx.match[1]);
+  const rows=(await db.pool.query(`SELECT id FROM student_leaves WHERE student_id=$1 AND status IN ('pending','approved','ended') ORDER BY requested_at DESC,id DESC LIMIT 20`,[studentId])).rows;
+  if(!rows.length)return ctx.reply('لا توجد إجازات قابلة للتعديل لهذا الطالب.');
+  for(const row of rows){const l=await db.getLeaveById(row.id);await ctx.reply(`🌴 ${l.full_name}\n${l.is_exception?'استثناء طارئ':'إجازة اعتيادية'} · ${l.days} يومًا\n${dateOnly(l.start_date)} → ${dateOnly(l.end_date)}\nالحالة: ${l.status==='pending'?'قيد المراجعة':l.status==='approved'?'معتمدة':'منتهية'}${l.reason?'\nالسبب: '+l.reason:''}`,adminLeaveKeyboard(l));}
+});
+bot.action(/^admin_leave_reduce:(\d+)$/,async ctx=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
+  const l=await db.getLeaveById(Number(ctx.match[1]));
+  if(!l||!['pending','approved','ended'].includes(l.status)||l.days<2)return ctx.answerCbQuery('لا يمكن تقليل هذه الإجازة.');
+  userState.set(ctx.from.id,{action:'admin_leave_days',leaveId:l.id,expectedDays:l.days,expectedStatus:l.status});
+  await ctx.answerCbQuery();return ctx.reply(`إجازة «${l.full_name}» مدتها ${l.days} يومًا.\nأرسل عدد الأيام الجديد من 1 إلى ${l.days-1}. تبقى البداية ${dateOnly(l.start_date)}، وتقصر النهاية تلقائيًا، ويصحح الرصيد والغياب ويُشعَر الطالب.\nللرجوع اضغط «${BACK_BUTTON}».`);
+});
+bot.action(/^admin_leave_cancel:(\d+)$/,async ctx=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
+  const l=await db.getLeaveById(Number(ctx.match[1]));
+  if(!l||!['pending','approved','ended'].includes(l.status))return ctx.answerCbQuery('لم تعد الإجازة قابلة للإلغاء.');
+  userState.set(ctx.from.id,{action:'admin_leave_cancel_confirm',leaveId:l.id,expectedDays:l.days,expectedStatus:l.status});
+  await ctx.answerCbQuery();return ctx.reply(`إلغاء إجازة «${l.full_name}» بالكامل (${dateOnly(l.start_date)} → ${dateOnly(l.end_date)})؟\nيُعاد الرصيد الاعتيادي وتُراجع أيام الغياب لهذه الفترة.`,Markup.inlineKeyboard([[callbackButton('تأكيد إلغاء الإجازة',`admin_leave_cancel_ok:${l.id}`)],[callbackButton('رجوع',`admin_student_leaves:${l.student_id}`)]]));
+});
+bot.action(/^admin_leave_cancel_ok:(\d+)$/,async ctx=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.');
+  const state=userState.get(ctx.from.id);
+  if(state?.action!=='admin_leave_cancel_confirm'||state.leaveId!==Number(ctx.match[1]))return ctx.answerCbQuery('أعد فتح الإجازة لتأكيد الإلغاء.');
+  try{await db.adjustLeave(state.leaveId,{cancel:true,expectedDays:state.expectedDays,expectedStatus:state.expectedStatus},ctx.from.id);userState.delete(ctx.from.id);await ctx.answerCbQuery('تم الإلغاء');return ctx.editMessageText('✅ ألغيت الإجازة بالكامل وحُفظ إشعار الطالب.');}
+  catch(e){userState.delete(ctx.from.id);return ctx.answerCbQuery(e.message,{show_alert:true});}
+});
 
 const studentContact = require('./studentContact').createStudentContact(db.pool);
 async function showContactStudents(ctx, role, subjectId, query, page) {
@@ -2421,9 +2464,11 @@ bot.action(/^contact:leave:(\d+)$/,async ctx=>{
   await ctx.answerCbQuery();return ctx.reply(`اكتب ردك على طلب إجازة ${leave.full_name}:`);
 });
 
-async function decideLeaveAction(ctx, leaveId, approve) {
+async function decideLeaveAction(ctx, leaveId, approve, exceptionApproval=false) {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
-  const updated = await db.decideLeave(leaveId, approve, ctx.from.id);
+  let updated;
+  try{updated=await db.decideLeave(leaveId, approve, ctx.from.id,{exceptionApproval});}
+  catch(e){return ctx.answerCbQuery(e.message,{show_alert:true});}
   if (!updated) {
     await ctx.answerCbQuery('عولج الطلب مسبقًا أو لم يعد موجودًا.');
     return ctx.editMessageText('تم التعامل مع هذا الطلب مسبقًا.');
@@ -2434,28 +2479,16 @@ async function decideLeaveAction(ctx, leaveId, approve) {
     .toISOString()
     .slice(0, 10)}`;
   await ctx.editMessageText(
-    `${approve ? '✅ تمت الموافقة على' : '❌ رُفض'} طلب إجازة «${leave.full_name}» (${range}).`
+    `${approve ? '✅ تمت الموافقة'+(updated.is_exception?' الاستثنائية':'')+' على' : '❌ رُفض'} طلب إجازة «${leave.full_name}» (${range}).`,
+    approve?adminLeaveKeyboard(updated):{}
   );
-  try {
-    if (approve) {
-      await bot.telegram.sendMessage(
-          leave.telegram_id,
-          `✅ تمت الموافقة على إجازتك (${range}).\n` +
-            'لن تصلك إشعارات الدروس في أيام إجازتك، ولا تُحتسب هذه الأيام غيابًا ضمن سلسلة الغياب المتتالي. ' +
-            'يمكن تأشير الدرس خلال مهلته فقط، ولا يمكن تأشيره بعد انتهاء المهلة. ' +
-            'وستُنبَّه عند أول درس بعدها بضرورة متابعة ما فاتك.'
-      );
-    } else {
-      await bot.telegram.sendMessage(leave.telegram_id, `❌ لم تتم الموافقة على طلب إجازتك (${range}).`);
-    }
-  } catch (err) {
-    console.warn('تعذر إشعار الطالب بقرار الإجازة:', err.description || err.message);
-  }
+  // The decision notice is saved atomically with the decision and retried by the outbox worker.
   return undefined;
 }
 
-bot.action(/leave_approve:(\d+)/, (ctx) => decideLeaveAction(ctx, Number(ctx.match[1]), true));
-bot.action(/leave_reject:(\d+)/, (ctx) => decideLeaveAction(ctx, Number(ctx.match[1]), false));
+bot.action(/^leave_approve:(\d+)$/, (ctx) => decideLeaveAction(ctx, Number(ctx.match[1]), true));
+bot.action(/^leave_reject:(\d+)$/, (ctx) => decideLeaveAction(ctx, Number(ctx.match[1]), false));
+bot.action(/^leave_exception_approve:(\d+)$/, (ctx) => decideLeaveAction(ctx,Number(ctx.match[1]),true,true));
 
 
 bot.action('season_open', async (ctx) => {
@@ -3784,8 +3817,11 @@ bot.action(/slot_yes:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
   if(!saved)return ctx.answerCbQuery('الموعد قديم أو بدأت جلسته بالفعل.');
   userState.delete(ctx.from.id);
   const notice=await scheduler.queueSlotDecisionNotice(slotId,date,'confirmed');
-  await ctx.answerCbQuery('تم التأكيد ✅');
-  return ctx.editMessageText(`✅ تم تأكيد المباحثة. يبدأ الموعد في وقته، وحُفظ إشعار ${Number(notice?.notified||0)} طالبًا للإرسال.`);
+  await answerDiscussionCallback(ctx,'تم التأكيد ✅');
+  const recipients=notice?.eligible||0;
+  const detail=Number(notice?.notified)>0?`حُفظ إشعار ${notice.notified} طالبًا للإرسال.`:
+    recipients?`إشعارات ${recipients} طالبًا محفوظة سابقًا؛ لم تُكرر.`:'لا يوجد طلبة نشطون اختاروا المباحثات ومسجلون في هذه المجموعة حاليًا. راجع توزيع الطلبة ونوع مشاركتهم.';
+  return editDiscussionMessage(ctx,`✅ تم تأكيد مباحثة «${notice?.subjectName||''}» — ${notice?.groupTitle||''}. يبدأ الموعد في وقته.\n${detail}`);
 });
 
 bot.action(/slot_no:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
@@ -3860,12 +3896,9 @@ bot.action(/^mub_finish:(\d+)$/, async (ctx) => {
   if (!teacher && !isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
   const sessionId = Number(ctx.match[1]);
   if(!isAdmin(ctx) && !await access.teacherObject(teacher.id,'session',sessionId)) return ctx.answerCbQuery('هذه الجلسة ليست ضمن صلاحياتك.');
-  await ctx.answerCbQuery();
+  await answerDiscussionCallback(ctx);
   const result = await openEndAttendanceAndNotify(sessionId, 'الأستاذ');
-  if (!result) return ctx.editMessageText('حضور النهاية مفتوح مسبقًا أو الجلسة غير موجودة.');
-  return ctx.editMessageText(
-    `✅ أُنهيت المباحثة وفُتح حضور النهاية حتى نهاية ساعة الموعد الأصلية. حُفظت إشعارات ${result.notified} طالبًا في طابور الإرسال.`
-  );
+  return editDiscussionMessage(ctx,endAttendanceMessage(result));
 });
 
 // ---------------------------------------------------------------------------

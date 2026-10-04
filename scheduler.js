@@ -18,9 +18,9 @@ function createScheduler({ pool, studies }) {
       const r = await client.query(`SELECT s.*,g.subject_id,g.stage_season_id,discussion_group_label(g.id) AS group_title,sub.name AS subject_name
         FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id
         JOIN subjects sub ON sub.id=g.subject_id JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
-        WHERE s.id=$1 AND participation_enabled(g.subject_id,g.stage_season_id) AND s.${field}=false
+        WHERE s.id=$1 AND g.is_active=true AND participation_enabled(g.subject_id,g.stage_season_id) AND s.${field}=false
           AND s.attendance_reopened_at IS NULL
-          ${phase === 'start' ? `AND s.opened_at + make_interval(mins => ${Number(studies.START_ATTENDANCE_DELAY_MINUTES)}) <= now()` : 'AND s.end_opened_at IS NOT NULL AND s.end_opened_at <= now()'}
+          ${phase === 'start' ? `AND s.is_closed=false AND s.opened_at + make_interval(mins => ${Number(studies.START_ATTENDANCE_DELAY_MINUTES)}) <= now()` : 'AND s.end_opened_at IS NOT NULL AND s.end_opened_at <= now()'}
         FOR UPDATE OF s`, [sessionId]);
       const s = r.rows[0];
       if (!s) { await client.query('COMMIT'); return 0; }
@@ -44,7 +44,7 @@ function createScheduler({ pool, studies }) {
         const teacher = (await client.query('SELECT telegram_id FROM teachers WHERE id=$1 AND is_active=true', [s.teacher_id])).rows[0];
         if (teacher?.telegram_id) await enqueueNotification(client, {
           key: `session:${s.id}:teacher`, chatId: teacher.telegram_id, expiresAt: s.closes_at,
-          text: `فُتح الحضور الأول لمباحثة «${s.subject_name}» — ${s.group_title}.\nعند انتهاء المباحثة اضغط الزر لفتح الحضور الثاني للطلبة. إذا لم تنهها، سيفتح الحضور الثاني تلقائيًا قبل نهاية الساعة بعشر دقائق.`,
+          text: `فُتح الحضور الأول لمباحثة «${s.subject_name}» — ${s.group_title}.\nموعد الجلسة: ${new Date(s.opened_at).toLocaleString('ar-IQ',{timeZone:studies.SCHEDULE_TZ})}.\nعند انتهاء المباحثة اضغط الزر لفتح الحضور الثاني للطلبة. إذا لم تنهها، سيفتح الحضور الثاني تلقائيًا قبل نهاية الموعد بـ ${studies.END_ATTENDANCE_MINUTES} دقائق.`,
           extra: buttons('🔚 إنهاء المباحثة وفتح حضور النهاية', `mub_finish:${s.id}`)
         });
       }
@@ -55,9 +55,21 @@ function createScheduler({ pool, studies }) {
     finally { client.release(); }
   }
   async function openEnd(sessionId, automatic = false) {
+    // A delayed scheduler must not prevent a teacher from finishing a current session.
+    if(!automatic)await queueSession(sessionId,'start');
     const opened = await studies.openEndAttendance(sessionId, automatic);
-    if (!opened) return null;
-    return { notified: await queueSession(sessionId, 'end') };
+    if(opened)return {status:'opened',notified:await queueSession(sessionId,'end'),closesAt:opened.end_closes_at};
+    if(automatic)return null;
+    const s=await studies.getSessionById(sessionId);
+    if(!s)return {status:'unavailable',message:'هذه الجلسة غير موجودة. افتح المباحثات الحالية.'};
+    const valid=(await pool.query(`SELECT 1 FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id
+      WHERE g.id=$1 AND g.is_active=true AND ss.is_active=true AND participation_enabled(g.subject_id,g.stage_season_id)`,[s.group_id])).rows[0];
+    if(!valid)return {status:'unavailable',message:'المجموعة أو الموسم غير نشط، أو المادة غير مشمولة بالمباحثات.'};
+    if(s.attendance_reopened_at)return {status:'unavailable',message:'هذه الجلسة أُعيد فتح حضورها من الإدارة؛ استخدم أزرار فرصة الحضور الإضافية.'};
+    if(s.end_opened_at&&new Date(s.end_closes_at)>new Date())return {status:'already_open',notified:await queueSession(sessionId,'end'),closesAt:s.end_closes_at};
+    if(new Date(s.closes_at)<=new Date())return {status:'unavailable',message:`انتهت مهلة هذه المباحثة في ${new Date(s.closes_at).toLocaleString('ar-IQ',{timeZone:studies.SCHEDULE_TZ})}. هذا زر جلسة سابقة؛ لا يفتح حضورًا جديدًا.`};
+    if(s.is_closed)return {status:'unavailable',message:'هذه الجلسة مغلقة. راجع الإدارة إذا كان الإغلاق بالخطأ.'};
+    return {status:'unavailable',message:`يمكن فتح حضور النهاية بعد بدء حضور البداية (${studies.START_ATTENDANCE_DELAY_MINUTES} دقائق من بداية الموعد). حاول عند حلول الوقت.`};
   }
   async function queueSlotDecisionNotice(slotId, scheduledDate, decision, reason = null) {
     const client = await pool.connect();
@@ -83,6 +95,11 @@ function createScheduler({ pool, studies }) {
         : `🕓 تم تأجيل مباحثة مادة «${slot.subject_name}» للمرحلة «${slot.stage_name}» — ${slot.group_title}.`+
           (effectiveReason?`\nالسبب: ${effectiveReason}`:'');
       const payload=JSON.stringify([text,{}]);
+      const eligible=await client.query(`SELECT COUNT(DISTINCT st.id)::int AS n FROM group_memberships m
+        JOIN students st ON st.id=m.student_id AND st.is_active=true
+        JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=m.stage_season_id AND e.status='active'
+        JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=m.subject_id
+          AND pm.stage_season_id=m.stage_season_id AND pm.mode='mubahatha' WHERE m.group_id=$1`,[slot.group_id]);
       const inserted=await client.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
         SELECT $1||':'||st.telegram_id::text,st.telegram_id,$2::jsonb,$3
         FROM group_memberships m
@@ -94,7 +111,7 @@ function createScheduler({ pool, studies }) {
         ON CONFLICT(dedupe_key) DO NOTHING RETURNING id`,
         [`slot:${slot.id}:${scheduledDate}:${decision}`,payload,slot.expires_at,slot.group_id]);
       await client.query('COMMIT');
-      return {notified:inserted.rowCount,subjectName:slot.subject_name,stageName:slot.stage_name,groupTitle:slot.group_title};
+      return {notified:inserted.rowCount,eligible:Number(eligible.rows[0].n),subjectName:slot.subject_name,stageName:slot.stage_name,groupTitle:slot.group_title};
     } catch(err) { await client.query('ROLLBACK'); throw err; }
     finally { client.release(); }
   }

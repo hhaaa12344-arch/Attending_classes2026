@@ -256,10 +256,14 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         }
         else if((m=/^\/leaves\/(\d+)\/decision$/.exec(route))&&req.method==='POST'){
           if(typeof body.approve!=='boolean')throw appError('حدد الموافقة أو الرفض.');
-          const id=positiveInt(m[1]);result=await db.decideLeave(id,body.approve,actor.id);
+          const id=positiveInt(m[1]);result=await db.decideLeave(id,body.approve,actor.id,{exceptionApproval:body.exceptionApproval===true});
           if(!result)throw appError('سبق اتخاذ قرار في الطلب. حدّث الصفحة.','CONFLICT',409);
-          const st=await db.getStudentById(result.student_id);
-          if(st)await enqueueNotification(db.pool,{key:`leave:${id}:decision`,chatId:st.telegram_id,text:body.approve?'✅ تمت الموافقة على إجازتك.':'لم تتم الموافقة على طلب الإجازة. راجع الإدارة عند الحاجة.'});
+        }
+        else if((m=/^\/leaves\/(\d+)$/.exec(route))&&req.method==='PATCH'){
+          result=await db.adjustLeave(positiveInt(m[1]),{days:body.days,expectedDays:body.expectedDays,expectedStatus:body.expectedStatus},actor.id);
+        }
+        else if((m=/^\/leaves\/(\d+)\/cancel$/.exec(route))&&req.method==='POST'){
+          result=await db.adjustLeave(positiveInt(m[1]),{cancel:true,expectedDays:body.expectedDays,expectedStatus:body.expectedStatus},actor.id);
         }
         else if((m=/^\/stages\/(\d+)\/registration-visibility$/.exec(route))&&req.method==='PATCH'){
           const id=positiveInt(m[1]);
@@ -291,8 +295,8 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           result={queued:true};
         }
         else if((m=/^\/sessions\/(\d+)\/end$/.exec(route))&&req.method==='POST'){
-          result=await scheduler.openEnd(positiveInt(m[1]));if(!result)throw appError('الجلسة أُغلقت مسبقًا أو انتهت مهلتها.','CONFLICT',409);
-          await audit(actor.id,'end_session','session',Number(m[1]),null,result);
+          result=await scheduler.openEnd(positiveInt(m[1]));if(!result||result.status==='unavailable')throw appError(result?.message||'انتهت مهلة الجلسة.','CONFLICT',409);
+          if(result.status==='opened')await audit(actor.id,'end_session','session',Number(m[1]),null,result);
         }
         else if(route==='/stages'&&req.method==='POST'){
           if(typeof body.name!=='string'||body.name.trim().length<2||body.name.length>100)throw appError('اسم المرحلة غير صالح.');
