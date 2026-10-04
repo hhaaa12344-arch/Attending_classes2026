@@ -5,7 +5,7 @@ const date=value=>value?new Date(value).toLocaleDateString('ar-IQ',{timeZone:'As
 const stamp=value=>value?new Date(value).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad'}):'—';
 const baghdadIso=value=>{const d=new Date(value);return Number.isNaN(d.getTime())?'':new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(d);};
 const labels={pending:'بانتظار القرار',approved:'معتمدة',rejected:'مرفوضة',ended:'منتهية',cancelled:'ملغاة',sent:'أُرسلت',sending:'قيد الإرسال',failed:'تعذّر إرسالها',expired:'انتهت المهلة',draft:'مسودة',published:'منشور'};
-const actionLabels={change_participation_mode:'تغيير متابعة مادة للطالب',participation_settings:'إعدادات المباحثات والتقارير',update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',update_group:'تعديل مجموعة',assign_teacher:'إسناد أستاذ',unassign_teacher:'إلغاء إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',set_lesson_schedule:'إضافة موعد نشر في جدول الدروس',remove_lesson_schedule:'إزالة موعد نشر من جدول الدروس',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',exam_cancel:'إلغاء امتحان وإشعار الطلبة',remove_question:'حذف سؤال',create_teacher:'إضافة أستاذ',update_teacher:'تعديل أستاذ',toggle_teacher:'تفعيل/إيقاف أستاذ',regenerate_code:'توليد كود ربط',reopen_lesson:'إعادة فتح درس',mark_all_present:'تحضير جميع الطلبة',cancel_lesson:'إلغاء تفعيل درس',unlink_channel:'فكّ ربط قناة',reopen_session:'إعادة فتح مباحثة','mark-all_session':'تحضير طلبة مباحثة',cancel_session:'حذف مباحثة'};
+const actionLabels={cancel_leave:'إلغاء إجازة وتصحيح الرصيد والغياب',reduce_leave:'تقليل أيام الإجازة',change_participation_mode:'تغيير متابعة مادة للطالب',participation_settings:'إعدادات المباحثات والتقارير',update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',update_group:'تعديل مجموعة',assign_teacher:'إسناد أستاذ',unassign_teacher:'إلغاء إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',set_lesson_schedule:'إضافة موعد نشر في جدول الدروس',remove_lesson_schedule:'إزالة موعد نشر من جدول الدروس',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',exam_cancel:'إلغاء امتحان وإشعار الطلبة',remove_question:'حذف سؤال',create_teacher:'إضافة أستاذ',update_teacher:'تعديل أستاذ',toggle_teacher:'تفعيل/إيقاف أستاذ',regenerate_code:'توليد كود ربط',reopen_lesson:'إعادة فتح درس',mark_all_present:'تحضير جميع الطلبة',cancel_lesson:'إلغاء تفعيل درس',unlink_channel:'فكّ ربط قناة',reopen_session:'إعادة فتح مباحثة','mark-all_session':'تحضير طلبة مباحثة',cancel_session:'حذف مباحثة'};
 const entityLabels={student:'طالب',stage:'مرحلة',subject:'مادة',group:'مجموعة',leave:'إجازة',report:'تقرير',session:'مباحثة',slot:'موعد',exam:'امتحان',question:'سؤال',teacher:'أستاذ',assignment:'إسناد',lesson_schedule:'جدول الدروس',lesson:'درس',channel:'قناة'};
 actionLabels['retry-notifications_session']='إعادة محاولة إشعار المباحثة';
 actionLabels.selected_discussion_attendance='حضور إداري لطلبة محددين في المباحثة';
@@ -212,12 +212,19 @@ async function renderStage(){
   }
   if(n===sequence)setContent(stageHeader()+body);
 }
+function leaveActions(l,ro=false,profileId=null){
+  if(ro)return '—';
+  const attrs=`data-id="${l.id}" data-days="${l.days}" data-status="${esc(l.status)}" data-profile="${profileId||''}"`;
+  let html=l.status==='pending'?button(l.is_exception?'موافقة استثنائية':'موافقة','leave',`${attrs} data-approve="true" data-exception="${Boolean(l.is_exception)}"`)+button('رفض','leave',`${attrs} data-approve="false"`):'';
+  if(['pending','approved','ended'].includes(l.status))html+=(Number(l.days)>1?button('تقليل الأيام','leave-reduce',attrs):'')+button('إلغاء الإجازة','leave-cancel-admin',attrs,'danger');
+  return html;
+}
 async function leavesContent(stageId,ro=false){
   const data=await api('/leaves?'+new URLSearchParams({page,status:filters.leaveStatus||'pending',...(stageId?{stageId}:{})}));
   return `<form id="leave-filter" class="toolbar"><label>حالة الطلب<select name="leaveStatus">${['pending','approved','ended','rejected','cancelled','all'].map(v=>`<option value="${v}" ${v===(filters.leaveStatus||'pending')?'selected':''}>${labels[v]||'الجميع'}</option>`).join('')}</select></label><button>عرض</button></form>`+
-    table(['الطالب / المرحلة','الفترة','الأيام','الحالة','القرار'],data.rows.map(l=>[`${esc(l.full_name)}<div class="subtle">${esc(l.stage_name)}</div>`,`${date(l.start_date)} — ${date(l.end_date)}`,esc(l.days),esc(labels[l.status]),(!ro&&l.status==='pending'?button('موافقة','leave',`data-id="${l.id}" data-approve="true"`)+button('رفض','leave',`data-id="${l.id}" data-approve="false"`):'')+button('رد برسالة','contact-student',`data-id="${l.student_id}" data-name="${esc(l.full_name)}" data-telegram="${esc(l.telegram_id||'')}" data-context-kind="leave" data-context-id="${l.id}"`)]))+pager(data.total);
+    table(['الطالب / المرحلة','الفترة / نوع الطلب','الأيام','الحالة','الإجراء'],data.rows.map(l=>[`${esc(l.full_name)}<div class="subtle">${esc(l.stage_name)}</div>`,`${date(l.start_date)} — ${date(l.end_date)}<div class="subtle">${l.is_exception?'⚠️ استثناء طارئ من الضوابط':'إجازة اعتيادية'}</div>${l.reason?`<div class="report-note">السبب: ${esc(l.reason)}</div>`:''}`,esc(l.days),esc(labels[l.status]),leaveActions(l,ro)+button('رد برسالة','contact-student',`data-id="${l.student_id}" data-name="${esc(l.full_name)}" data-telegram="${esc(l.telegram_id||'')}" data-context-kind="leave" data-context-id="${l.id}"`)]))+pager(data.total);
 }
-async function allLeaves(){view='leaves';currentStage=null;setNav('all-leaves');$('#breadcrumb').textContent='المعهد / طلبات الإجازة';const n=++sequence;const html=await leavesContent(null);if(n===sequence)setContent(head('طلبات الإجازة','جميع المراحل · الحد الأقصى عشرة أيام لكل طالب في الموسم')+html);}
+async function allLeaves(){view='leaves';currentStage=null;setNav('all-leaves');$('#breadcrumb').textContent='المعهد / طلبات الإجازة';const n=++sequence;const html=await leavesContent(null);if(n===sequence)setContent(head('طلبات الإجازة','الرصيد الاعتيادي عشرة أيام للموسم. الاستثناءات الطارئة تتطلب موافقة استثنائية. يمكن تقليل الأيام أو إلغاء الإجازة مع تصحيح الرصيد والغياب.')+html);}
 async function loadStudentContact(){
   view='student-contact';currentStage=null;setNav('student-contact');$('#breadcrumb').textContent='المعهد / التواصل مع طالب معين';
   const seq=++sequence,result=await api('/student-contact?'+new URLSearchParams({q:contactQuery,page:contactPage}));
@@ -308,7 +315,7 @@ async function renderScheduleMatrix(){
 function dialog(title,html){if(busy&&dismissedWhileBusy)return;clearNotice();$('#dialog-title').textContent=title;$('#dialog-body').innerHTML=html;if(!$('#detail').open)$('#detail').showModal();}
 async function showStudent(id){
   const n=++dialogSequence;const st=await api('/students/'+id);if(n!==dialogSequence)return;currentStudent=st;const ro=Boolean(currentStage?.is_historical);
-  const budget=st.activity?.approvedLeaveDays||0;const pending=st.leaves.filter(l=>l.status==='pending'&&l.stage_season_id===st.activity?.stageSeasonId).reduce((sum,l)=>sum+Number(l.days),0);
+  const budget=st.activity?.approvedLeaveDays||0;const pending=st.leaves.filter(l=>l.status==='pending'&&!l.is_exception&&l.stage_season_id===st.activity?.stageSeasonId).reduce((sum,l)=>sum+Number(l.days),0);
   dialog(st.full_name,`<p class="subtle">${esc(st.stage_name)} · ${st.is_active?'نشط':'مؤرشف'} · ${st.official_confirmed_at?'أكّد التسجيل الرسمي':'لم يؤكد التسجيل الرسمي'}${ro?' · عرض بيانات موسم أرشيفي':''}</p>`+
     button('💬 التواصل مع هذا الطالب','contact-student',`data-id="${st.id}" data-name="${esc(st.full_name)}" data-telegram="${esc(st.telegram_id||'')}"`)+
     (ro?'':`<form id="edit-student"><label>الاسم الرباعي<input name="fullName" value="${esc(st.full_name)}" maxlength="200" required></label><div class="form-actions"><button class="primary">حفظ الاسم</button>${button(st.is_active?'أرشفة الطالب':'إعادة تفعيل الطالب','archive',`data-id="${st.id}" data-active="${!st.is_active}"`,st.is_active?'danger':'')}</div></form>`+
@@ -317,7 +324,7 @@ async function showStudent(id){
     `<section class="detail-section"><h3>تنظيم المباحثات حسب المادة</h3>${st.groups.map(g=>`<p>${esc(g.subject_name)}: ${esc(g.group_title)}${g.group_number?' · رقم '+esc(g.group_number):''} ${modeTag(g.mode)}</p>`).join('')||'<p>لم يُوزّع بعد.</p>'}${!ro&&currentStage?.discussion_grouping!==false&&currentStage?.groups.length?`<form id="move-group" class="toolbar"><label>توحيد رقم المجموعة في جميع المواد<select name="groupId" required>${groupOptions(currentStage.groups.filter(g=>currentStage.subjects.find(sub=>sub.id===g.subject_id)?.participation_enabled!==false),'','اختر مباحثة المادة')}</select></label><button>حفظ المجموعة</button></form>`:''}<p class="subtle">في المراحل المقسمة، اختيار المجموعة يوحّد رقم مباحثات الطالب في مواده لهذا الموسم. لا يؤثر ذلك في حضور الدروس. لا تتغير التقارير السابقة؛ تبدأ أهلية الحضور من وقت النقل في المجموعات التي تغيّرت فقط.</p></section>`+
     `<section class="detail-section"><h3>المتغيرات في الموسم الحالي</h3><div class="summary"><div><b>${budget}/10</b>إجازات معتمدة</div><div><b>${pending}</b>أيام محجوزة لطلبات معلقة</div><div><b>${Math.max(0,10-budget-pending)}</b>أيام متبقية</div></div>${st.activity?.warnings?.length?`<p>التنبيهات المستلمة: ${st.activity.warnings.length}</p>`:''}</section>`+
     `<section class="detail-section"><h3>حضور الدروس في الموسم الحالي</h3>${table(['المادة','الحضور','عدد الدروس'],st.attendance.map(r=>[esc(r.subject_name),esc(r.attended_lessons),esc(r.total_lessons)]))}</section>`+
-    `<section class="detail-section"><h3>آخر 100 طلب إجازة، بما فيها المواسم السابقة</h3>${table(['البداية','النهاية','الأيام','الحالة'],st.leaves.map(l=>[date(l.start_date),date(l.end_date),esc(l.days),esc(labels[l.status])]))}</section>`);
+    `<section class="detail-section"><h3>آخر 100 طلب إجازة، بما فيها المواسم السابقة</h3><p class="subtle">الإجازات الاستثنائية المعتمدة في الموسم الحالي: ${st.activity?.exceptionLeaveDays||0} يومًا، خارج الرصيد الاعتيادي.</p>${table(['البداية','النهاية','الأيام / النوع','الحالة','الإجراء'],st.leaves.map(l=>[date(l.start_date),date(l.end_date),`${esc(l.days)} · ${l.is_exception?'استثناء طارئ':'اعتيادية'}${l.reason?'<div class="report-note">'+esc(l.reason)+'</div>':''}`,esc(labels[l.status]),leaveActions(l,ro,st.id)]))}</section>`);
 }
 async function newForm(kind){
   const id=++dialogSequence;
@@ -648,13 +655,18 @@ document.addEventListener('click',async event=>{
     else if(a==='delete-exam'){if(!await confirmAction('حذف الامتحان وأسئلته؟'))return;busy=true;await api('/exams/'+target.dataset.id+'/delete',{},'POST');closeDetail();await refresh();notify('حُذف الامتحان.');}
     else if(a==='publish-exam'){if(!await confirmAction('نشر الامتحان وإرسال إشعارات للطلبة؟ تصبح أسئلته محمية من التعديل.'))return;busy=true;await api('/exams/'+currentExam.id+'/publish',{},'POST');await showExam(currentExam.id);notify('نُشر الامتحان وحُفظت إشعارات الطلبة للإرسال.');}
     else if(a==='leave'){
-      if(!await confirmAction(target.dataset.approve==='true'?'الموافقة على طلب الإجازة؟':'رفض طلب الإجازة؟'))return;
-      busy=true;await api('/leaves/'+target.dataset.id+'/decision',{approve:target.dataset.approve==='true'},'POST');notify('حُفظ القرار.');await refresh();
+      if(!await confirmAction(target.dataset.approve==='true'?(target.dataset.exception==='true'?'الموافقة استثنائيًا على هذا الطلب الطارئ خارج الأيام العشرة؟':'الموافقة على طلب الإجازة؟'):'رفض طلب الإجازة؟'))return;
+      busy=true;await api('/leaves/'+target.dataset.id+'/decision',{approve:target.dataset.approve==='true',exceptionApproval:target.dataset.exception==='true'},'POST');await refresh();if(target.dataset.profile)await showStudent(target.dataset.profile);notify('حُفظ القرار.');
+    }else if(a==='leave-reduce'){
+      dialog('تقليل أيام الإجازة',`<p>المدة الحالية ${Number(target.dataset.days)} يومًا. تبقى البداية نفسها وتقصّر النهاية تلقائيًا. يُصحح الرصيد والغياب ويُشعَر الطالب.</p><form id="reduce-leave" data-id="${target.dataset.id}" data-days="${target.dataset.days}" data-status="${esc(target.dataset.status)}" data-profile="${target.dataset.profile||''}"><label>عدد الأيام الجديد<input name="days" type="number" min="1" max="${Number(target.dataset.days)-1}" step="1" required></label><div class="form-actions"><button class="primary" type="submit">حفظ تقليل الأيام</button>${button('إلغاء','close-dialog')}</div></form>`);
+    }else if(a==='leave-cancel-admin'){
+      if(!await confirmAction('إلغاء الإجازة بالكامل؟ يُعاد الرصيد الاعتيادي وتُراجع أيام الغياب ويُشعَر الطالب.'))return;
+      busy=true;await api('/leaves/'+target.dataset.id+'/cancel',{expectedDays:Number(target.dataset.days),expectedStatus:target.dataset.status},'POST');await refresh();if(target.dataset.profile)await showStudent(target.dataset.profile);notify('ألغيت الإجازة وصُحح الرصيد والغياب.');
     }else if(a==='archive'){
       if(!await confirmAction(target.dataset.active==='true'?'إعادة تفعيل الطالب؟':'أرشفة الطالب مع الاحتفاظ بسجله؟'))return;
       busy=true;await api('/students/'+target.dataset.id,{active:target.dataset.active==='true'},'PATCH');closeDetail();await refresh();notify('حُفظت حالة الطالب.');
     }else if(a==='end-session'){
-      if(!await confirmAction('إنهاء هذه المباحثة وفتح الحضور الثاني؟'))return;busy=true;await api('/sessions/'+target.dataset.id+'/end',{},'POST');await refresh();notify('فُتح الحضور الثاني وحُفظت إشعارات الطلبة للإرسال.');
+      if(!await confirmAction('إنهاء هذه المباحثة وفتح الحضور الثاني؟'))return;busy=true;const result=await api('/sessions/'+target.dataset.id+'/end',{},'POST');await refresh();notify(result.status==='already_open'?'حضور النهاية مفتوح بالفعل؛ لم تتغير مهلته.':'فُتح الحضور الثاني وحُفظت إشعارات الطلبة للإرسال.');
     }else if(a==='report'){
       const r=window.currentReports.find(x=>String(x.id)===target.dataset.id);if(!r)return;
       dialog('مراجعة التقرير',`<h3>${esc(r.full_name)} — ${esc(r.subject_name)}</h3><p>${esc(r.group_title_snapshot||'سجل قديم بلا مجموعة موثقة')} · ${stamp(r.submitted_at)}</p><div class="report-note">${esc(r.note||'التقرير مرفق كملف.')}</div>${button('إرسال المرفق إلى حسابي في البوت','report-send',`data-id="${r.id}"`)}${button('التواصل مع الطالب','contact-student',`data-id="${r.student_id}"`)}<form id="grade-report" data-id="${r.id}" class="detail-section"><label>درجة التقرير من 15<input name="score" type="number" min="0" max="15" step="0.01" value="${esc(r.score??'')}" required></label><div class="form-actions"><button class="primary">حفظ التقييم</button></div></form>`);
@@ -905,6 +917,10 @@ document.addEventListener('submit',async event=>{
     }
     else if(form.id==='search'){filters={...filters,...body};page=0;await renderStage();}
     else if(form.id==='leave-filter'){filters.leaveStatus=body.leaveStatus;page=0;await refresh();}
+    else if(form.id==='reduce-leave'){
+      if(!await confirmAction(`تقليل الإجازة من ${Number(form.dataset.days)} إلى ${Number(body.days)} يومًا؟ تُراجع الأيام التي حُذفت من الإجازة لاحتساب الغياب.`))return;
+      await api('/leaves/'+form.dataset.id,{days:Number(body.days),expectedDays:Number(form.dataset.days),expectedStatus:form.dataset.status},'PATCH');closeDetail();await refresh();if(form.dataset.profile)await showStudent(form.dataset.profile);notify('قُلّلت الأيام وصُحح الرصيد والغياب.');
+    }
     else if(form.id==='report-filter'){filters.groupId=body.groupId;page=0;await renderStage();}
     else if(form.id==='matrix-slot'){await api('/schedule',body,'POST');closeDetail();await renderScheduleMatrix();notify('حُفظ موعد المباحثة.');}
     else if(form.id==='edit-student'){await api('/students/'+currentStudent.id,{...body,expectedName:currentStudent.full_name},'PATCH');closeDetail();await refresh();notify('حُفظ اسم الطالب.');}
