@@ -174,7 +174,7 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
           WHERE ms.id=$1 AND ta.teacher_id=$2`,[sessionId,actor.teacherId])).rows[0];
         if(!allowed)throw appError('هذه الجلسة ليست ضمن صلاحياتك.','FORBIDDEN',403);
         result=await scheduler.openEnd(sessionId);
-        if(!result)throw appError('حضور النهاية مفتوح مسبقًا أو الجلسة غير موجودة.','CONFLICT',409);
+        if(!result||result.status==='unavailable')throw appError(result?.message||'تعذّر فتح حضور النهاية لهذه الجلسة.','CONFLICT',409);
       }
       else if((m=/^\/reports\/(\d+)\/score$/.exec(route))){
         const reportId=positiveInt(m[1]);

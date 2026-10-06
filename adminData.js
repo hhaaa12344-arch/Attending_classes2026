@@ -71,6 +71,8 @@ function createAdminData(db, studies) {
     const total = Number((await pool.query(`SELECT COUNT(*) AS n ${where}`,args)).rows[0].n);
     const rows = (await pool.query(`SELECT st.id,st.full_name,st.telegram_id,st.stage_id,sg.name AS stage_name,st.is_active,
       st.official_confirmed_at,
+      CASE WHEN st.is_active THEN (SELECT COUNT(*) FROM students o WHERE o.id<>st.id AND o.is_active
+        AND student_name_key(o.full_name)=student_name_key(st.full_name))::int ELSE 0 END AS same_name_active_others,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('subject',sub.name,'group',CASE WHEN ss.discussion_grouping THEN g.title ELSE 'المرحلة كاملة' END,'group_id',g.id,'group_number',CASE WHEN ss.discussion_grouping THEN g.group_number END,'mode',pm.mode) ORDER BY sub.name)
         FROM group_memberships gm JOIN mubahatha_groups g ON g.id=gm.group_id
         JOIN subjects sub ON sub.id=gm.subject_id JOIN stage_seasons ss ON ss.id=gm.stage_season_id

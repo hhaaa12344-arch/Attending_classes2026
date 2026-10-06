@@ -11,6 +11,7 @@ const scheduledPublication = require('./scheduledPublication').createScheduledPu
 const stageCorrections = require('./stageCorrections').createStageCorrections(db);
 const adminData = require('./adminData').createAdminData(db, studies);
 const scheduler = require('./scheduler').createScheduler({pool:db.pool,studies});
+const duplicateStudents = require('./duplicateStudents').createDuplicateStudents(db.pool);
 const {editDiscussionMessage,answerDiscussionCallback,endAttendanceMessage}=require('./discussionFlow');
 const studentReminders = require('./studentReminders');
 const { randomUUID } = require('node:crypto');
@@ -445,7 +446,7 @@ function adminMainMenu() {
   return Markup.keyboard(rows.map((row) => row.map((text) => replyButton(text)))).resize().persistent();
 }
 
-function studentActionsKeyboard(studentId, isActive = true) {
+function studentActionsKeyboard(studentId, isActive = true, extraRows = []) {
   const rows = [
     [callbackButton('💬 التواصل مع هذا الطالب', `contact:select:admin:${studentId}:0`)],
     [callbackButton('✏️ تعديل الاسم', `stu_edit_name:${studentId}`)],
@@ -463,6 +464,7 @@ function studentActionsKeyboard(studentId, isActive = true) {
     rows.push([callbackButton('♻️ إعادة تفعيل الطالب', `stu_restore:${studentId}`)]);
   }
   rows.push([callbackButton('🗑️ حذف نهائي (مع كل بياناته)', `stu_hard_confirm:${studentId}`)]);
+  rows.unshift(...extraRows);
   return Markup.inlineKeyboard(rows);
 }
 
@@ -3175,6 +3177,7 @@ async function openStudentManagement(ctx) {
     registrationOpen ? 'danger' : 'success'
   )]);
   rows.push([callbackButton('🔎 البحث في جميع الطلبة', 'students_search:0')]);
+  rows.push([callbackButton('🧬 أسماء مكررة', 'students_duplicates:0')]);
   rows.push([callbackButton('📣 تنويه لجميع الطلبة ذوي الإجراءات الناقصة', 'students_remind_all')]);
   return ctx.reply(
     `إدارة الطلبة\nحالة الانضمام الجديد: ${registrationOpen?'🟢 مفتوح':'🔴 متوقف'}\n\nاختر المرحلة أو الإجراء المطلوب:`,
@@ -3182,9 +3185,22 @@ async function openStudentManagement(ctx) {
   );
 }
 
+// نص زر الطالب في القوائم: الاسم ثم آخر 4 أرقام من معرّف تليجرام ثم عدد المجموعات ثم المرحلة. تقطع تليجرام النص من آخره،
+// فتبقى الفروق بين السجلات المتشابهة ظاهرة. ⚠️ = يوجد سجل نشط آخر بالاسم نفسه.
+function studentListLabel(s) {
+  const tail = String(s.telegram_id).slice(-4);
+  const groups = (s.groups || []).length ? `${s.groups.length} مجموعة` : 'بلا مجموعات';
+  return `${s.is_active ? '' : '🗄️ '}${s.same_name_active_others ? '⚠️ ' : ''}${s.full_name} · …${tail} · ${groups} · ${s.stage_name}`;
+}
+function duplicateTwinsText(twins) {
+  if (!twins.length) return '';
+  return `\n\n⚠️ سجلات أخرى بالاسم نفسه (${twins.length}):\n` +
+    twins.map((t) => `• ${t.is_active ? 'نشط' : 'مؤرشف'} — ${t.stage_name} — معرّف تليجرام ${t.telegram_id} — ${t.groups_count} مجموعة، ${t.activity_count} سجل حضور`).join('\n') +
+    '\nقد يكون الشخص نفسه سجّل من حساب آخر. قارن السجلات وأرشف الفارغ منها بعد مراجعته؛ لا يوجد دمج تلقائي.';
+}
 async function showStageStudents(ctx, stageId, page = 0, q = '') {
   const data = await adminData.students({ stageId:stageId || null, page, q, status:'all' });
-  const rows = data.rows.map(s => [callbackButton(limitButtonText(`${s.is_active ? '' : '🗄️ '}${s.full_name} — ${s.groups.map(g=>g.subject+': '+g.group).join('، ') || s.stage_name}`), `stu_select:${s.id}`)]);
+  const rows = data.rows.map(s => [callbackButton(limitButtonText(studentListLabel(s)), `stu_select:${s.id}`)]);
   const nav=[];
   if (page>0) nav.push(callbackButton('السابق', `students_page:${stageId}:${page-1}`));
   if ((page+1)*data.size<data.total) nav.push(callbackButton('التالي', `students_page:${stageId}:${page+1}`));
@@ -3356,6 +3372,26 @@ bot.action(/stu_remind:(\d+)/, async (ctx) => {
   }
 });
 
+bot.action(/^students_duplicates:(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();
+  const data = await duplicateStudents.clusters({ page: Number(ctx.match[1]), size: 4 });
+  const back = [callbackButton('↩️ المراحل', 'admin_students')];
+  if (!data.total) {
+    return editStudentScreen(ctx, '🧬 لا توجد أسماء مكررة بين الطلبة النشطين.', Markup.inlineKeyboard([back]));
+  }
+  const lines = data.rows.map((c, i) => `${data.page * data.size + i + 1}) ${c.members[0].full_name}\n` + c.members.map((m) =>
+    `   • …${String(m.telegram_id).slice(-4)} — ${m.stage_name} — ${m.groups_count} مجموعة، ${m.activity_count} سجل حضور`).join('\n'));
+  const buttons = data.rows.flatMap((c) => c.members.map((m) => [callbackButton(
+    limitButtonText(`👁️ ${m.full_name} · …${String(m.telegram_id).slice(-4)} · ${m.stage_name}`), `stu_select:${m.id}`)]));
+  const nav = [];
+  if (data.page > 0) nav.push(callbackButton('◀️ السابق', `students_duplicates:${data.page - 1}`));
+  if ((data.page + 1) * data.size < data.total) nav.push(callbackButton('التالي ▶️', `students_duplicates:${data.page + 1}`));
+  return editStudentScreen(ctx,
+    `🧬 أسماء مكررة بين الطلبة النشطين (${data.total})\nقد يكون الشخص نفسه سجّل من حسابين. افتح كل سجل وقارن الحضور والمجموعات ثم أرشف الفارغ.\n\n${lines.join('\n\n')}`,
+    Markup.inlineKeyboard([...buttons, ...(nav.length ? [nav] : []), back]));
+});
+
 bot.action(/stu_select:(\d+)/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
   const studentId = Number(ctx.match[1]);
@@ -3370,10 +3406,12 @@ bot.action(/stu_select:(\d+)/, async (ctx) => {
     ? await db.getStudentSeasonReport(studentId, activity.stageSeasonId, ATTENDANCE_TIME_ZONE)
     : [];
   const groups=await studies.listStudentGroups(studentId);
+  const twins=await duplicateStudents.twins(studentId);
   return ctx.reply(
-    formatAdminStudentDetails(student, activity, attendanceRows)+'\n\n👥 المجموعات حسب المادة:\n'+
-      (groups.map(g=>`• ${g.subject_name}: ${g.group_title}`).join('\n')||'لم يُوزع على مجموعات بعد.'),
-    studentActionsKeyboard(studentId, student.is_active)
+    formatAdminStudentDetails(student, activity, attendanceRows)+`\nمعرّف تليجرام: ${student.telegram_id}`+'\n\n👥 المجموعات حسب المادة:\n'+
+      (groups.map(g=>`• ${g.subject_name}: ${g.group_title}`).join('\n')||'لم يُوزع على مجموعات بعد.')+duplicateTwinsText(twins),
+    studentActionsKeyboard(studentId, student.is_active, twins.map((t) => [callbackButton(
+      limitButtonText(`👁️ فتح سجل ${t.is_active ? 'نشط' : 'مؤرشف'} …${String(t.telegram_id).slice(-4)} — ${t.stage_name}`), `stu_select:${t.id}`)]))
   );
 });
 
@@ -6703,10 +6741,12 @@ async function checkConsecutiveAbsence() {
 // تشغيل البوت
 // ---------------------------------------------------------------------------
 bot.catch(async (err, ctx) => {
-  console.error(`خطأ غير معالج في التحديث ${ctx.update.update_id}:`, err);
+  // رقم التحديث يُعرض للمستخدم ويُسجَّل مع الزر المضغوط، فيجد الأدمن السطر في السجلات مباشرة.
+  const trigger = ctx.callbackQuery?.data || ctx.message?.text?.slice(0, 40) || ctx.updateType;
+  console.error(`خطأ غير معالج في التحديث ${ctx.update.update_id} [${trigger}]:`, err);
   try {
     if (ctx.chat && ctx.chat.type === 'private') {
-      await ctx.reply('حدث خطأ غير متوقع. حاول مرة أخرى، وإذا تكرر الخطأ أبلغ الأدمن.');
+      await ctx.reply(`حدث خطأ غير متوقع (رمز ${ctx.update.update_id}). حاول مرة أخرى، وإذا تكرر الخطأ أبلغ الأدمن بهذا الرمز.`);
     }
   } catch (_) {
     // فشل الرد نفسه لا يجب أن يوقف البوت.

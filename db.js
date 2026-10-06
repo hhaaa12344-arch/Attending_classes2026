@@ -86,6 +86,11 @@ async function initSchema() {
 
     CREATE INDEX IF NOT EXISTS idx_subjects_stage ON subjects(stage_id);
     CREATE INDEX IF NOT EXISTS idx_students_stage ON students(stage_id);
+    -- مفتاح مقارنة الأسماء: يتجاهل الفراغات المتكررة وفروق الهمزات والياء والتاء المربوطة (للتنبيه على السجلات المكررة فقط).
+    CREATE OR REPLACE FUNCTION student_name_key(text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
+      SELECT lower(regexp_replace(translate(btrim($1),'أإآٱىةؤئ','اااايهوي'),'\\s+',' ','g'))
+    $fn$;
+    CREATE INDEX IF NOT EXISTS idx_students_name_key ON students(student_name_key(full_name));
     CREATE INDEX IF NOT EXISTS idx_lessons_subject ON lessons(subject_id);
     CREATE INDEX IF NOT EXISTS idx_attendance_student ON attendance(student_id);
     -- فهارس أداء تُسرّع التقارير وفحص الغياب مع تراكم مئات آلاف الصفوف عبر المواسم:
