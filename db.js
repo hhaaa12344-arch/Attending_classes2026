@@ -779,10 +779,40 @@ const getStudentByTelegramId = (telegramId) =>
     )
     .then((r) => r.rows[0]);
 
-async function createStudent(telegramId, fullName, stageId) {
+// مفتاح مقارنة الاسم الرباعي: أول أربعة أسماء بعد توحيد الفراغات والهمزات والياء والتاء المربوطة،
+// فلا يُتجاوز المنع بإضافة اسم خامس أو بمسافة زائدة أو بهمزة مختلفة.
+const NAME_COMPARE_WORDS = 4;
+const nameKeySql = (expr) => `array_to_string((string_to_array(student_name_key(${expr}),' '))[1:${NAME_COMPARE_WORDS}],' ')`;
+
+// الطالب النشط الذي يطابق هذا الاسم الرباعي (السجل المؤرشف لا يمنع التسجيل). يعيد null إن لم يوجد.
+async function findActiveStudentByName(fullName, client = pool) {
+  const r = await client.query(
+    `SELECT st.id, st.full_name, st.stage_id, sg.name AS stage_name
+       FROM students st JOIN stages sg ON sg.id = st.stage_id
+      WHERE st.is_active = true AND ${nameKeySql('st.full_name')} = ${nameKeySql('$1::text')}
+      ORDER BY st.id LIMIT 1`,
+    [fullName]
+  );
+  return r.rows[0] || null;
+}
+
+// options.rejectDuplicateName: تسجيل الطالب بنفسه. يُرفض الاسم المكرر برمز DUPLICATE_NAME، والطريق الوحيد
+// لمن غيّر حسابه هو كود نقل الحساب (transferStudentAccount). الإضافة اليدوية من الأدمن لا تستعمل هذا الخيار.
+async function createStudent(telegramId, fullName, stageId, options = {}) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    if (options.rejectDuplicateName) {
+      // قفل بحسب الاسم يمنع تسجيلين متزامنين بالاسم نفسه من حسابين.
+      await client.query(`SELECT pg_advisory_xact_lock(734226, hashtext(${nameKeySql('$1::text')}))`, [fullName]);
+      const same = await findActiveStudentByName(fullName, client);
+      if (same) {
+        const err = new Error('هذا الاسم مسجَّل مسبقًا في النظام.');
+        err.code = 'DUPLICATE_NAME';
+        err.existing = same;
+        throw err;
+      }
+    }
     const stageSeason = await client.query(
       `SELECT ss.id FROM stage_seasons ss
        JOIN stages st ON st.id=ss.stage_id AND st.is_active=true
@@ -2979,6 +3009,7 @@ module.exports = {
   hardDeleteSubject,
   getStudentByTelegramId,
   createStudent,
+  findActiveStudentByName,
   markWelcomed,
   generateStudentTransferCode,
   transferStudentAccount,

@@ -545,6 +545,29 @@ async function notifyAdmins(text, extra = undefined) {
   return delivered;
 }
 
+// ---- منع تكرار تسجيل الطالب بالاسم الرباعي ----
+// الطريق الوحيد لمن يملك سجلًا قديمًا هو «كود نقل الحساب» الذي يولّده الأدمن (يُستقبل في الخطوة نفسها قبل فحص الاسم).
+const duplicateRegistrationAlertAt = new Map();
+const DUPLICATE_REGISTRATION_ALERT_MS = 30 * 60 * 1000;
+const DUPLICATE_REGISTRATION_TEXT =
+  '⚠️ هذا الاسم مسجَّل مسبقًا في النظام، ولا يمكن تسجيله مرة ثانية.\n\n' +
+  '• إن كان هذا حسابك القديم وغيّرت هاتفك أو حساب تليجرام: اطلب من إدارة المعهد «كود نقل الحساب» ثم أرسله هنا في هذه المحادثة، فينتقل سجلك كاملًا.\n' +
+  '• إن كنت شخصًا آخر يتشابه اسمه مع طالب مسجَّل: تواصل مع إدارة المعهد.';
+async function reportDuplicateRegistration(ctx, fullName, existing) {
+  const now = Date.now();
+  for (const [id, at] of duplicateRegistrationAlertAt) if (now - at > DUPLICATE_REGISTRATION_ALERT_MS) duplicateRegistrationAlertAt.delete(id);
+  if (duplicateRegistrationAlertAt.has(ctx.from.id)) return;
+  duplicateRegistrationAlertAt.set(ctx.from.id, now);
+  const username = ctx.from.username ? ` @${ctx.from.username}` : '';
+  await notifyAdmins(
+    '⚠️ محاولة تسجيل باسم مسجَّل مسبقًا (مُنعت)\n' +
+    `الاسم المُدخل: ${fullName}\n` +
+    `السجل الموجود: ${existing.full_name} — ${existing.stage_name || '—'}\n` +
+    `حساب المحاولة: ${ctx.from.id}${username}\n\n` +
+    'إن كان الطالب نفسه غيّر حسابه فولّد له «كود نقل الحساب» من ملفه ليرسله في البوت. وإن كان شخصًا آخر فلا تفعل شيئًا.'
+  );
+}
+
 function dateOnly(value) {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return String(value || '').slice(0, 10);
@@ -1504,6 +1527,12 @@ bot.on('text', async (ctx, next) => {
     if (fullName.split(/\s+/).length < 4) {
       return ctx.reply('الرجاء إدخال الاسم الرباعي كاملًا (أربعة أسماء على الأقل).', backOnlyMenu());
     }
+    const sameName = await db.findActiveStudentByName(fullName);
+    if (sameName) {
+      // تبقى الحالة awaiting_full_name كي يستطيع إرسال كود النقل مباشرة.
+      await reportDuplicateRegistration(ctx, fullName, sameName);
+      return ctx.reply(DUPLICATE_REGISTRATION_TEXT, backOnlyMenu());
+    }
     const stages = await db.listRegistrationStages();
     if (stages.length === 0) {
       userState.delete(ctx.from.id);
@@ -2034,7 +2063,18 @@ bot.action(/reg_stage:(\d+)/, async (ctx) => {
     await ctx.answerCbQuery('هذه المرحلة محجوبة عن التسجيل الجديد حاليًا.', { show_alert: true });
     return ctx.editMessageText('اختر مرحلتك الدراسية من المراحل المتاحة حاليًا:', stagesKeyboard(availableStages, 'reg_stage'));
   }
-  await db.createStudent(ctx.from.id, state.fullName, stageId);
+  try {
+    await db.createStudent(ctx.from.id, state.fullName, stageId, { rejectDuplicateName: true });
+  } catch (err) {
+    if (err.code === 'DUPLICATE_NAME') {
+      // سباق: سُجّل الاسم بين إدخاله واختيار المرحلة. نعيده لخطوة الاسم ليرسل كود النقل إن كان لديه.
+      userState.set(ctx.from.id, { action: 'awaiting_full_name' });
+      await reportDuplicateRegistration(ctx, state.fullName, err.existing);
+      await ctx.answerCbQuery('هذا الاسم مسجَّل مسبقًا.', { show_alert: true });
+      return ctx.editMessageText(DUPLICATE_REGISTRATION_TEXT);
+    }
+    throw err;
+  }
   userState.delete(ctx.from.id);
   await ctx.answerCbQuery('تم حفظ بيانات التسجيل');
   await ctx.editMessageText('تم حفظ اسمك ومرحلتك بنجاح ✅');
@@ -6761,6 +6801,7 @@ async function main() {
   await instituteLinks.initSchema();
   await initBackupSchema(db.pool);
   await initStudentGuideSchema(db.pool);
+  await require('./publicationFollowup').initSchema(db.pool);
   backups.start();
   console.log('تم تجهيز قاعدة البيانات ✅');
   if(process.env.ADMIN_WEB_ENABLED==='true') {
@@ -6778,6 +6819,11 @@ async function main() {
   const scheduledFallback = require('./scheduledFallback').createScheduledFallback(db);
   if (scheduledFallback.graceMinutes !== null) {
     timers.push(setInterval(() => scheduledFallback.sweepToday().catch((err) => console.error('Schedule fallback failed:', err.message)), 60 * 1000));
+  }
+  // متابعة النشر: تنبيه الأدمن إذا بقيت مواد مجدولة بلا منشور بعد ساعة من أول منشور في اليوم.
+  const publicationFollowup = require('./publicationFollowup').createPublicationFollowup(db, { adminIds: ADMIN_IDS });
+  if (publicationFollowup.minutes !== null) {
+    timers.push(setInterval(() => publicationFollowup.sweepToday().catch((err) => console.error('Publication follow-up failed:', err.message)), 60 * 1000));
   }
   // تنظيف الذاكرة كل خمس دقائق: حالات إدخال منتهية، وسجلات مجموعات قديمة
   timers.push(setInterval(cleanupMemory, 5 * 60 * 1000));
