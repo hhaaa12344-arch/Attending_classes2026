@@ -43,7 +43,7 @@ async function request(path,body,method='POST',authorized=true){
 }
 test('subject correction preserves every attendance row, source and original lesson times; reports follow the new subject',async()=>{
   const f=await fixture();
-  await db.pool.query('INSERT INTO attendance(student_id,lesson_id) VALUES($1,$3),($2,$3)',[f.students[0].id,f.students[1].id,f.lesson.id]);
+  await db.pool.query("INSERT INTO attendance(student_id,lesson_id,marking_kind) VALUES($1,$3,'admin_late'),($2,$3,'admin_late')",[f.students[0].id,f.students[1].id,f.lesson.id]);
   const before=(await db.pool.query('SELECT * FROM attendance WHERE lesson_id=$1 ORDER BY id',[f.lesson.id])).rows;
   await ops.correctSubject(f.lesson.id,{subjectId:f.target.id,expectedSubjectId:f.subject.id},42);
   assert.deepEqual((await db.pool.query('SELECT * FROM attendance WHERE lesson_id=$1 ORDER BY id',[f.lesson.id])).rows,before);

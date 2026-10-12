@@ -15,7 +15,7 @@ test('lesson matrix: live and expired lessons, saved administrative attendance a
  const expired=[];for(let i=0;i<3;i++)expired.push((await db.pool.query(`INSERT INTO lessons(subject_id,stage_season_id,activated_at,active_until)
   VALUES($1,$2,now()-interval '2 days',now()-interval '1 day') RETURNING id`,[subjects[0].id,ss])).rows[0]);
  const open=await db.activateLesson(subjects[0].id,24);
- await db.pool.query(`INSERT INTO attendance(student_id,lesson_id,listened_at) VALUES($1,$2,now()-interval '36 hours'),($1,$3,now()-interval '36 hours'),($1,$4,now()),($1,$5,now())`,[students[0].id,expired[0].id,expired[1].id,expired[2].id,open.id]);
+ await db.pool.query(`INSERT INTO attendance(student_id,lesson_id,listened_at,marking_kind) VALUES($1,$2,now()-interval '36 hours','student'),($1,$3,now()-interval '36 hours','student'),($1,$4,now(),'admin_late'),($1,$5,now(),'student')`,[students[0].id,expired[0].id,expired[1].id,expired[2].id,open.id]);
  await settings.save(ss,{grouped:false,enabledSubjectIds:[]},42);
  const matrix=await data.lessonAttendance({stageId:stage.id});
  assert.equal(matrix.rows.length,3);assert.equal(matrix.subjects.length,3);
