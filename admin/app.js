@@ -119,6 +119,32 @@ async function home(){view='home';currentStage=null;page=0;setNav('home');const 
     </section><div class="section-heading stage-list-heading"><h2>مراحل المعهد</h2><span class="subtle">اختر مرحلة للاطلاع على طلبتها</span></div>`+
     (stages.length?`<div class="cards">${stages.map(s=>`<div class="stage-card-shell ${s.registration_visible===false?'registration-hidden':''}"><button class="stage-card" data-action="stage" data-id="${s.id}"><div><h2>${esc(s.name)}</h2><small>${esc(s.season_name||'لا يوجد موسم نشط')}</small></div><div class="stats"><div><span class="metric">${s.student_count}</span><small>طالب</small></div><div><span class="metric">${s.subject_count}</span><small>مادة</small></div><div><span class="metric">${s.discussion_grouping===false?'—':s.group_count}</span><small>${s.discussion_grouping===false?'دون تقسيم':'مجموعة مباحثة'}</small></div></div><div class="card-footer"><span>${s.is_active?'مرحلة نشطة':'مرحلة مؤرشفة'}</span><span>${s.registration_visible===false?'🚫 محجوبة عن الطلبة الجدد':'👁️ ظاهرة للطلبة الجدد'}</span><span>عرض التفاصيل ←</span></div></button>${!historical&&s.is_active?button(s.registration_visible===false?'👁️ إظهار للطلبة الجدد':'🚫 حجب عن الطلبة الجدد','stage-registration-toggle',`data-id="${s.id}" data-name="${esc(s.name)}" data-visible="${s.registration_visible!==false}"`,s.registration_visible===false?'':'danger'):''}</div>`).join('')}</div>`:empty('لا توجد بيانات لهذا الموسم','اختر موسمًا آخر أو أضف المرحلة الأولى.')));
 }
+let studentSearch={q:'',status:'all'};
+// البحث عن أي طالب في أي مرحلة، ثم فتح ملفه (الدروس غير المسجّل حضورها وتسجيلها إداريًا).
+async function loadStudentSearch(){
+  view='student-search';setNav('student-search');currentStage=null;const n=++sequence;
+  $('#breadcrumb').textContent='المعهد / البحث عن طالب';
+  const q=studentSearch.q.trim();let body;
+  if(q.length>=2){
+    const data=await api('/students?'+new URLSearchParams({q,status:studentSearch.status,page}));
+    if(n!==sequence)return;
+    body=table(['الطالب','المرحلة','الحالة','الإجراء'],data.rows.map(st=>[esc(st.full_name)+(st.same_name_active_others?' <span class="tag">⚠️ اسم مكرر</span>':''),esc(st.stage_name),`<span class="tag ${st.is_active?'ok':''}">${st.is_active?'نشط':'مؤرشف'}</span>`,button('بياناته وحضوره','search-student',`data-id="${st.id}" data-stage="${st.stage_id}"`,'primary')]))+pager(data.total);
+  }else body=empty('ابدأ بكتابة اسم الطالب','اكتب حرفين على الأقل من أي جزء من الاسم. يبحث في جميع مراحل المعهد، ولا تؤثر الهمزة والتاء المربوطة في النتيجة.');
+  setContent(head('البحث عن طالب','ابحث في كل مراحل المعهد، وافتح ملف الطالب لترى الدروس التي لم يُسجَّل حضورها وتسجّلها له.')+
+    `<form id="student-search-form" class="toolbar"><label>اسم الطالب<input name="q" value="${esc(studentSearch.q)}" placeholder="أي جزء من الاسم" maxlength="150" autocomplete="off"></label><label class="compact">الحالة<select name="status">${Object.entries({all:'الجميع',active:'نشطون',archived:'مؤرشفون'}).map(([v,t])=>`<option value="${v}" ${studentSearch.status===v?'selected':''}>${t}</option>`).join('')}</select></label><button class="primary" type="submit">بحث</button></form>`+body);
+}
+// الدروس التي ينقصها حضور الطالب بحسب تقريره نفسه، مع تسجيلها حضورًا إداريًا متأخرًا.
+function missingLessonsSection(data,ro){
+  if(ro||!data)return '';
+  if(!data.season)return `<section class="detail-section"><h3>دروس لم يُسجَّل حضورها</h3><p class="subtle">لا يوجد للطالب تسجيل نشط في موسم حالي، فلا يمكن تسجيل حضور إداري له.</p></section>`;
+  const closed=data.subjects.reduce((n,sub)=>n+sub.lessons.filter(l=>!l.is_open).length,0);
+  const rows=sub=>table(['اختيار','الدرس','نُشر','الحالة'],sub.lessons.map(l=>[`<input type="checkbox" name="lesson" value="${l.id}" aria-label="اختيار الدرس ${l.lesson_number} من ${esc(sub.subject_name)}" ${l.is_open?'disabled':''}>`,`الدرس ${esc(l.lesson_number)} · #${l.id}`,stamp(l.activated_at),l.is_open?`مفتوح حتى ${stamp(l.active_until)} — يسجّل الطالب حضوره بنفسه`:'انتهت مهلته']));
+  return `<section class="detail-section" id="missing-lessons"><h3>دروس لم يُسجَّل حضورها (${data.totalMissing})</h3>`+
+    `<p class="subtle">هذه الدروس هي نقص الطالب في تقرير الحضور الذي يراه (${esc(data.season.season_name)}). حدّد ما تريد تسجيله له كحضور إداري متأخر؛ يُحفظ بوقت التأشير الفعلي واسم المسؤول، ويتغير تقريره وحساب غيابه فورًا.</p>`+
+    (data.totalMissing?`<form id="student-late-form" data-student="${data.student.id}" data-name="${esc(data.student.full_name)}">${data.subjects.map(sub=>`<h4>${esc(sub.subject_name)} <span class="subtle">(${sub.lessons.length})</span></h4>${rows(sub)}`).join('')}`+
+      `<label>ملاحظة (اختياري)<textarea name="note" maxlength="500" placeholder="مثال: استمع إلى الدرس خارج المهلة"></textarea></label><div class="form-actions">${closed?button('تحديد كل الدروس المنتهية','select-all-missing'):''}<button class="primary" type="submit" ${closed?'':'disabled'}>تسجيل الحضور للدروس المحددة</button></div></form>`:`<p>🎉 لا توجد دروس ناقصة؛ حضر الطالب كل دروس تقريره.</p>`)+
+    (data.notCounted?`<p class="subtle">${esc(data.notCounted)} درسًا منشورًا لا يُحتسب عليه لأنه نُشر وانتهى قبل التحاقه أو بعد نقله، فلا يظهر هنا.</p>`:'')+`</section>`;
+}
 let attendanceStageId='',attendanceFilters={q:'',status:'all'};
 async function attendanceHome(){
   view='lesson-attendance';setNav('lesson-attendance');const n=++sequence;
@@ -314,7 +340,7 @@ async function renderScheduleMatrix(){
 }
 function dialog(title,html){if(busy&&dismissedWhileBusy)return;clearNotice();$('#dialog-title').textContent=title;$('#dialog-body').innerHTML=html;if(!$('#detail').open)$('#detail').showModal();}
 async function showStudent(id){
-  const n=++dialogSequence;const st=await api('/students/'+id);if(n!==dialogSequence)return;currentStudent=st;const ro=Boolean(currentStage?.is_historical);
+  const n=++dialogSequence;const [st,missing]=await Promise.all([api('/students/'+id),api('/students/'+id+'/missing-lessons').catch(()=>null)]);if(n!==dialogSequence)return;currentStudent=st;const ro=Boolean(currentStage?.is_historical);
   const budget=st.activity?.approvedLeaveDays||0;const pending=st.leaves.filter(l=>l.status==='pending'&&!l.is_exception&&l.stage_season_id===st.activity?.stageSeasonId).reduce((sum,l)=>sum+Number(l.days),0);
   dialog(st.full_name,`<p class="subtle">${esc(st.stage_name)} · ${st.is_active?'نشط':'مؤرشف'} · ${st.official_confirmed_at?'أكّد التسجيل الرسمي':'لم يؤكد التسجيل الرسمي'}${ro?' · عرض بيانات موسم أرشيفي':''}</p>`+
     button('💬 التواصل مع هذا الطالب','contact-student',`data-id="${st.id}" data-name="${esc(st.full_name)}" data-telegram="${esc(st.telegram_id||'')}"`)+
@@ -323,7 +349,7 @@ async function showStudent(id){
     `<section class="detail-section"><h3>نظام المتابعة لكل مادة</h3><p class="subtle">التغيير يخص المادة المختارة من الآن فصاعدًا. تبقى التقارير والمباحثات والحضور السابق محفوظة.</p>${table(['المادة','نظام المتابعة الحالي','الإجراء'],(st.subjects||[]).map(s=>[esc(s.subject_name),s.participation_enabled===false?'غير مشمولة بالمتابعة':modeTag(s.mode),ro||!st.is_active||s.participation_enabled===false?'—':(s.mode?[s.mode==='report'?'mubahatha':'report']:['report','mubahatha']).map(mode=>button(mode==='report'?'تحويل إلى تقارير':'تحويل إلى مباحثات','student-participation',`data-subject="${s.subject_id}" data-season="${s.stage_season_id}" data-mode="${mode}"`)).join(' ')]))}</section>`+
     `<section class="detail-section"><h3>تنظيم المباحثات حسب المادة</h3>${st.groups.map(g=>`<p>${esc(g.subject_name)}: ${esc(g.group_title)}${g.group_number?' · رقم '+esc(g.group_number):''} ${modeTag(g.mode)}</p>`).join('')||'<p>لم يُوزّع بعد.</p>'}${!ro&&currentStage?.discussion_grouping!==false&&currentStage?.groups.length?`<form id="move-group" class="toolbar"><label>توحيد رقم المجموعة في جميع المواد<select name="groupId" required>${groupOptions(currentStage.groups.filter(g=>currentStage.subjects.find(sub=>sub.id===g.subject_id)?.participation_enabled!==false),'','اختر مباحثة المادة')}</select></label><button>حفظ المجموعة</button></form>`:''}<p class="subtle">في المراحل المقسمة، اختيار المجموعة يوحّد رقم مباحثات الطالب في مواده لهذا الموسم. لا يؤثر ذلك في حضور الدروس. لا تتغير التقارير السابقة؛ تبدأ أهلية الحضور من وقت النقل في المجموعات التي تغيّرت فقط.</p></section>`+
     `<section class="detail-section"><h3>المتغيرات في الموسم الحالي</h3><div class="summary"><div><b>${budget}/10</b>إجازات معتمدة</div><div><b>${pending}</b>أيام محجوزة لطلبات معلقة</div><div><b>${Math.max(0,10-budget-pending)}</b>أيام متبقية</div></div>${st.activity?.warnings?.length?`<p>التنبيهات المستلمة: ${st.activity.warnings.length}</p>`:''}</section>`+
-    `<section class="detail-section"><h3>حضور الدروس في الموسم الحالي</h3>${table(['المادة','الحضور','عدد الدروس'],st.attendance.map(r=>[esc(r.subject_name),esc(r.attended_lessons),esc(r.total_lessons)]))}</section>`+
+    `<section class="detail-section"><h3>حضور الدروس في الموسم الحالي</h3><p class=\"subtle\">الأرقام نفسها التي يراها الطالب في «تقرير الحضور».</p>${table(['المادة','الحضور','عدد الدروس'],st.attendance.map(r=>[esc(r.subject_name),esc(r.attended_lessons),esc(r.total_lessons)]))}</section>`+missingLessonsSection(missing,ro)+
     `<section class="detail-section"><h3>آخر 100 طلب إجازة، بما فيها المواسم السابقة</h3><p class="subtle">الإجازات الاستثنائية المعتمدة في الموسم الحالي: ${st.activity?.exceptionLeaveDays||0} يومًا، خارج الرصيد الاعتيادي.</p>${table(['البداية','النهاية','الأيام / النوع','الحالة','الإجراء'],st.leaves.map(l=>[date(l.start_date),date(l.end_date),`${esc(l.days)} · ${l.is_exception?'استثناء طارئ':'اعتيادية'}${l.reason?'<div class="report-note">'+esc(l.reason)+'</div>':''}`,esc(labels[l.status]),leaveActions(l,ro,st.id)]))}</section>`);
 }
 async function newForm(kind){
@@ -588,7 +614,7 @@ async function loadChannels(){
     '<div class="empty" style="text-align:right;margin-bottom:1.2rem"><p style="margin:0"><b>طريقة الحسم:</b> أرسل ملفًا صوتيًا أو #هاشتاغ في القناة المشكوك بها، ثم اضغط «إعادة الفحص الآن». إذا ظهر وقت المنشور هنا فالبوت استلمه، وستظهر نتيجة المعالجة وسبب عدم التفعيل. إذا لم يتغير «آخر منشور» فالمشكلة قبل قاعدة البيانات/منطق الدرس، أي في وصول تحديث القناة إلى البوت أو صلاحياته.</p></div>'+
     '<h2>الفحص العميق للقنوات</h2>'+deepBody+'<h2>تنبيهات — منشورات لم تُفعِّل دروسًا</h2>'+alertsBody+'<h2>إدارة القنوات المرتبطة</h2>'+channelsBody);
 }
-async function refresh(){if(view==='student-contact')return loadStudentContact();if(view==='lesson-attendance')return attendanceHome();if(view==='stage'){currentStage=await api('/stages/'+currentStage.id+(currentSeasonId?'?seasonId='+currentSeasonId:''));return renderStage();}if(view==='leaves')return allLeaves();if(view==='teachers')return loadTeachers();if(view==='schedule-matrix')return loadScheduleMatrix();if(view==='lesson-schedule')return loadLessonSchedule();if(view==='lesson-management')return loadLessonManagement();if(view==='channels')return loadChannels();return home();}
+async function refresh(){if(view==='student-search')return loadStudentSearch();if(view==='student-contact')return loadStudentContact();if(view==='lesson-attendance')return attendanceHome();if(view==='stage'){currentStage=await api('/stages/'+currentStage.id+(currentSeasonId?'?seasonId='+currentSeasonId:''));return renderStage();}if(view==='leaves')return allLeaves();if(view==='teachers')return loadTeachers();if(view==='schedule-matrix')return loadScheduleMatrix();if(view==='lesson-schedule')return loadLessonSchedule();if(view==='lesson-management')return loadLessonManagement();if(view==='channels')return loadChannels();return home();}
 $('#detail').addEventListener('cancel',()=>{dismissedWhileBusy=busy;dialogSequence++;});
 document.addEventListener('click',async event=>{
   const target=event.target.closest('[data-action]');if(!target)return;const a=target.dataset.action;
@@ -601,6 +627,13 @@ document.addEventListener('click',async event=>{
   try{
     if(a==='home')await home();
     else if(a==='lesson-attendance'){page=0;await attendanceHome();}
+    else if(a==='student-search'){page=0;await loadStudentSearch();}
+    else if(a==='search-student'){
+      // نحمّل مرحلة الطالب كي تعمل بقية أدوات ملفه (المجموعات والنقل) كما لو فُتح من المرحلة.
+      try{currentStage=await api('/stages/'+target.dataset.stage+(currentSeasonId?'?seasonId='+currentSeasonId:''));}catch{currentStage=null;}
+      await showStudent(target.dataset.id);
+    }
+    else if(a==='select-all-missing'){const boxes=[...target.closest('form').querySelectorAll('input[name="lesson"]:not(:disabled)')];const all=boxes.every(b=>b.checked);boxes.forEach(b=>{b.checked=!all;});}
     else if(a==='stage')await openStage(target.dataset.id);
     else if(a==='stage-registration-toggle'){
       const currentlyVisible=target.dataset.visible==='true';
@@ -856,6 +889,15 @@ document.addEventListener('submit',async event=>{
   const pendingText='جارٍ تنفيذ العملية…',pendingTimer=setTimeout(()=>notify(pendingText),300);
   try{
     if(form.id==='contact-search'){contactQuery=String(body.q||'').trim();contactPage=0;await loadStudentContact();}
+    else if(form.id==='student-search-form'){studentSearch={q:String(body.q||''),status:['all','active','archived'].includes(body.status)?body.status:'all'};page=0;await loadStudentSearch();}
+    else if(form.id==='student-late-form'){
+      const ids=[...form.querySelectorAll('input[name="lesson"]:checked')].map(i=>Number(i.value));
+      if(!ids.length)throw Error('حدّد درسًا واحدًا على الأقل.');
+      if(!await confirmAction(`تسجيل حضور إداري متأخر للطالب «${form.dataset.name}» في ${ids.length} درسًا؟ يظهر في تقريره فورًا ويُسجَّل في سجل التعديلات.`))return;
+      const r=await api('/students/'+form.dataset.student+'/late-attendance',{lessonIds:ids,note:String(body.note||'').trim()||null},'POST');
+      await showStudent(form.dataset.student);if(view==='stage'||view==='student-search'||view==='lesson-attendance')await refresh();
+      notify(`سُجّل حضور ${r.added} درسًا${r.existing?` (سبق تسجيل ${r.existing})`:''}. تغيّر تقرير الطالب وحساب غيابه.`);
+    }
     else if(form.id==='remove-attendance-search'&&removeAttendanceState)
       await removeAttendanceDialog(removeAttendanceState.id,0,String(body.q||'').trim());
     else if(form.id==='contact-send'){
