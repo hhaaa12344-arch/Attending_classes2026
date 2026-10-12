@@ -83,6 +83,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(route==='/one-time-cohort-move')result=await oneTimeCohortMove.status();
         else if(route==='/student-contact')result=await studentContact.search({actorId:actor.id,role:'admin',q:q.q||'',page:q.page||0});
         else if(/^\/student-contact\/\d+$/.test(route))result=await studentContact.history({actorId:actor.id,role:'admin',studentId:positiveInt(route.split('/')[2])});
+        else if(/^\/students\/\d+\/missing-lessons$/.test(route))result=await overrides.studentMissingLessons(positiveInt(route.split('/')[2]));
         else if(/^\/students\/\d+$/.test(route))result=await adminData.student(positiveInt(route.split('/')[2]));
         else if(route==='/leaves')result=await adminData.leaves(q);
         else if(route==='/reports')result=await adminData.reports(q);
@@ -334,6 +335,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         }
         else if((m=/^\/lessons\/(\d+)\/subject$/.exec(route))&&req.method==='PATCH')result=await overrides.correctSubject(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/lessons\/(\d+)\/late-attendance$/.exec(route))&&req.method==='POST')result=await overrides.lateAttendance(positiveInt(m[1]),body,actor.id);
+        else if((m=/^\/students\/(\d+)\/late-attendance$/.exec(route))&&req.method==='POST')result=await overrides.studentLateAttendance(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/lessons\/(\d+)\/attendance\/(\d+)\/remove$/.exec(route))&&req.method==='POST')
           result=await overrides.removeLessonAttendance(positiveInt(m[1]),positiveInt(m[2]),actor.id);
         else if((m=/^\/exams\/(\d+)\/student-window$/.exec(route))&&req.method==='POST')result=await overrides.reopenExam(positiveInt(m[1]),body,actor.id);
@@ -344,7 +346,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           result=reopened;await audit(actor.id,'reopen_lesson','lesson',id,null,{active_until:reopened.active_until});
         }
         else if((m=/^\/lessons\/(\d+)\/mark-all$/.exec(route))&&req.method==='POST'){
-          const id=positiveInt(m[1]);const added=await db.markAllPresentForLesson(id);
+          const id=positiveInt(m[1]);const added=await db.markAllPresentForLesson(id,actor.id);
           result={added};await audit(actor.id,'mark_all_present','lesson',id,null,{added});
         }
         else if((m=/^\/lessons\/(\d+)\/cancel$/.exec(route))&&req.method==='POST'){

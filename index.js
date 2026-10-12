@@ -3093,7 +3093,7 @@ bot.action(/admin_mgt_markall_confirm:(\d+):(\d+)/, async (ctx) => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
   const lessonId = Number(ctx.match[1]);
   const stageId = Number(ctx.match[2]);
-  const added = await db.markAllPresentForLesson(lessonId);
+  const added = await db.markAllPresentForLesson(lessonId, ctx.from.id);
   await ctx.answerCbQuery('تم ✅');
   await ctx.editMessageText(`✅ سُجِّل ${added} طالبًا حاضرًا لم يكونوا مؤشَّرين سابقًا.`);
   return renderLessonManagement(ctx, stageId);
@@ -6802,6 +6802,9 @@ async function main() {
   await initBackupSchema(db.pool);
   await initStudentGuideSchema(db.pool);
   await require('./publicationFollowup').initSchema(db.pool);
+  // ترحيل لمرة واحدة: حضور التحضير الجماعي بعد المهلة كان لا يظهر في تقرير الطالب.
+  const attendanceRepair = await require('./attendanceKindRepair').repairLateMarkedAttendance(db.pool);
+  if (attendanceRepair.repaired) console.log(`صُحّح ${attendanceRepair.repaired} سجل حضور إداري كان لا يظهر في تقرير الطالب ✅`);
   backups.start();
   console.log('تم تجهيز قاعدة البيانات ✅');
   if(process.env.ADMIN_WEB_ENABLED==='true') {

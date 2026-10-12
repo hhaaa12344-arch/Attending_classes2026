@@ -20,9 +20,11 @@ function createLessonAttendance(pool){
       const args=[season.id,`%${String(q).replace(/[\\%_]/g,'\\$&')}%`,status];
       const total=Number((await c.query('SELECT COUNT(*) AS n '+where,args)).rows[0].n);
       const students=(await c.query(`SELECT st.id,st.full_name,e.status ${where} ORDER BY st.full_name,st.id LIMIT $4 OFFSET $5`,[...args,allRows?null:p.size,allRows?0:p.offset])).rows;
+      // نفس قاعدة تقرير الطالب وحساب الغياب: الحضور ضمن مهلة الدرس أو الحضور الإداري المتأخر، فلا يزيد رقم اللوحة عمّا يراه الطالب.
       const attended=(await c.query(`SELECT a.student_id,l.subject_id,COUNT(*)::int AS attended FROM attendance a JOIN effective_lessons l ON l.id=a.lesson_id
         WHERE a.student_id=ANY($1::int[]) AND l.stage_season_id=$2
           AND l.activated_at <= $3::timestamp AND a.listened_at <= $3::timestamp
+          AND (a.listened_at <= l.active_until OR a.marking_kind='admin_late')
         GROUP BY a.student_id,l.subject_id`,[students.map(s=>s.id),season.id,season.as_of])).rows;
       const counts=new Map(attended.map(r=>[r.student_id+':'+r.subject_id,r.attended]));
       const rows=students.map((s,i)=>({...s,sequence:(allRows?0:p.offset)+i+1,attendance:subjects.map(sub=>({subject_id:sub.id,attended:counts.get(s.id+':'+sub.id)||0,total:sub.total_lessons}))}));

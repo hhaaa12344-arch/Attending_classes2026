@@ -131,6 +131,67 @@ function createAdminOverrides(pool) {
       return {removed:true,studentId,lessonId:id};
     });
   }
+  // الدروس المنشورة في موسم الطالب الحالي التي لا حضور له فيها، وفق قاعدة تقرير الطالب نفسها (ما ينقصه فعلًا في تقريره).
+  async function studentMissingLessons(studentId) {
+    studentId=positiveInt(studentId);
+    const student=(await pool.query('SELECT id,full_name,is_active,stage_id FROM students WHERE id=$1',[studentId])).rows[0];
+    if(!student)throw appError('الطالب غير موجود.','NOT_FOUND',404);
+    const season=(await pool.query(`SELECT ss.id,ss.stage_id,COALESCE(ss.stage_name_snapshot,sg.name) AS stage_name,se.name AS season_name
+      FROM enrollments e JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+      JOIN stages sg ON sg.id=ss.stage_id AND sg.is_active=true JOIN seasons se ON se.id=ss.season_id
+      WHERE e.student_id=$1 AND e.status='active' AND ss.stage_id=$2`,[studentId,student.stage_id])).rows[0];
+    if(!season||!student.is_active)return {student,season:null,subjects:[],totalMissing:0,openCount:0,notCounted:0};
+    const {REPORT_LESSON_ELIGIBILITY}=require('./db');
+    const rows=(await pool.query(`WITH numbered AS (
+        SELECT l.id,ROW_NUMBER() OVER (PARTITION BY l.subject_id ORDER BY l.activated_at,l.id)::int AS lesson_number
+        FROM effective_lessons l WHERE l.stage_season_id=$2)
+      SELECT l.id,l.subject_id,sub.name AS subject_name,numbered.lesson_number,l.activated_at,l.active_until,
+        (l.active_until>now()) AS is_open,l.source_type
+      FROM enrollments e JOIN students st ON st.id=e.student_id
+      JOIN effective_lessons l ON l.stage_season_id=e.stage_season_id
+      JOIN numbered ON numbered.id=l.id
+      JOIN subjects sub ON sub.id=l.subject_id AND sub.stage_id=$3
+      WHERE e.student_id=$1 AND e.stage_season_id=$2 AND e.status='active'
+        AND ${REPORT_LESSON_ELIGIBILITY}
+        AND NOT EXISTS(SELECT 1 FROM attendance a WHERE a.lesson_id=l.id AND a.student_id=st.id)
+      ORDER BY sub.name,sub.id,l.activated_at,l.id`,[studentId,season.id,season.stage_id])).rows;
+    const published=Number((await pool.query(`SELECT COUNT(*) AS n FROM effective_lessons l JOIN subjects sub ON sub.id=l.subject_id AND sub.stage_id=$3
+      WHERE l.stage_season_id=$2 AND COALESCE(l.attendance_opened_at,l.activated_at)<=now()
+        AND NOT EXISTS(SELECT 1 FROM attendance a WHERE a.lesson_id=l.id AND a.student_id=$1)`,[studentId,season.id,season.stage_id])).rows[0].n);
+    const subjects=[];
+    for(const r of rows){
+      let group=subjects[subjects.length-1];
+      if(!group||group.subject_id!==r.subject_id){group={subject_id:r.subject_id,subject_name:r.subject_name,lessons:[]};subjects.push(group);}
+      group.lessons.push({id:r.id,lesson_number:r.lesson_number,activated_at:r.activated_at,active_until:r.active_until,is_open:r.is_open,source_type:r.source_type});
+    }
+    // «غير محتسبة»: دروس منشورة بلا حضور له لكنها خارج تقريره (نُشرت وانتهت قبل التحاقه أو بعد نقله).
+    return {student,season,subjects,totalMissing:rows.length,openCount:rows.filter(r=>r.is_open).length,notCounted:Math.max(0,published-rows.length)};
+  }
+  // تسجيل حضور إداري متأخر لطالب واحد في عدة دروس منتهية بعملية واحدة: إمّا كلها أو لا شيء.
+  async function studentLateAttendance(studentId,body,actor) {
+    studentId=positiveInt(studentId);
+    if(!Array.isArray(body.lessonIds)||!body.lessonIds.length||body.lessonIds.length>100)throw appError('اختر من درس واحد إلى 100 درس في العملية.');
+    const ids=[...new Set(body.lessonIds.map(x=>positiveInt(x)))].sort((a,b)=>a-b),note=noteValue(body.note);
+    return transaction(async c=>{
+      await c.query('SELECT pg_advisory_xact_lock(734221,1)');
+      const seasons=new Set();let added=0,existing=0;
+      for(const id of ids){
+        const lesson=await parent(c,'lesson',id,true);
+        if(!(await c.query('SELECT 1 FROM effective_lessons WHERE id=$1 AND activated_at<=now() AND active_until<=now()',[id])).rowCount)
+          throw appError(`الدرس #${id} ما زال مفتوحًا أو لم يُنشر بعد؛ يسجّل الطالب حضوره بنفسه. لم يُحفظ أي تغيير.`,'NOT_EXPIRED',409);
+        await validateStudents(c,lesson,[studentId]);
+        const rows=(await c.query(`INSERT INTO attendance(student_id,lesson_id,marking_kind,marked_by,admin_note)
+          VALUES($1,$2,'admin_late',$3,$4) ON CONFLICT(student_id,lesson_id) DO NOTHING RETURNING *`,[studentId,id,positiveInt(actor),note])).rows;
+        if(!rows.length){existing++;continue;}
+        added++;seasons.add(lesson.stage_season_id);
+        await audit(c,actor,'late_lesson_attendance','lesson',lesson.id,null,
+          {subject_id:lesson.subject_id,subject_name:lesson.subject_name,student_ids:[studentId],note,source:'student_profile'});
+      }
+      for(const seasonId of seasons)await require('./absence').refreshAdministrativeAttendance(c,[studentId],seasonId,
+        process.env.ATTENDANCE_TIME_ZONE||'Asia/Baghdad');
+      return {added,existing};
+    });
+  }
   async function reopenExam(id,body,actor) {
     const studentId=positiveInt(body.studentId),subjectId=positiveInt(body.subjectId);
     const {start,end}=windowDates(body),note=noteValue(body.note);
@@ -158,6 +219,6 @@ function createAdminOverrides(pool) {
       return result;
     });
   }
-  return {options,correctSubject,lateAttendance,lessonAttendance,removeLessonAttendance,reopenExam};
+  return {options,correctSubject,lateAttendance,lessonAttendance,removeLessonAttendance,reopenExam,studentMissingLessons,studentLateAttendance};
 }
 module.exports={createAdminOverrides,windowDates};

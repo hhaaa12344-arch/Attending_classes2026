@@ -59,12 +59,12 @@ function createAdminData(db, studies) {
     if (mode != null && !['mubahatha','report'].includes(mode)) throw appError('وضع المشاركة غير صالح.');
     if (String(q).length > 150) throw appError('عبارة البحث طويلة.');
     for (const id of [stageId,seasonId,groupId]) if (id != null) positiveInt(id);
-    const args = [stageId,seasonId,groupId,`%${String(q).replace(/[\\%_]/g,'\\$&')}%`,status,mode];
+    const args = [stageId,seasonId,groupId,`%${String(q).replace(/[\\%_]/g,'\\$&')}%`,status,mode,String(q)];
     const where = `FROM students st JOIN stages sg ON sg.id=st.stage_id
       WHERE ($1::int IS NULL OR ($2::int IS NULL AND st.stage_id=$1) OR EXISTS(SELECT 1 FROM enrollments eh JOIN stage_seasons sh ON sh.id=eh.stage_season_id WHERE eh.student_id=st.id AND sh.id=$2 AND sh.stage_id=$1))
       AND ($2::int IS NULL OR EXISTS(SELECT 1 FROM enrollments e WHERE e.student_id=st.id AND e.stage_season_id=$2))
       AND ($3::int IS NULL OR EXISTS(SELECT 1 FROM group_memberships gm WHERE gm.student_id=st.id AND gm.group_id=$3))
-      AND st.full_name ILIKE $4
+      AND (st.full_name ILIKE $4 OR student_name_key(st.full_name) LIKE '%'||replace(replace(replace(student_name_key($7::text),'\\','\\\\'),'%','\\%'),'_','\\_')||'%')
       AND ($5='all' OR st.is_active=($5='active'))
       AND ($6::text IS NULL OR EXISTS(SELECT 1 FROM participation_modes pm2 WHERE pm2.student_id=st.id AND pm2.mode=$6
         AND (($2::int IS NOT NULL AND pm2.stage_season_id=$2) OR ($2::int IS NULL AND pm2.stage_season_id IN (SELECT id FROM stage_seasons WHERE is_active=true)))))`;
@@ -78,7 +78,7 @@ function createAdminData(db, studies) {
         JOIN subjects sub ON sub.id=gm.subject_id JOIN stage_seasons ss ON ss.id=gm.stage_season_id
         LEFT JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=gm.subject_id AND pm.stage_season_id=gm.stage_season_id
         WHERE gm.student_id=st.id AND (($2::int IS NOT NULL AND ss.id=$2) OR ($2 IS NULL AND ss.is_active=true))), '[]'::jsonb) AS groups
-      ${where} ORDER BY st.full_name,st.id LIMIT $7 OFFSET $8`, [...args,p.size,p.offset])).rows;
+      ${where} ORDER BY st.full_name,st.id LIMIT $8 OFFSET $9`, [...args,p.size,p.offset])).rows;
     return { rows,total,page:p.page,size:p.size };
   }
   async function stage(id, seasonId = null) {

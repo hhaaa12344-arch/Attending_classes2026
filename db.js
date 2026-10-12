@@ -1972,11 +1972,20 @@ const reopenLesson = (lessonId) =>
 
 // تحضير جماعي لكل طلبة المرحلة النشطين ضمن موسم الدرس ممن لم يؤشّروا بعد؛
 // يُستخدم عند رغبة الأدمن باعتبار الجميع حاضرين لهذا اليوم.
-const markAllPresentForLesson = (lessonId) =>
-  pool
-    .query(
-      `INSERT INTO attendance(student_id, lesson_id)
-       SELECT e.student_id, l.id
+// بعد انتهاء مهلة الدرس يُسجَّل الحضور بصفة «حضور إداري متأخر» (admin_late) مع هوية المسؤول؛ وإلا يُحسب
+// وقت التأشير بعد المهلة فيستبعده تقرير الطالب وحساب الغياب بينما تعدّه لوحة الإدارة (فيظهر للأدمن 10 من 10 وللطالب نقص).
+const markAllPresentForLesson = async (lessonId, actorId = null) => {
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    // القفل نفسه الذي تستعمله بقية مسارات الحضور الإداري كي لا تبقى لقطة غياب قديمة.
+    await c.query('SELECT pg_advisory_xact_lock(734221,1)');
+    const rows = (await c.query(
+      `INSERT INTO attendance(student_id, lesson_id, marking_kind, marked_by, admin_note)
+       SELECT e.student_id, l.id,
+              CASE WHEN l.active_until <= now() THEN 'admin_late' ELSE 'student' END,
+              CASE WHEN l.active_until <= now() THEN $2::bigint END,
+              CASE WHEN l.active_until <= now() THEN 'تحضير جماعي بعد انتهاء مهلة الدرس' END
        FROM effective_lessons l
        JOIN enrollments e ON e.stage_season_id=l.stage_season_id AND e.status='active'
        JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true
@@ -1985,10 +1994,18 @@ const markAllPresentForLesson = (lessonId) =>
        JOIN stages sg ON sg.id=ss.stage_id AND sg.is_active=true
        WHERE l.id=$1 AND l.activated_at <= now()
          AND e.started_at <= now() AND (e.ended_at IS NULL OR e.ended_at > now())
-       ON CONFLICT (student_id, lesson_id) DO NOTHING RETURNING *`,
-      [lessonId]
-    )
-    .then((r) => r.rows.length);
+       ON CONFLICT (student_id, lesson_id) DO NOTHING RETURNING student_id, marking_kind`,
+      [lessonId, actorId]
+    )).rows;
+    const late = rows.filter((r) => r.marking_kind === 'admin_late').map((r) => r.student_id);
+    if (late.length) {
+      const lesson = (await c.query('SELECT stage_season_id FROM effective_lessons WHERE id=$1', [lessonId])).rows[0];
+      await require('./absence').refreshAdministrativeAttendance(c, late, lesson.stage_season_id, process.env.ATTENDANCE_TIME_ZONE || 'Asia/Baghdad');
+    }
+    await c.query('COMMIT');
+    return rows.length;
+  } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
+};
 
 const canStudentAttendLesson = (studentId, lessonId) =>
   pool
@@ -3080,6 +3097,7 @@ module.exports = {
   cancelLesson,
   reopenLesson,
   markAllPresentForLesson,
+  REPORT_LESSON_ELIGIBILITY,
   canStudentAttendLesson,
   getLessonsNeedingReminder,
   markReminderSent,
