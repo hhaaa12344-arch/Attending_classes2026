@@ -305,7 +305,7 @@ async function showTeacherPerformance(id){
   dialog('أداء '+t.full_name,
     `<div class="summary"><div><b>${perf.reportStats.graded_by_teacher}</b>تقرير دقّقه بنفسه</div><div><b>${perf.reportStats.ungraded}</b>تقرير بلا درجة</div><div><b>${perf.examStats.published}</b>امتحان أنجزه من ${perf.examStats.total}</div></div>`+
     `<section class="detail-section"><h3>سجل المباحثات (آخر ${perf.sessions.length})</h3>`+
-    table(['المادة','المجموعة','التاريخ','هل عُقدت'],perf.sessions.map(s=>[esc(s.subject_name),esc(s.group_title),date(s.scheduled_date),s.held==null?'<span class="subtle">بلا قرار</span>':s.held?'<span class="tag ok">عُقدت</span>':'<span class="tag warn">أُجِّلت</span>']))+'</section>');
+    table(['المادة','المجموعة','التاريخ','هل عُقدت','حضروا كاملًا'],perf.sessions.map(s=>[esc(s.subject_name),esc(s.group_title),date(s.scheduled_date),s.held==null?'<span class="subtle">بلا قرار</span>':s.held?'<span class="tag ok">عُقدت</span>':'<span class="tag warn">أُجِّلت</span>',s.full_attendees==null?'<span class="subtle">—</span>':esc(s.full_attendees)]))+'</section>');
 }
 async function loadScheduleMatrix(){view='schedule-matrix';currentStage=null;setNav('schedule-matrix');$('#breadcrumb').textContent='المعهد / جداول المباحثات';const n=++sequence;
   if(!stages.length)stages=await api('/stages');if(n!==sequence)return;
