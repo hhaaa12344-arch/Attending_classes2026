@@ -2050,6 +2050,14 @@ const listSubjectGrades = (subjectId, stageSeasonId, {page=0,size=25,studentId=n
 // «المؤهَّلة» تستثني الجلسات التي عُقدت قبل انضمامه (حالة المحوَّل من التقارير).
 // درجة الامتحانات: مجموع درجات الامتحانات الثلاثة (5 لكل امتحان).
 // درجة المشاركة النهائية = درجة التقارير + درجة المباحثات، بحد أقصى 15.
+// درجة التقارير: نسبة وتناسب أيضًا، ولا علاقة لها بدرجات الأستاذ على التقارير:
+//   التقرير المعتمد هو الذي منحه الأستاذ درجة أكبر من صفر (أيًّا كانت قيمتها)؛ غير المُقيَّم أو المُقيَّم بصفر لا يُحتسب (وهمي أو مكرر أو مرفوض).
+//   الأسبوع من الأحد إلى السبت بتوقيت المعهد: تقريران في أيام الأسبوع نفسه (مثل الأربعاء والسبت) يُحتسبان تقريرًا واحدًا،
+//   وتقرير في الأسبوع التالي يُحتسب جديدًا.
+//   عدد أسابيع الطالب = عدد الأسابيع المختلفة التي له فيها تقرير معتمد واحد على الأقل (بتوقيت المعهد).
+//   المعيار = أكبر عدد أسابيع بين طلبة المادة في الموسم؛ فمن أرسل تقارير كثيرة في أسبوع واحد
+//   لا يُحتسب له إلا أسبوع واحد، فلا يتضخم المعيار بما لا يدل على انتظام أسبوعي.
+//   درجة الطالب = (أسابيعه ÷ المعيار) × 15.
 async function computeSeasonGrades(subjectId, stageSeasonId) {
   const rows = await pool.query(
     `WITH eligible AS (
@@ -2082,22 +2090,30 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
        JOIN exams e ON e.id=a.exam_id
        WHERE e.subject_id=$1 AND e.stage_season_id=$2 AND a.submitted_at IS NOT NULL
        GROUP BY a.student_id
+     ),
+     report_weeks AS (
+       SELECT r.student_id,
+              COUNT(DISTINCT date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $3)+interval '1 day'))::int AS weeks,
+              COUNT(*)::int AS reports
+       FROM student_reports r
+       WHERE r.subject_id=$1 AND r.stage_season_id=$2 AND r.score > 0
+       GROUP BY r.student_id
      )
      SELECT st.id AS student_id, st.full_name, pm.mode,
             COALESCE(el.eligible_sessions,0) AS eligible_sessions,
             COALESCE(el.attended_sessions,0) AS attended_sessions,
             COALESCE(et.exams_score,0) AS exams_score,
-            COALESCE(fg.report_score,0) AS report_score
+            COALESCE(rw.weeks,0) AS report_weeks,
+            COALESCE(rw.reports,0) AS report_count,
+            (SELECT COALESCE(MAX(weeks),0) FROM report_weeks) AS report_benchmark
      FROM participation_modes pm
      JOIN students st ON st.id=pm.student_id
      LEFT JOIN eligible el ON el.student_id=pm.student_id
      LEFT JOIN exam_totals et ON et.student_id=pm.student_id
-     LEFT JOIN final_grades fg
-            ON fg.student_id=pm.student_id AND fg.subject_id=pm.subject_id
-           AND fg.stage_season_id=pm.stage_season_id
+     LEFT JOIN report_weeks rw ON rw.student_id=pm.student_id
      WHERE pm.subject_id=$1 AND pm.stage_season_id=$2
      ORDER BY st.full_name`,
-    [subjectId, stageSeasonId]
+    [subjectId, stageSeasonId, SCHEDULE_TZ]
   );
 
   return rows.rows.map((r) => {
@@ -2105,7 +2121,11 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
     const attended = Number(r.attended_sessions);
     const mubahathaScore =
       eligible === 0 ? 0 : Math.round((attended / eligible) * GRADE_WEIGHTS.participationTotal * 100) / 100;
-    const reportScore = Number(r.report_score);
+    const reportWeeks = Number(r.report_weeks);
+    const reportBenchmark = Number(r.report_benchmark);
+    const reportScore = reportBenchmark === 0
+      ? 0
+      : Math.min(GRADE_WEIGHTS.participationTotal, Math.round((reportWeeks / reportBenchmark) * GRADE_WEIGHTS.participationTotal * 100) / 100);
     const participation = Math.min(GRADE_WEIGHTS.participationTotal, mubahathaScore + reportScore);
     const examsScore = Math.min(GRADE_WEIGHTS.examsTotal, Number(r.exams_score));
     return {
@@ -2116,6 +2136,9 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
       attendedSessions: attended,
       mubahathaScore,
       reportScore,
+      reportCount: Number(r.report_count),
+      reportWeeks,
+      reportBenchmark,
       participationScore: Math.round(participation * 100) / 100,
       examsScore,
       totalScore: Math.round((participation + examsScore) * 100) / 100,
@@ -2135,7 +2158,7 @@ async function finalizeSeasonGrades(subjectId, stageSeasonId) {
             exams_score, mubahatha_score, report_score, participation_score, total_score, finalized_at)
          VALUES($1,$2,$3,$4,$5,$6,$7,$8, now())
          ON CONFLICT (student_id, subject_id, stage_season_id) DO UPDATE SET
-            exams_score=$4, mubahatha_score=$5, participation_score=$7,
+            exams_score=$4, mubahatha_score=$5, report_score=$6, participation_score=$7,
             total_score=$8, finalized_at=now()`,
         [
           g.studentId, subjectId, stageSeasonId,

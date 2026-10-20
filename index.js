@@ -713,9 +713,9 @@ function formatStudentSeasonActivity(activity) {
   if (warnings.length) {
     const notificationLines = warnings.map(
       (warning, index) =>
-        `${index + 1}. تنبيه غياب متتالٍ حتى يوم ${dateOnly(warning.attendance_date)}`
+        `${index + 1}. إعلام بعدم تسجيل الحضور حتى يوم ${dateOnly(warning.attendance_date)}`
     );
-    text += `\n\n⚠️ التنبيهات المستلمة (${warnings.length}):\n${notificationLines.join('\n')}`;
+    text += `\n\n📌 الإعلامات المستلمة (${warnings.length}):\n${notificationLines.join('\n')}`;
   }
   return text;
 }
@@ -4754,13 +4754,13 @@ bot.action(/fin_preview:(\d+):(\d+)/, async (ctx) => {
     `معاينة_درجات_${subjectId}`,
     buildMarkdownDoc(
       'معاينة درجات الموسم',
-      ['الطالب', 'النمط', 'حضر', 'من', 'المباحثات', 'التقارير', 'المشاركة', 'الامتحانات', 'الدروس', 'المجموع'],
+      ['الطالب', 'النمط', 'حضر', 'من', 'المباحثات', 'أسابيع التقارير', 'التقارير', 'المشاركة', 'الامتحانات', 'الدروس', 'المجموع'],
       grades.map((g) => [
         g.fullName, g.mode === 'report' ? 'تقارير' : 'مباحثات',
-        g.attendedSessions, g.eligibleSessions, g.mubahathaScore, g.reportScore,
+        g.attendedSessions, g.eligibleSessions, g.mubahathaScore, g.reportWeeks, g.reportScore,
         g.participationScore, g.examsScore, g.lessonsScore, g.totalScore,
       ]),
-      '_هذه معاينة قبل الاعتماد._'
+      `_هذه معاينة قبل الاعتماد. درجة التقارير = (أسابيع الطالب ÷ ${grades[0].reportBenchmark}) × ${studies.GRADE_WEIGHTS.participationTotal}، حيث ${grades[0].reportBenchmark} هو أكبر عدد أسابيع منتظمة بين طلبة المادة، ولا تُحتسب إلا التقارير التي منحها الأستاذ درجة أكبر من صفر، ولا تتأثر بقيمة الدرجة._`
     )
   );
 });
@@ -5864,10 +5864,13 @@ const MAX_TRACKED = 60;
 
 // لوحة الأزرار السفلية مرتبطة برسالتها في تليجرام: حذف تلك الرسالة قد يخفي الأزرار.
 // لذلك لا تدخل قائمة التنظيف؛ وعند إرسال لوحة جديدة تُحذف اللوحة السابقة بعد وصول الجديدة فقط.
+// مع تحديثين متزامنين (ضغطتان سريعتان) كانت كل لوحة تحذف الأخرى فيبقى الطالب بلا أزرار؛
+// لذلك لا تُحذف إلا اللوحة الأقدم رقمًا، وتبقى الأحدث دائمًا.
 async function rememberMenuMessage(chatId, messageId) {
   const previous = botMenuMessage.get(chatId);
+  if (previous && previous >= messageId) return;
   botMenuMessage.set(chatId, messageId);
-  if (previous && previous !== messageId) await deleteMessageQuietly(chatId, previous);
+  if (previous) await deleteMessageQuietly(chatId, previous);
 }
 
 function trackBotMessage(chatId, messageId) {
@@ -6759,8 +6762,10 @@ async function checkConsecutiveAbsence() {
     const {enqueueNotification}=require('./outbox');
     for(const student of await db.getStudentAbsenceAlertCandidates()){
       await enqueueNotification(db.pool,{key:`absence:student:${student.attendance_day_id}`,chatId:student.telegram_id,
-        text:'⚠️ تنبيه غياب\nلم تسجّل أي حضور ضمن مهلة الدروس لثلاثة أيام دراسية متتالية '+
-          `(${dateOnly(student.streak_start_date)} → ${dateOnly(student.streak_end_date)}).\nيرجى متابعة دروسك وتأشير الحضور بعد الاستماع الفعلي.`,
+        text:'📌 إعلام من إدارة المعهد\n\nنودّ إعلامك بأنك لم تسجّل حضورًا ضمن مهلة الدروس خلال ثلاثة أيام دراسية متتالية '+
+          `(${dateOnly(student.streak_start_date)} → ${dateOnly(student.streak_end_date)}).\n\n`+
+          'نرجو أن تكون بخير، وأن يسهّل الله أمرك ويوفّقك لطلب العلم.\n\n'+
+          'وإن كانت لديك ظروف تمنعك من المتابعة، فبإمكانك تقديم طلب إجازة بدل الغياب من زر «🌴 طلب إجازة» في القائمة.',
         mark:{kind:'student_absence',id:student.attendance_day_id}});
     }
     const candidates=await db.getAdminAbsenceAlertCandidates();

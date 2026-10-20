@@ -2568,7 +2568,11 @@ const getTeacherSessionLog = (teacherId, limit = 60) =>
               CASE WHEN sd.decision='confirmed' THEN true
                    WHEN sd.decision='postponed' THEN false
                    ELSE NULL END AS held,
-              ms.is_closed
+              ms.is_closed,
+              CASE WHEN sd.decision='confirmed' AND sd.session_id IS NOT NULL THEN (
+                SELECT COUNT(*)::int FROM mubahatha_attendance a1
+                JOIN mubahatha_attendance a2 ON a2.session_id=a1.session_id AND a2.student_id=a1.student_id AND a2.phase='end'
+                WHERE a1.session_id=sd.session_id AND a1.phase='start') END AS full_attendees
        FROM schedule_slots s
        JOIN slot_decisions sd ON sd.slot_id=s.id
        JOIN mubahatha_groups g ON g.id=s.group_id
@@ -2618,7 +2622,7 @@ const takeStudentUiMessages = (studentId, includeMenu = false, exceptMessageId =
     .query(
       `DELETE FROM student_ui_messages
        WHERE student_id=$1 AND ($2::boolean OR message_kind <> 'menu')
-         AND ($3::bigint IS NULL OR message_id <> $3::bigint)
+         AND ($3::bigint IS NULL OR message_id < $3::bigint)
        RETURNING message_id`,
       [studentId, Boolean(includeMenu), exceptMessageId]
     )
