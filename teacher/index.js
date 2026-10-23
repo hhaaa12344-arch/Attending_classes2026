@@ -4136,8 +4136,8 @@ async function renderExam(ctx, examId, edit = false) {
   const text =
     `📝 ${exam.title || 'الامتحان الشهري ' + exam.exam_number} — ${exam.subject_name}\n` +
     `الحالة: ${exam.status === 'published' ? 'منشور 📤' : 'مجدول تلقائيًا ⏰'}\n` +
-    `يفتح: ${new Date(exam.opens_at).toISOString().slice(0, 16).replace('T', ' ')}\n` +
-    `يُغلق: ${new Date(exam.closes_at).toISOString().slice(0, 16).replace('T', ' ')}\n` +
+    `يفتح: ${new Date(exam.opens_at).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad',hour12:false})+' (بغداد)'}\n` +
+    `يُغلق: ${new Date(exam.closes_at).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad',hour12:false})+' (بغداد)'}\n` +
     `الدرجة: ${Number(exam.max_score)}\n\nالأسئلة (${questions.length}):\n${lines.slice(0,2700)}${lines.length>2700?'\n… بقية الأسئلة متاحة كاملة في لوحة الإدارة.':''}`;
   const kb = Markup.inlineKeyboard(rows);
   return edit ? ctx.editMessageText(text, kb) : ctx.reply(text, kb);
