@@ -12,7 +12,7 @@ const PRIORITY = { high: 1, normal: 5, low: 9 };
 function createTelegramQueue(telegram, { rate = DEFAULT_RATE, maxPending = 2000, sleep = ms => new Promise(r => setTimeout(r,ms)) } = {}) {
   if (!Number.isFinite(rate) || rate < 1 || rate > 30) throw new Error('TELEGRAM_RATE_PER_SEC must be from 1 to 30');
   const interval = Math.ceil(1000 / rate);
-  const methods = ['sendMessage', 'sendDocument', 'sendPhoto'];
+  const methods = ['sendMessage', 'sendDocument', 'sendPhoto', 'sendVideo'];
   const send = Object.fromEntries(methods.map(method => [method, telegram[method].bind(telegram)]));
   const queue = [];
   let seq = 0;
@@ -85,6 +85,8 @@ function createTelegramQueue(telegram, { rate = DEFAULT_RATE, maxPending = 2000,
       enqueue('sendDocument', [chatId, doc, extra], opts),
     sendPhoto: (chatId, photo, extra, opts) =>
       enqueue('sendPhoto', [chatId, photo, extra], opts),
+    sendVideo: (chatId, video, extra, opts) =>
+      enqueue('sendVideo', [chatId, video, extra], opts),
     pendingCount: () => queue.length,
     stop: () => {
       stopped = true;

@@ -96,7 +96,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           if(!exam)throw appError('الامتحان غير موجود.','NOT_FOUND',404);
           const studentWindows=(await db.pool.query(`SELECT w.*,st.full_name FROM exam_student_windows w
             JOIN students st ON st.id=w.student_id WHERE w.exam_id=$1 ORDER BY w.updated_at DESC`,[id])).rows;
-          result={...exam,questions:await studies.listExamQuestions(id),studentWindows};
+          result={...exam,questions:await studies.listExamQuestions(id),studentWindows,results:await studies.getExamResults(id)};
         }
         else if(route==='/exams')result=(await db.pool.query(`SELECT e.*,sub.name AS subject_name FROM exams e JOIN subjects sub ON sub.id=e.subject_id
           WHERE e.stage_season_id=$1 ORDER BY sub.name,e.exam_number`,[positiveInt(q.seasonId)])).rows;
@@ -339,6 +339,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if((m=/^\/lessons\/(\d+)\/attendance\/(\d+)\/remove$/.exec(route))&&req.method==='POST')
           result=await overrides.removeLessonAttendance(positiveInt(m[1]),positiveInt(m[2]),actor.id);
         else if((m=/^\/exams\/(\d+)\/student-window$/.exec(route))&&req.method==='POST')result=await overrides.reopenExam(positiveInt(m[1]),body,actor.id);
+        else if((m=/^\/exams\/(\d+)\/reopen-missing$/.exec(route))&&req.method==='POST')result=await overrides.reopenExamForMissing(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/lessons\/(\d+)\/reopen$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]);
           const reopened=await db.reopenLesson(id);

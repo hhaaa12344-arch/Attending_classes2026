@@ -57,6 +57,16 @@ async function initSchema() {
       created_at TIMESTAMP NOT NULL DEFAULT now()
     );
 
+    CREATE TABLE IF NOT EXISTS registration_requests (
+      telegram_id BIGINT PRIMARY KEY,
+      display_name TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+      requested_at TIMESTAMP NOT NULL DEFAULT now(),
+      decided_at TIMESTAMP,
+      decided_by BIGINT
+    );
+    CREATE INDEX IF NOT EXISTS registration_requests_status_idx ON registration_requests(status,requested_at);
+
     CREATE TABLE IF NOT EXISTS lessons (
       id SERIAL PRIMARY KEY,
       subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,

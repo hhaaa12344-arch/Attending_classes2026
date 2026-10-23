@@ -3,6 +3,7 @@ const { enqueueNotification } = require('./outbox');
 
 function createScheduler({ pool, studies }) {
   let running = false;
+  const examNotifications=require('./examNotifications').createExamNotifications(pool);
   const promptLeadMinutes = Number(process.env.SLOT_PROMPT_LEAD_MINUTES || 5);
   if (!Number.isInteger(promptLeadMinutes) || promptLeadMinutes < 1 || promptLeadMinutes > 30) {
     throw new Error('SLOT_PROMPT_LEAD_MINUTES must be an integer from 1 to 30');
@@ -176,6 +177,7 @@ function createScheduler({ pool, studies }) {
           if (err?.code !== 'CONFLICT') console.error(`Auto exam publish ${exam.id} failed:`, err.message);
         }
       }
+      await examNotifications.tick();
       const pending = await pool.query(`SELECT id FROM mubahatha_sessions
         WHERE attendance_reopened_at IS NULL AND ((start_notifications_queued=false AND closes_at > now()
                AND opened_at + make_interval(mins => $1::int) <= now())

@@ -50,9 +50,14 @@ function createBroadcasts(pool) {
     return {recipientCount:target.rows.length,label:target.label};
   }
 
-  async function send(actor,scope,message,requestKey) {
+  async function send(actor,scope,message,requestKey,media=null) {
     const text=String(message||'').trim();
-    if(!text||text.length>3000)throw appError('اكتب رسالة من 1 إلى 3000 حرف.');
+    const kind=media?.kind||null;
+    if(kind!==null&&!['photo','video'].includes(kind))throw appError('نوع المرفق غير مدعوم.');
+    if(kind&&(typeof media.fileId!=='string'||media.fileId.length<5||media.fileId.length>512||/[\r\n]/.test(media.fileId)))
+      throw appError('معرّف ملف تليجرام غير صالح.');
+    if(kind?text.length>850:!text||text.length>3000)
+      throw appError(kind?'التعليق على الصورة/الفيديو لا يتجاوز 850 حرفًا.':'اكتب رسالة من 1 إلى 3000 حرف.');
     if(!requestKey||String(requestKey).length>150)throw appError('معرّف الطلب غير صالح.');
     const client=await pool.connect();
     try{
@@ -63,7 +68,7 @@ function createBroadcasts(pool) {
         (request_key,actor_id,actor_role,scope_kind,subject_id,stage_season_id,group_id,message_text,recipient_count)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(request_key) DO NOTHING RETURNING id,recipient_count`,
         [requestKey,actor.id,actor.role,scope.kind,scope.subjectId||null,scope.seasonId||null,
-          scope.groupId||null,text,target.rows.length])).rows[0];
+          scope.groupId||null,text||`مرفق ${kind==='photo'?'صورة':'فيديو'}`,target.rows.length])).rows[0];
       if(!inserted){
         const prior=(await client.query('SELECT id,recipient_count FROM message_broadcasts WHERE request_key=$1 AND actor_id=$2',
           [requestKey,actor.id])).rows[0];
@@ -72,12 +77,18 @@ function createBroadcasts(pool) {
         return {id:prior.id,recipientCount:Number(prior.recipient_count),repeated:true};
       }
       const header=actor.role==='admin'?'📣 رسالة من إدارة المعهد':'📣 رسالة من أستاذ المادة';
-      const payload=JSON.stringify([`${header}\nإلى: ${target.label}\n\n${text}`,{}]);
-      await client.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,priority,expires_at)
-        SELECT 'broadcast:'||$1::text||':'||r.student_id::text,r.chat_id,$2::jsonb,9,now()+interval '7 days'
+      const description=`${header}\nإلى: ${target.label}`;
+      if(kind && description.length+(text?2+text.length:0)>1024)
+        throw appError('تعليق المرفق طويل مع عنوان الإرسال؛ اختصر التعليق ثم حاول مجددًا.');
+      const payload=kind
+        ? JSON.stringify([media.fileId,{caption:description+(text?'\n\n'+text:'')}])
+        : JSON.stringify([`${description}\n\n${text}`,{}]);
+      const method=kind==='photo'?'sendPhoto':kind==='video'?'sendVideo':'sendMessage';
+      await client.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,method,payload,priority,expires_at)
+        SELECT 'broadcast:'||$1::text||':'||r.student_id::text,r.chat_id,$5,$2::jsonb,9,now()+interval '7 days'
         FROM unnest($3::integer[],$4::bigint[]) AS r(student_id,chat_id)
         ON CONFLICT(dedupe_key) DO NOTHING`,[inserted.id,payload,
-        target.rows.map(r=>Number(r.id)),target.rows.map(r=>Number(r.telegram_id))]);
+        target.rows.map(r=>Number(r.id)),target.rows.map(r=>Number(r.telegram_id)),method]);
       await client.query('COMMIT');
       return {id:inserted.id,recipientCount:target.rows.length,repeated:false};
     }catch(err){await client.query('ROLLBACK');throw err;}finally{client.release();}

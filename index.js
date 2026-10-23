@@ -81,9 +81,9 @@ const tgQueue = createTelegramQueue(bot.telegram);
 const outboxWorker = require('./outbox').createOutboxWorker(db.pool,tgQueue,bot.telegram.deleteMessage.bind(bot.telegram));
 const broadcasts = require('./broadcasts').createBroadcasts(db.pool);
 // Both background sends and replies share the same rate limiter.
-for(const method of ['sendMessage','sendDocument','sendPhoto']) bot.telegram[method]=tgQueue[method];
+for(const method of ['sendMessage','sendDocument','sendPhoto','sendVideo']) bot.telegram[method]=tgQueue[method];
 bot.use((ctx,next)=>{
-  for(const method of ['sendMessage','sendDocument','sendPhoto']) ctx.telegram[method]=(chatId,content,extra)=>tgQueue[method](chatId,content,extra,{priority:PRIORITY.high});
+  for(const method of ['sendMessage','sendDocument','sendPhoto','sendVideo']) ctx.telegram[method]=(chatId,content,extra)=>tgQueue[method](chatId,content,extra,{priority:PRIORITY.high});
   return next();
 });
 // أفضل جهد: يُحدَّث يوزر تيليجرام المخزَّن للطالب كلما تفاعل، بلا انتظار ودون كسر الرد لو فشل.
@@ -1116,12 +1116,23 @@ async function startStudentRegistration(ctx,codeOnly=false){
   const registrationOpen=await db.isStudentRegistrationOpen();
   userState.set(ctx.from.id,{action:'awaiting_full_name'});
   if(!registrationOpen){
-    return ctx.reply(
-      '⛔ التسجيل الجديد متوقف مؤقتًا من إدارة المعهد.\n\n'+
-      'إذا كنت أستاذًا ولديك كود تفعيل، أو طالبًا مسجّلًا سابقًا ولديك كود نقل حساب، أرسل الكود هنا.\n'+
-      'أما إضافة طالب جديد فتتم حاليًا من الإدارة فقط.',
-      backOnlyMenu()
-    );
+    const r=(await db.pool.query(`INSERT INTO registration_requests(telegram_id,display_name,status)
+      VALUES($1,$2,'pending') ON CONFLICT(telegram_id) DO UPDATE
+      SET display_name=EXCLUDED.display_name RETURNING *`,
+      [ctx.from.id,[ctx.from.first_name,ctx.from.last_name].filter(Boolean).join(' ').slice(0,200)])).rows[0];
+    if(r.status==='approved')return ctx.reply('✅ وافقت الإدارة على تسجيلك. أرسل اسمك الرباعي الآن، أو أرسل كود التفعيل/النقل إن كان لديك.',backOnlyMenu());
+    if(r.status==='rejected')return ctx.reply('⛔ اعتذرت الإدارة عن طلبك السابق. تواصل مع إدارة المعهد لمراجعة الطلب. إذا كان لديك كود تفعيل أو نقل حساب فأرسله.',backOnlyMenu());
+    const {enqueueNotification}=require('./outbox');
+    for(const adminId of ADMIN_IDS){
+      await enqueueNotification(db.pool,{
+        key:`registration-request:${ctx.from.id}:${adminId}`,
+        chatId:adminId,
+        text:`📥 طلب انضمام جديد أثناء إغلاق التسجيل\nالاسم في تليجرام: ${r.display_name||'غير معروف'}\nالمعرّف: ${ctx.from.id}\n\nهل توافق على السماح لهذا الحساب بالتسجيل؟`,
+        extra:{reply_markup:{inline_keyboard:[[{text:'✅ الموافقة',callback_data:`reg_approve:${ctx.from.id}`},{text:'❌ الرفض',callback_data:`reg_reject:${ctx.from.id}`}]]}},
+        expiresAt:new Date(Date.now()+30*86400000)
+      });
+    }
+    return ctx.reply('📨 أُرسل طلب انضمامك إلى الإدارة وهو بانتظار الموافقة. عند الموافقة ستصلك رسالة لتكتب اسمك الرباعي. إذا كان لديك كود تفعيل أستاذ أو كود نقل حساب سابق فيمكن إرساله الآن.',backOnlyMenu());
   }
   return ctx.reply(codeOnly?'أرسل كود تفعيل الأستاذ أو كود نقل حساب الطالب الذي زوّدتك به الإدارة.':
     'أهلًا بك في بوت معهد تراث الأنبياء عليهم السلام.\n\n'+
@@ -1150,7 +1161,23 @@ bot.start(async (ctx) => {
   }
   const teacher=await effectiveTeacher(ctx);
   if(teacher){await studentGuide.clear(ctx);return ctx.reply(`أهلًا بك أستاذ ${teacher.full_name} 👋`,teacherMainMenu());}
+  if(!(await db.isStudentRegistrationOpen()))return startStudentRegistration(ctx);
   return studentGuide.open(ctx);
+});
+
+// مراجعة طلبات الانضمام المغلقة (صلاحيات الإدارة فقط، والقرار يحفظ في القاعدة).
+bot.action(/^reg_(approve|reject):(\d+)$/,async ctx=>{
+  if(!isAdmin(ctx))return ctx.answerCbQuery('غير مصرح.',{show_alert:true});
+  const approved=ctx.match[1]==='approve',telegramId=ctx.match[2];
+  const r=(await db.pool.query(`UPDATE registration_requests
+    SET status=$2,decided_at=now(),decided_by=$3 WHERE telegram_id=$1 AND status='pending'
+    RETURNING *`,[telegramId,approved?'approved':'rejected',ctx.from.id])).rows[0];
+  if(!r)return ctx.answerCbQuery('عولج هذا الطلب مسبقًا.',{show_alert:true});
+  const {enqueueNotification}=require('./outbox');
+  await enqueueNotification(db.pool,{key:`registration-decision:${telegramId}`,chatId:telegramId,
+    text:approved?'✅ وافقت الإدارة على انضمامك. أرسل /start ثم اسمك الرباعي لاستكمال التسجيل.':'⛔ لم تتم الموافقة على طلب الانضمام. يمكنك مراجعة إدارة المعهد.'});
+  await ctx.answerCbQuery(approved?'تمت الموافقة':'رُفض الطلب');
+  return ctx.editMessageText(`طلب الانضمام (${telegramId}) — ${approved?'✅ تمت الموافقة':'❌ تم الرفض'} بواسطة الإدارة.`);
 });
 
 // Compatibility with an old onboarding button; it never resets an existing account.
@@ -1293,6 +1320,38 @@ async function deliverReportToTeachers(student, subjectId, subjectName, payload)
   // إذا لم يكن للمادة أستاذ مرتبط بحساب، يبقى التقرير محفوظًا بانتظار الإسناد/التقييم.
   return { delivered, total: recipients.length };
 }
+
+
+// Media broadcasts: receive a photo/video during the existing broadcast-compose step.
+// Telegram file_id is reused directly: no public hosting, downloads or raw file uploads.
+bot.on(['photo','video'],async(ctx,next)=>{
+  if(ctx.chat?.type!=='private')return next();
+  const state=userState.get(ctx.from?.id);
+  if(state?.action!=='broadcast_compose')return next();
+  const actor=await broadcastActor(ctx);
+  if(!actor){userState.delete(ctx.from.id);return ctx.reply('انتهت صلاحية الإرسال. افتح القائمة من جديد.');}
+  const kind=ctx.message.video?'video':'photo';
+  const fileId=kind==='video'?ctx.message.video.file_id:ctx.message.photo?.at(-1)?.file_id;
+  const caption=String(ctx.message.caption||'').trim();
+  if(!fileId||caption.length>850)return ctx.reply('التعليق على الصورة أو الفيديو يجب أن يكون 850 حرفًا أو أقل. أعد إرسال الملف.');
+  if(kind==='video'&&ctx.message.video.file_size>50*1024*1024)
+    return ctx.reply('الفيديو كبير جدًا. اختر فيديو أصغر من 50 ميغابايت.');
+  try{
+    const preview=await broadcasts.preview(actor,state.scope);
+    if(!preview.recipientCount)return ctx.reply('لا يوجد طلبة مستلمون في هذا النطاق.');
+    const media={kind,fileId};
+    const requestKey=`broadcast:${ctx.from.id}:${ctx.message.message_id}`;
+    userState.set(ctx.from.id,{action:'broadcast_confirm',scope:state.scope,message:caption,media,requestKey});
+    const text=`📣 معاينة ${kind==='photo'?'الصورة':'الفيديو'}\nالنطاق: ${preview.label}\nعدد المستلمين: ${preview.recipientCount}`+
+      (caption?`\n\n${caption}`:'')+'\n\nهل تريد إرسالها؟';
+    const keyboard=Markup.inlineKeyboard([[callbackButton('✅ تأكيد الإرسال','broadcast:confirm')],
+      [callbackButton('❌ إلغاء','admin_cancel_noop')]]);
+    // Telegram media captions have a hard 1024-character limit.
+    const previewCaption=text.length>1000?text.slice(0,997)+'...':text;
+    return kind==='photo'?ctx.replyWithPhoto(fileId,{caption:previewCaption,...keyboard}):
+      ctx.replyWithVideo(fileId,{caption:previewCaption,...keyboard});
+  }catch(err){userState.delete(ctx.from.id);return ctx.reply(`تعذر تجهيز المرفق: ${err.message}`);}
+});
 
 // استقبال ملف التقرير (مستند أو صورة) عندما يكون الطالب في خطوة الإرسال
 bot.on(['document', 'photo'], async (ctx, next) => {
@@ -1519,9 +1578,8 @@ bot.on('text', async (ctx, next) => {
     }
 
     if (!(await db.isStudentRegistrationOpen())) {
-      return ctx.reply(
-        '⛔ التسجيل الجديد متوقف حاليًا. إذا كان لديك كود تفعيل أستاذ أو كود نقل حساب صحيح فأرسله، وإلا تواصل مع إدارة المعهد.'
-      );
+      const request=(await db.pool.query('SELECT status FROM registration_requests WHERE telegram_id=$1',[ctx.from.id])).rows[0];
+      if(request?.status!=='approved')return ctx.reply('⛔ التسجيل الجديد مغلق، ويجب موافقة الإدارة قبل إرسال الاسم. أرسل /start لطلب الموافقة، أو أدخل كود نقل الحساب/تفعيل الأستاذ.');
     }
 
     if (fullName.split(/\s+/).length < 4) {
@@ -2062,6 +2120,16 @@ bot.action(/reg_stage:(\d+)/, async (ctx) => {
     }
     await ctx.answerCbQuery('هذه المرحلة محجوبة عن التسجيل الجديد حاليًا.', { show_alert: true });
     return ctx.editMessageText('اختر مرحلتك الدراسية من المراحل المتاحة حاليًا:', stagesKeyboard(availableStages, 'reg_stage'));
+  }
+  // Recheck access at the final registration step. Registration may have been
+  // closed after the student chose a stage, so no pending request may bypass approval.
+  if (!(await db.isStudentRegistrationOpen())) {
+    const request=(await db.pool.query('SELECT status FROM registration_requests WHERE telegram_id=$1',[ctx.from.id])).rows[0];
+    if(request?.status!=='approved'){
+      userState.delete(ctx.from.id);
+      await ctx.answerCbQuery('يتطلب الانضمام موافقة الإدارة.',{show_alert:true});
+      return startStudentRegistration(ctx);
+    }
   }
   try {
     await db.createStudent(ctx.from.id, state.fullName, stageId, { rejectDuplicateName: true });
@@ -4048,7 +4116,7 @@ async function startBroadcastCompose(ctx,scope) {
     await ctx.answerCbQuery();
     if(!preview.recipientCount)return ctx.reply('لا يوجد طلبة مستلمون في هذا النطاق. اختر نطاقًا آخر.');
     userState.set(ctx.from.id,{action:'broadcast_compose',scope});
-    return ctx.reply(`📣 رسالة جماعية\nالنطاق: ${preview.label}\nعدد المستلمين حاليًا: ${preview.recipientCount}\n\nأرسل نص الرسالة (حتى 3000 حرف). سيظهر لك تأكيد قبل الإرسال.`);
+    return ctx.reply(`📣 رسالة جماعية\nالنطاق: ${preview.label}\nعدد المستلمين حاليًا: ${preview.recipientCount}\n\nأرسل نص الرسالة (حتى 3000 حرف)، أو صورة أو فيديو من تليجرام مع تعليق اختياري (حتى 850 حرفًا). سيظهر لك تأكيد قبل الإرسال.`);
   }catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
 }
 
@@ -4086,10 +4154,11 @@ bot.action('broadcast:confirm',async ctx=>{
   const actor=await broadcastActor(ctx);
   if(!actor)return ctx.answerCbQuery('غير مصرح.',{show_alert:true});
   try{
-    const result=await broadcasts.send(actor,state.scope,state.message,state.requestKey);
+    const result=await broadcasts.send(actor,state.scope,state.message,state.requestKey,state.media||null);
     userState.delete(ctx.from.id);
     await ctx.answerCbQuery('حُفظت الرسالة للإرسال ✅');
-    return ctx.editMessageText(`✅ حُفظت الرسالة الجماعية للإرسال إلى ${result.recipientCount} طالبًا.\nرقم الإرسال: ${result.id}`);
+    const success=`✅ حُفظت الرسالة الجماعية للإرسال إلى ${result.recipientCount} طالبًا.\nرقم الإرسال: ${result.id}`;
+    return state.media?ctx.reply(success):ctx.editMessageText(success);
   }catch(err){return ctx.answerCbQuery(`تعذر الإرسال: ${err.message}`,{show_alert:true});}
 });
 
@@ -4455,8 +4524,8 @@ async function renderExam(ctx, examId, edit = false) {
   const text =
     `📝 ${exam.title || 'الامتحان الشهري ' + exam.exam_number} — ${exam.subject_name}\n` +
     `الحالة: ${exam.status === 'cancelled' ? 'ملغى 🚫' : exam.status === 'published' ? 'منشور 📤' : 'مجدول تلقائيًا ⏰'}\n` +
-    `يفتح: ${new Date(exam.opens_at).toISOString().slice(0, 16).replace('T', ' ')}\n` +
-    `يُغلق: ${new Date(exam.closes_at).toISOString().slice(0, 16).replace('T', ' ')}\n` +
+    `يفتح: ${new Date(exam.opens_at).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad',hour12:false})} (بغداد)\n` +
+    `يُغلق: ${new Date(exam.closes_at).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad',hour12:false})} (بغداد)\n` +
     `الدرجة: ${Number(exam.max_score)}\n\nالأسئلة (${questions.length}):\n${lines.slice(0,2700)}${lines.length>2700?'\n… بقية الأسئلة متاحة كاملة في لوحة الإدارة.':''}`;
   const kb = Markup.inlineKeyboard(rows);
   return edit ? ctx.editMessageText(text, kb) : ctx.reply(text, kb);
@@ -6812,6 +6881,14 @@ async function main() {
   if (attendanceRepair.repaired) console.log(`صُحّح ${attendanceRepair.repaired} سجل حضور إداري كان لا يظهر في تقرير الطالب ✅`);
   backups.start();
   console.log('تم تجهيز قاعدة البيانات ✅');
+  try {
+    await bot.telegram.setMyCommands([
+      {command:'start',description:'إظهار القائمة الرئيسية واستعادة الأزرار'},
+      {command:'menu',description:'القائمة الرئيسية'},
+      {command:'guide',description:'دليل استخدام البوت'}
+    ],{scope:{type:'default'}});
+    await bot.telegram.setChatMenuButton({menuButton:{type:'commands'}});
+  } catch(err) {console.warn('تعذر تفعيل قائمة أوامر تليجرام:',err.message);}
   if(process.env.ADMIN_WEB_ENABLED==='true') {
     adminServer=await require('./adminServer').startAdminServer({db,studies,adminData,scheduler,botToken:BOT_TOKEN,adminIds:ADMIN_IDS,
       wakeNotifications:()=>outboxWorker.tick({force:true})});

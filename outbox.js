@@ -1,7 +1,7 @@
 'use strict';
 
 async function enqueueNotification(client, { key, chatId, text, extra = {}, method = 'sendMessage', priority = 5, expiresAt = null, mark = null }) {
-  if (!['sendMessage', 'sendDocument', 'sendPhoto'].includes(method)) throw new Error('Unsupported notification');
+  if (!['sendMessage', 'sendDocument', 'sendPhoto', 'sendVideo'].includes(method)) throw new Error('Unsupported notification');
   return client.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,method,payload,priority,expires_at,delivery_mark)
     VALUES($1,$2,$3,$4::jsonb,$5,$6,$7::jsonb) ON CONFLICT(dedupe_key) DO NOTHING RETURNING id`,
   [key, chatId, method, JSON.stringify([text, extra]), priority, expiresAt,JSON.stringify(mark)]);

@@ -219,6 +219,41 @@ function createAdminOverrides(pool) {
       return result;
     });
   }
-  return {options,correctSubject,lateAttendance,lessonAttendance,removeLessonAttendance,reopenExam,studentMissingLessons,studentLateAttendance};
+  async function reopenExamForMissing(id,body,actor){
+    const {start,end}=windowDates(body),note=noteValue(body.note);
+    if(end<=new Date())throw appError('حدد نهاية مستقبلية للنافذة.');
+    if(end.getTime()-start.getTime()>30*86400000)throw appError('الحد الأقصى للنافذة 30 يومًا.');
+    return transaction(async c=>{
+      const exam=await parent(c,'exam',id,true);
+      if(exam.status!=='published')throw appError('يجب نشر الامتحان أولًا.');
+      if(new Date(exam.closes_at)>new Date() || start<new Date(exam.closes_at))
+        throw appError('إعادة الفتح متاحة بعد انتهاء الامتحان الأصلي، ولا تبدأ قبله.','INVALID_WINDOW',409);
+      const affected=(await c.query(`INSERT INTO exam_student_windows(exam_id,student_id,opens_at,closes_at,note,created_by)
+        SELECT $1,st.id,$2,$3,$4,$5
+        FROM students st JOIN enrollments en ON en.student_id=st.id
+        WHERE st.stage_id=$6 AND en.stage_season_id=$7 AND en.status='active'
+          AND st.is_active=true AND st.telegram_id IS NOT NULL
+          AND en.started_at<=now() AND (en.ended_at IS NULL OR en.ended_at>now())
+          AND NOT EXISTS (SELECT 1 FROM exam_attempts a
+            WHERE a.exam_id=$1 AND a.student_id=st.id AND a.submitted_at IS NOT NULL)
+        ON CONFLICT(exam_id,student_id) DO UPDATE SET
+          opens_at=EXCLUDED.opens_at,closes_at=EXCLUDED.closes_at,note=EXCLUDED.note,
+          created_by=EXCLUDED.created_by,updated_at=now()
+        RETURNING student_id`,[id,start,end,note,positiveInt(actor),exam.stage_id,exam.stage_season_id])).rows;
+      if(!affected.length)throw appError('لا يوجد طلبة مؤهلون لم يسلموا الامتحان.','NOT_FOUND',409);
+      const opens=start.toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad',hour12:false});
+      const closes=end.toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad',hour12:false});
+      const text=`📝 أعلنت الإدارة إعادة فتح الامتحان «${exam.title||'الشهري '+exam.exam_number}» في مادة «${exam.subject_name}» لمن لم يؤدّه.\nالبداية: ${opens} (بغداد)\nالنهاية: ${closes} (بغداد).\nعند بدء النافذة سيصلك زر أداء الامتحان.`;
+      const signature=`exam-reopen:${id}:${Math.floor(start.getTime()/1000)}:${Math.floor(end.getTime()/1000)}`;
+      const notices=await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
+        SELECT $1||':'||st.id::text,st.telegram_id,$2::jsonb,$3
+        FROM students st WHERE st.id=ANY($4::integer[])
+        ON CONFLICT(dedupe_key) DO NOTHING`,[signature,JSON.stringify([text,{}]),end,affected.map(x=>x.student_id)]);
+      await audit(c,actor,'reopen_exam_for_missing','exam',id,null,
+        {studentCount:affected.length,notified:notices.rowCount,opensAt:start,closesAt:end,note});
+      return {studentCount:affected.length,notified:notices.rowCount,opensAt:start,closesAt:end};
+    });
+  }
+  return {options,correctSubject,lateAttendance,lessonAttendance,removeLessonAttendance,reopenExam,reopenExamForMissing,studentMissingLessons,studentLateAttendance};
 }
 module.exports={createAdminOverrides,windowDates};
