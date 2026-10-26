@@ -4,6 +4,18 @@ const {appError,positiveInt}=require('./integrity');
 const KEY='one-time-lesson-cleanup-20261026-v1';
 const BUTTON='🧹 إزالة الدروس المكررة لمرة واحدة';
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
+// الحقول الثابتة فقط تدخل في بصمة المعاينة؛ أعداد الحضور تتغير لحظيًا ولا يجوز أن تُفشل التنفيذ.
+const STABLE=['id','subject_id','stage_season_id','source_type','source_message_id','activated_at','schedule_date','lecture_date','season_active'];
+const stable=l=>Object.fromEntries(STABLE.map(k=>[k,l[k]]));
+const plain=l=>{const {student_ids,...rest}=l;return rest;};
+function uncovered(groups,selected){
+  let n=0;
+  for(const g of groups){
+    const kept=new Set(g.lessons.filter(l=>!selected.has(l.id)).flatMap(l=>l.student_ids));
+    n+=new Set(g.lessons.filter(l=>selected.has(l.id)).flatMap(l=>l.student_ids).filter(id=>!kept.has(id))).size;
+  }
+  return n;
+}
 function createOneTimeLessonCleanup(pool){
   async function completed(c=pool){return (await c.query('SELECT 1 FROM lesson_repair_batches WHERE key=$1',[KEY])).rowCount>0;}
   async function snapshot(c){
@@ -28,7 +40,11 @@ function createOneTimeLessonCleanup(pool){
     const groups=[...map.entries()].filter(([,ls])=>ls.length>1).map(([key,ls])=>({key,stage:ls[0].stage_name,subject:ls[0].subject_name,date:ls[0].lecture_date,
       lessons:ls.map(r=>({...r,id:Number(r.id),recommended:r.season_active&&r.source_type==='schedule_fallback'&&!r.source_message_id&&ls.some(other=>other.source_message_id&&other.source_type!=='schedule_fallback')}))}));
     groups.sort((a,b)=>Number(b.lessons.some(l=>l.recommended))-Number(a.lessons.some(l=>l.recommended))||a.key.localeCompare(b.key));
-    return {groups,subjects:[...subjects.values()],token:hash({key:KEY,rows})};
+    const ids=groups.flatMap(g=>g.lessons.map(l=>l.id));
+    const att=ids.length?(await c.query('SELECT lesson_id,student_id FROM attendance WHERE lesson_id=ANY($1::int[]) ORDER BY lesson_id,student_id',[ids])).rows:[];
+    const byLesson=new Map();for(const a of att){const k=Number(a.lesson_id);if(!byLesson.has(k))byLesson.set(k,[]);byLesson.get(k).push(String(a.student_id));}
+    for(const g of groups)for(const l of g.lessons)l.student_ids=byLesson.get(l.id)||[];
+    return {groups,subjects:[...subjects.values()],token:hash({key:KEY,groups:groups.map(g=>({key:g.key,lessons:g.lessons.map(stable)}))})};
   }
   async function preview(){
     const c=await pool.connect();
@@ -63,9 +79,9 @@ function createOneTimeLessonCleanup(pool){
       const afterMarks=(await c.query('SELECT * FROM attendance WHERE lesson_id=ANY($1::int[]) ORDER BY id',[lessonIds])).rows;
       if(hash(afterMarks)!==attendanceHash)throw appError('تعذر التحقق من سلامة الحضور.');
       const subjects=s.subjects.map(sub=>({...sub,after:sub.before-eligible.filter(l=>selected.has(l.id)&&Number(l.stage_season_id)===sub.stageSeasonId&&Number(l.subject_id)===sub.subjectId).length}));
-      const result={completed:true,removedFromCounting:lessonIds.length,preservedAttendance:marks.length,attendanceAdded:0,attendanceMoved:0,attendanceDeleted:0,subjects};
+      const result={completed:true,removedFromCounting:lessonIds.length,preservedAttendance:marks.length,studentsWithoutKeptMark:uncovered(s.groups,selected),attendanceAdded:0,attendanceMoved:0,attendanceDeleted:0,subjects};
       await c.query('INSERT INTO lesson_repair_batches(key,actor_id,before_data,after_data) VALUES($1,$2,$3::jsonb,$4::jsonb)',
-        [KEY,actorId,JSON.stringify({token,lessonIds,attendanceHash,lessons:eligible.filter(l=>selected.has(l.id))}),JSON.stringify(result)]);
+        [KEY,actorId,JSON.stringify({token,lessonIds,attendanceHash,lessons:eligible.filter(l=>selected.has(l.id)).map(plain)}),JSON.stringify(result)]);
       await c.query(`INSERT INTO admin_audit_log(actor_id,action,entity_type,entity_id,before_data,after_data)
         VALUES($1,'one_time_lesson_cleanup','institute',0,$2::jsonb,$3::jsonb)`,[actorId,JSON.stringify({lessonIds,attendanceHash}),JSON.stringify(result)]);
       await c.query('COMMIT');return result;
