@@ -2268,6 +2268,10 @@ async function showStudentScheduleDay(ctx, iso){
     return showStudentLessonSchedule(ctx);
   }
 
+  const holiday=(data.blocks||[]).find(b=>b.kind==='holiday'&&iso>=b.start_date&&iso<=b.end_date);
+  if(holiday){await ctx.answerCbQuery();return replyStudentScreen(ctx,student,
+    `📅 ${studentScheduleDayLabel(iso)}\nالمرحلة: ${data.stage_name}\n\n🏖️ عطلة رسمية للمرحلة${holiday.note?'\n'+holiday.note:''}`,
+    Markup.inlineKeyboard([[callbackButton('↩️ أيام الجدول الدراسي','student_lesson_schedule')]]));}
   const checked=new Set(data.entries.map(e=>`${e.subject_id}:${e.lesson_date}`));
   const subjects=data.subjects.filter(sub=>checked.has(`${sub.id}:${iso}`));
   if(!subjects.length){
@@ -4916,8 +4920,29 @@ bot.hears('📝 الامتحانات الشهرية', async (ctx) => {
   return replyStudentScreen(
     ctx, student,
     withStudentName(student, `📝 الامتحانات الشهرية\n\nالمتاحة الآن: ${open.length}\n\nدرجاتك السابقة:\n${doneLines}`),
-    rows.length ? Markup.inlineKeyboard(rows) : undefined
+    (rows.length || done.length) ? Markup.inlineKeyboard([...rows,...done.map(r=>[
+      Markup.button.callback(limitButtonText(`🔍 عرض الأجوبة · ${r.subject_name} · ${r.exam_number} · ${Number(r.score)}/${Number(r.max_score)}`,60),`stex_review:${r.exam_id}`)
+    ])]) : undefined
   );
+});
+
+// Answers are disclosed only after submission and only to the authenticated student.
+bot.action(/^stex_review:(\d+)$/,async ctx=>{
+  const student=await effectiveStudent(ctx);
+  if(!student)return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
+  const result=await studies.getStudentExamReview(student.id,Number(ctx.match[1]));
+  if(!result)return ctx.answerCbQuery('هذه الإجابات غير متاحة لك.',{show_alert:true});
+  await ctx.answerCbQuery();
+  const heading=`📝 ${result.subject_name} — الشهري ${result.exam_number}\n📊 الدرجة: ${Number(result.score)} من ${Number(result.max_score)}`;
+  const lines=result.answers.map(q=>`\nالسؤال ${q.position}: ${q.prompt}\nإجابتك: ${q.answer??'لم تُجب'}\n${q.is_correct===true?'✅ إجابة صحيحة':'❌ إجابة خاطئة أو غير مجابة'}${q.is_correct===true?'':`\nالإجابة الصحيحة: ${q.correct_answer}`}`);
+  let buffer=heading;
+  for(const line of lines){
+    if((buffer+'\n'+line).length>3700){await ctx.reply(buffer);buffer=heading+' (تابع)';}
+    // A single exceptionally long prompt must also stay within Telegram's message limit.
+    if(line.length>3600){await ctx.reply(buffer);buffer=heading+' (تابع)';for(let start=0;start<line.length;start+=3500)await ctx.reply(line.slice(start,start+3500));continue;}
+    buffer+='\n'+line;
+  }
+  return ctx.reply(buffer);
 });
 
 // يعرض السؤال التالي، أو ينهي الامتحان ويُظهر الدرجة فور انتهائه.
@@ -5008,7 +5033,7 @@ bot.action(/stex_ans:(\d+):(\d+):(\d+)/, async (ctx) => {
   try {await studies.submitAnswer(attemptId, questionId, answer);}
   catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
   await ctx.answerCbQuery('سُجّلت إجابتك');
-  await ctx.editMessageText(`السؤال ${question.position}: ${question.prompt}\n\nإجابتك: ${answer} ✔️`);
+  await ctx.editMessageText(`السؤال ${question.position}: ${question.prompt}\n\nإجابتك: ${answer} (تم الحفظ)`);
   return sendNextExamQuestion(ctx, attemptId, attempt.exam_id);
 });
 
@@ -6530,7 +6555,9 @@ async function recoverPendingChannelLessonsForDate(lessonDate) {
         const currentSlots=await db.getPendingScheduledSubjectsForDate(stageSeasonId,lessonDate);
         const oldAudio=posts.filter(p=>publicationDay(p)<lessonDate&&['voice','audio','audio_document','document'].includes(p.content_kind));
         const uniqueMissing=!named.length&&oldAudio.length===1&&Number(oldAudio[0].id)===Number(old.id)&&currentSlots.length===1?currentSlots[0]:null;
-        const subject=require('./scheduledPublication').chooseSubject(oldSlots,old.content_text,allStageSubjects)|| (named.length===1?named[0]:uniqueMissing);
+        const oldSchedule=await db.getScheduledSubjectsForDate(stageSeasonId,oldDate);
+        const subject=require('./scheduledPublication').chooseSubject(oldSlots,old.content_text,allStageSubjects,{singleScheduledSubject:oldSchedule.length===1})
+          ||(named.length===1?named[0]:(oldSchedule.length===1?uniqueMissing:null));
         if(!subject)continue;
         const recoveryDate=oldSlots.some(x=>x.id===subject.id)?oldDate:lessonDate;
         const result=await lessonRecovery.restore(old.id,subject.id,{scheduleDate:recoveryDate});
@@ -6557,12 +6584,13 @@ async function recoverPendingChannelLessonsForDate(lessonDate) {
 
       const allSubjects=(await db.pool.query('SELECT sub.id,sub.name,sub.hashtag FROM subjects sub JOIN stage_seasons ss ON ss.stage_id=sub.stage_id WHERE ss.id=$1',[stageSeasonId])).rows;
       posts.sort((a,b)=>Number(require('./lessonContent').namedSubjects(allSubjects,b.content_text).length===1)-Number(require('./lessonContent').namedSubjects(allSubjects,a.content_text).length===1));
-      // المنشورات المسمّاة تأخذ موادها أولًا؛ ثم الملفات التي بلا اسم تأخذ المواد المتبقية بترتيب وصولها
-      // وترتيب الجدول (وهذا ما كان يحدث عند النشر المباشر). ما لا تتوفر له مادة يبقى معلّقًا
+      // المنشورات المسمّاة تُطابق موادها الصريحة أولاً. الملف غير المسمّى لا يُربط بالترتيب
+      // عندما يكون اليوم مشتركاً بين عدة مواد، بل يبقى في المراجعة اليدوية.
       // إلى أن تُضاف مادته إلى الجدول، فيُفتح حينها 24 ساعة مع إشعار الطلبة.
       for (const post of posts) {
         const available=await db.getPendingScheduledSubjectsForDate(stageSeasonId,lessonDate);
-        const subject = require('./scheduledPublication').chooseSubject(available,post.content_text,allSubjects,{byOrder:true});
+        const fullDaySchedule=await db.getScheduledSubjectsForDate(stageSeasonId,lessonDate);
+        const subject = require('./scheduledPublication').chooseSubject(available,post.content_text,allSubjects,{singleScheduledSubject:fullDaySchedule.length===1});
         if(!subject)continue;
         const channel = await db.getChannelByChatId(post.telegram_chat_id);
         if (!channel || Number(channel.stage_season_id) !== Number(stageSeasonId)) continue;
@@ -6656,6 +6684,12 @@ async function handleChannelLesson(ctx) {
     }
 
     const currentDate = currentDateInTimeZone(ATTENDANCE_TIME_ZONE);
+    if(await db.isStageCalendarBlocked(channel.stage_season_id,currentDate,'lesson')){
+      await db.setChannelPostActivityOutcome(chatId,activityMessageId,'ignored_non_lesson',
+        'عطلة مسجلة للمرحلة في هذا اليوم؛ أوقف التفعيل التلقائي للدرس.',
+        {stageId:channel.stage_id,stageSeasonId:channel.stage_season_id});
+      return;
+    }
     const postLink = telegramMessageLink(message);
     const externalUrl = extractFirstUrl(message);
     // وجهة الطالب هي منشور الدرس نفسه داخل قناة مرحلته، حتى إن احتوى المنشور رابطًا خارجيًا.
@@ -6801,6 +6835,11 @@ async function checkReminders() {
   if(reminderCheckRunning)return;reminderCheckRunning=true;
   try{
     for(const lesson of await db.getLessonsNeedingReminder()){
+      const lessonDate=lesson.schedule_date ? String(lesson.schedule_date).slice(0,10) :
+        new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(lesson.activated_at));
+      // Pause reminders throughout a holiday, even for a lesson published yesterday.
+      if(await db.isStageCalendarBlocked(lesson.stage_season_id,currentDateInTimeZone(ATTENDANCE_TIME_ZONE),'lesson')||
+         await db.isStageCalendarBlocked(lesson.stage_season_id,lessonDate,'lesson'))continue;
       const c=await db.pool.connect();
       try{
         await c.query('BEGIN');

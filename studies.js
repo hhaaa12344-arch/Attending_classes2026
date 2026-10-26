@@ -3,6 +3,7 @@
 const { pool } = require('./db');
 const {examWindowSql,enrollmentSql}=require('./examAccess');
 const { appError, positiveInt, pageOptions, validScore } = require('./integrity');
+const {assertExamDayFree}=require('./examDayPolicy');
 const {startOrResumeAttempt,submitAnswer,finalizeAttempt,isExamAvailable,overrideStudentGrade}=require('./academicTransactions').createAcademicTransactions(pool);
 
 // توزيع الدرجات في الموسم (قابل للتغيير من مكان واحد)
@@ -648,9 +649,13 @@ async function openSession(groupId,teacherId,title,hours=24){
   const c=await pool.connect();
   try{
     await c.query('BEGIN');
-    const group=(await c.query(`SELECT g.id FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id
+    const group=(await c.query(`SELECT g.id,g.stage_season_id FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id
       WHERE g.id=$1 AND g.is_active=true AND ss.is_active=true AND participation_enabled(g.subject_id,ss.id) FOR SHARE OF ss`,[groupId])).rows[0];
     if(!group)throw appError('هذه المادة غير متاحة للمباحثات أو المجموعة غير نشطة.');
+    if((await c.query(`SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=$1
+      AND (now() AT TIME ZONE $2)::date BETWEEN b.start_date AND b.end_date LIMIT 1`,
+      [group.stage_season_id,SCHEDULE_TZ])).rowCount)
+      throw appError('المباحثات معطلة لهذا اليوم أو انتهى موسم المباحثات لهذه المرحلة.');
     const result=(await c.query(`INSERT INTO mubahatha_sessions(group_id,teacher_id,title,closes_at)
       VALUES($1,$2,$3,now()+make_interval(hours=>$4::int)) RETURNING *`,[groupId,teacherId,title,hours])).rows[0];
     await c.query('COMMIT');return result;
@@ -771,6 +776,9 @@ async function openEndAttendance(sessionId, automatic = false) {
        AND (NOT $3 OR closes_at - make_interval(mins => $2::int) <= now())
        AND EXISTS (SELECT 1 FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id
          WHERE g.id=mubahatha_sessions.group_id AND g.is_active=true AND ss.is_active=true
+           AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=g.stage_season_id
+             AND COALESCE(mubahatha_sessions.held_on,(mubahatha_sessions.opened_at+interval '3 hours')::date)
+                BETWEEN b.start_date AND b.end_date)
            AND participation_enabled(g.subject_id,g.stage_season_id))
      RETURNING *`,
     [sessionId, END_ATTENDANCE_MINUTES, automatic, START_ATTENDANCE_DELAY_MINUTES]
@@ -836,7 +844,9 @@ const getSessionsNeedingAutoEnd = () =>
        WHERE s.end_opened_at IS NULL AND s.is_closed=false AND s.start_notifications_queued=true AND g.is_active=true
          AND s.attendance_reopened_at IS NULL
          AND s.closes_at - make_interval(mins => $1::int) <= now()
-         AND s.closes_at > now()`,
+         AND s.closes_at > now()
+         AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=g.stage_season_id
+           AND COALESCE(s.held_on,(s.opened_at+interval '3 hours')::date) BETWEEN b.start_date AND b.end_date)`,
       [END_ATTENDANCE_MINUTES]
     )
     .then((r) => r.rows);
@@ -874,6 +884,7 @@ function upcomingWeekDays(from = new Date()) {
   return days;
 }
 
+
 async function createExam(subjectId, stageSeasonId, teacherId, { examNumber, title, dateIso, hours }) {
   const n = Number(examNumber);
   if (!Number.isInteger(n) || n < 1 || n > GRADE_WEIGHTS.examsPerSeason) {
@@ -893,6 +904,7 @@ async function createExam(subjectId, stageSeasonId, teacherId, { examNumber, tit
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await assertExamDayFree(client,subjectId,stageSeasonId,dateIso);
     const r = await client.query(
       `INSERT INTO exams(subject_id, stage_season_id, teacher_id, exam_number, title,
                          opens_at, available_hours, closes_at, max_score)
@@ -1024,6 +1036,7 @@ async function updateExam(examId,{title,dateIso,hours}){
     if(before.status==='cancelled')throw appError('الامتحان ملغى؛ يبقى سجله محفوظًا.','CONFLICT',409);
     if((await c.query('SELECT 1 FROM exam_attempts WHERE exam_id=$1 LIMIT 1',[examId])).rowCount)
       throw appError('بدأ أحد الطلبة الامتحان؛ لا يمكن تعديله.','ALREADY_TAKEN',409);
+    await assertExamDayFree(c,before.subject_id,before.stage_season_id,dateIso,examId);
     const result=(await c.query(`UPDATE exams SET title=$2,
       opens_at=(($3::date+make_interval(hours=>$5::int)) AT TIME ZONE $6) AT TIME ZONE 'UTC',
       closes_at=((($3::date+make_interval(hours=>$5::int)) AT TIME ZONE $6) AT TIME ZONE 'UTC')+make_interval(hours=>$4::int),
@@ -1167,7 +1180,7 @@ async function postponeExam(examId, newDateIso, hours) {
   const client=await pool.connect();
   try {
   await client.query('BEGIN');
-   const original=(await client.query('SELECT id,status FROM exams WHERE id=$1 FOR UPDATE',[examId])).rows[0];
+   const original=(await client.query('SELECT id,status,subject_id,stage_season_id FROM exams WHERE id=$1 FOR UPDATE',[examId])).rows[0];
    if(!original||original.status==='cancelled')throw appError('الامتحان غير موجود أو ملغى.','CONFLICT',409);
   const submitted = await client
     .query('SELECT COUNT(*) AS c FROM exam_attempts WHERE exam_id=$1', [examId])
@@ -1184,6 +1197,7 @@ async function postponeExam(examId, newDateIso, hours) {
     err.code = 'BAD_HOURS';
     throw err;
   }
+  await assertExamDayFree(client,original.subject_id,original.stage_season_id,newDateIso,examId);
   const result=await client
     .query(
       `UPDATE exams SET
@@ -1268,7 +1282,7 @@ const getStudentExamResults = (studentId) =>
   pool
     .query(
       `SELECT a.score, a.correct_count, a.total_questions, a.submitted_at,
-              e.exam_number, e.max_score, sub.name AS subject_name
+              e.id AS exam_id, e.exam_number, e.max_score, sub.name AS subject_name
        FROM exam_attempts a
        JOIN exams e ON e.id=a.exam_id
        JOIN subjects sub ON sub.id=e.subject_id
@@ -1277,6 +1291,22 @@ const getStudentExamResults = (studentId) =>
       [studentId]
     )
     .then((r) => r.rows);
+
+// A submitted attempt can be reviewed only by its owner. Never reveal keys for live attempts.
+const getStudentExamReview = async (studentId, examId) => {
+  const exam=(await pool.query(`SELECT e.id,e.title,e.exam_number,e.max_score,a.score,a.submitted_at,
+      sub.name AS subject_name FROM exam_attempts a
+      JOIN exams e ON e.id=a.exam_id JOIN subjects sub ON sub.id=e.subject_id
+      WHERE a.student_id=$1 AND e.id=$2 AND a.submitted_at IS NOT NULL`,
+    [studentId,examId])).rows[0];
+  if(!exam)return null;
+  const answers=(await pool.query(`SELECT q.position,q.prompt,q.correct_answer,ans.answer,ans.is_correct
+    FROM exam_questions q JOIN exam_attempts a ON a.exam_id=q.exam_id AND a.student_id=$1
+      AND a.submitted_at IS NOT NULL
+    LEFT JOIN exam_answers ans ON ans.question_id=q.id AND ans.attempt_id=a.id
+    WHERE q.exam_id=$2 ORDER BY q.position`,[studentId,examId])).rows;
+  return {...exam,answers};
+};
 
 // جدول الطالب: مواعيد المجموعات التي هو عضو فيها.
 const listStudentSlots = (studentId) =>
@@ -1809,6 +1839,8 @@ const getSlotsNeedingPrompt = (leadMinutes = 5) =>
        LEFT JOIN teachers t ON t.id=s.teacher_id AND t.is_active=true
        CROSS JOIN loc
        WHERE s.is_active=true AND participation_enabled(s.subject_id,s.stage_season_id)
+         AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=s.stage_season_id
+           AND loc.ln::date BETWEEN b.start_date AND b.end_date)
          AND EXTRACT(DOW FROM loc.ln)::int = s.day_of_week
          AND (loc.ln::date + make_time(s.hour, s.minute, 0)) - loc.ln
              BETWEEN interval '0 minutes' AND make_interval(mins => $2::int)
@@ -1837,6 +1869,8 @@ const recordSlotDecision = (slotId, scheduledDate, decision, decidedBy, reason =
        SELECT sl.id,$2::date,$3,now(),$4,$6 FROM schedule_slots sl
        JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
        WHERE sl.id=$1 AND sl.is_active=true AND participation_enabled(sl.subject_id,sl.stage_season_id) AND $2::date=(now() AT TIME ZONE $5)::date
+         AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=sl.stage_season_id
+           AND $2::date BETWEEN b.start_date AND b.end_date)
          AND EXTRACT(DOW FROM $2::date)::int=sl.day_of_week
          AND (now() AT TIME ZONE $5) < $2::date+make_time(sl.hour,sl.minute,0)+make_interval(hours=>sl.duration_hours)
        ON CONFLICT (slot_id, scheduled_date)
@@ -1884,6 +1918,8 @@ const getSlotsReadyToStart = () =>
        CROSS JOIN dates
        LEFT JOIN slot_decisions d ON d.slot_id=s.id AND d.scheduled_date=dates.day
        WHERE s.is_active=true AND participation_enabled(s.subject_id,s.stage_season_id) AND d.session_id IS NULL
+         AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=s.stage_season_id
+           AND dates.day BETWEEN b.start_date AND b.end_date)
          AND (d.decision='confirmed' OR ($2::boolean=false AND d.decision IS NULL
               AND s.created_at <= (((dates.day+make_time(s.hour,s.minute,0)) AT TIME ZONE $1) AT TIME ZONE 'UTC')))
          AND EXTRACT(DOW FROM dates.day)::int=s.day_of_week
@@ -1899,6 +1935,11 @@ async function startSessionFromSlot(slot) {
   try {
     await client.query('BEGIN');
     await client.query('SELECT id FROM stage_seasons WHERE id=$1 FOR SHARE',[slot.stage_season_id]);
+    if((await client.query(`SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=$1
+      AND $2::date BETWEEN b.start_date AND b.end_date LIMIT 1`,
+      [slot.stage_season_id,slot.scheduled_date])).rowCount){
+      await client.query('COMMIT');return null;
+    }
     await client.query(`INSERT INTO slot_decisions(slot_id,scheduled_date) VALUES($1,$2)
       ON CONFLICT(slot_id,scheduled_date) DO NOTHING`, [slot.id, slot.scheduled_date]);
     const claim = await client.query(
@@ -2267,6 +2308,7 @@ module.exports = {
   getAttemptById,
   getQuestionById,
   getStudentExamResults,
+  getStudentExamReview,
   listStudentSlots,
   listUngradedReports,
   getInstituteExceptions,

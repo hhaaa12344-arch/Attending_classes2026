@@ -36,6 +36,8 @@ function createScheduledFallback(db, { graceMinutes = graceFromEnv() } = {}) {
       JOIN subjects sub ON sub.id=e.subject_id
       JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.stage_id=sub.stage_id
       WHERE e.stage_season_id=$1 AND e.lesson_date=$2::date AND ($3::int IS NULL OR sub.id=$3)
+        AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=e.stage_season_id
+          AND b.kind='holiday' AND e.lesson_date BETWEEN b.start_date AND b.end_date)
         AND NOT EXISTS(SELECT 1 FROM effective_lessons l
           WHERE l.stage_season_id=e.stage_season_id AND l.subject_id=sub.id AND ${dayExpr}=e.lesson_date)
       ORDER BY sub.id`, [stageSeasonId, day, subjectId])).rows;
@@ -48,7 +50,7 @@ function createScheduledFallback(db, { graceMinutes = graceFromEnv() } = {}) {
 
   // الفتح التلقائي ليوم واحد. لا يعمل إلا بعد وجود درس معروف من القناة في اليوم نفسه ومرور المهلة.
   async function sweepDate(stageSeasonId, day, { grace = graceMinutes } = {}) {
-    if (grace === null || !DATE_RE.test(String(day || ''))) return { created: [] };
+    if (grace === null || !DATE_RE.test(String(day || '')) || await db.isStageCalendarBlocked(stageSeasonId,day,'lesson')) return { created: [] };
     const c = await db.pool.connect();
     try {
       await c.query('BEGIN');
@@ -62,6 +64,19 @@ function createScheduledFallback(db, { graceMinutes = graceFromEnv() } = {}) {
       const ready = anchor && anchor.at && (await c.query(
         "SELECT ($1::timestamp + ($2 || ' minutes')::interval) <= now() AS ok", [anchor.at, String(grace)])).rows[0].ok;
       if (!ready) { await c.query('COMMIT'); return { created: [] }; }
+      // An unidentified queued recording cannot be safely paired with a subject.
+      // Do not create a fictitious lesson while an ambiguous audio post awaits review.
+      const unresolved=(await c.query(`SELECT p.content_text FROM pending_channel_lesson_posts p
+        WHERE p.stage_season_id=$1 AND p.lesson_date=$2::date AND p.status='pending'
+          AND p.auto_match=true AND p.content_kind<>'lesson_title'`,[stageSeasonId,day])).rows;
+      if(unresolved.length){
+        const allSubjects=(await c.query(`SELECT sub.id,sub.name,sub.hashtag FROM subjects sub
+          JOIN stage_seasons ss ON ss.stage_id=sub.stage_id WHERE ss.id=$1`,[stageSeasonId])).rows;
+        const {namedSubjects}=require('./lessonContent');
+        if(unresolved.some(p=>namedSubjects(allSubjects,p.content_text).length!==1)){
+          await c.query('COMMIT');return {created:[],awaitingReview:true};
+        }
+      }
       const created = [];
       for (const subject of await missingSubjects(c, stageSeasonId, day)) {
         const lesson = await db.activateLesson(subject.id, 24, SOURCE_TYPE, null, null, null, null, { client: c, scheduleDate: day });
@@ -89,6 +104,7 @@ function createScheduledFallback(db, { graceMinutes = graceFromEnv() } = {}) {
     stageSeasonId = positiveInt(stageSeasonId); subjectId = positiveInt(subjectId);
     if (!DATE_RE.test(String(scheduleDate || ''))) throw appError('تاريخ الجدول غير صالح.');
     if (scheduleDate > baghdadDay(new Date())) throw appError('موعد هذا الدرس لم يحن بعد.');
+    if(await db.isStageCalendarBlocked(stageSeasonId,scheduleDate,'lesson'))throw appError('هذا التاريخ عطلة؛ لا يُفعّل درس مجدول خلال العطلة.');
     const c = await db.pool.connect();
     try {
       await c.query('BEGIN');

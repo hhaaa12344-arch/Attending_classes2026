@@ -153,6 +153,18 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
         const {subjectId,seasonId}=await requireOwnedSubject(actor,q.subjectId,q.seasonId);
         result=await studies.listExamsForSubject(subjectId,seasonId);
       }
+      else if(route==='/exam-date-check'){
+        const {subjectId,seasonId}=await requireOwnedSubject(actor,q.subjectId,q.seasonId);
+        const {findExamDayConflict}=require('./examDayPolicy');
+        const exceptId=q.exceptId?positiveInt(q.exceptId):null;
+        if(exceptId){
+          const exam=await requireOwnedExam(actor,exceptId);
+          if(Number(exam.stage_season_id)!==seasonId||Number(exam.subject_id)!==subjectId)throw appError('الامتحان لا يتبع المادة والموسم المحددين.','FORBIDDEN',403);
+        }
+        const other=await findExamDayConflict(db.pool,seasonId,q.dateIso,exceptId);
+        result={available:!other,conflictingExamNumber:other?Number(other.exam_number):null,
+          conflictingSubjectName:other?.subject_name||null};
+      }
       else if(/^\/exams\/\d+$/.test(route)){
         const exam=await requireOwnedExam(actor,route.split('/')[2]);
         result={exam,questions:await studies.listExamQuestions(exam.id)};

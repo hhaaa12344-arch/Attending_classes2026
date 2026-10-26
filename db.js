@@ -6,6 +6,7 @@ defaults.parseInputDatesAsUTC = true;
 types.setTypeParser(1114, value => new Date(value.replace(' ','T')+'Z'));
 types.setTypeParser(1082, value => new Date(value+'T00:00:00Z'));
 const { normalizeHashtag } = require('./utils');
+const { summarizeLessonScheduleAudit } = require('./lessonScheduleAudit');
 
 const MAX_LEAVE_DAYS_PER_SEASON = 10;
 const poolMax=Number(process.env.PG_POOL_MAX||5);
@@ -196,6 +197,21 @@ async function initSchema() {
     );
     CREATE INDEX IF NOT EXISTS idx_lesson_schedule_stage_season_date
       ON lesson_schedule_entries(stage_season_id, lesson_date);
+
+    -- تقويم تعليق الدراسة، خاص بموسم مرحلة واحدة ويشمل جميع طلبتها ومجموعاتها.
+    CREATE TABLE IF NOT EXISTS stage_calendar_blocks (
+      id SERIAL PRIMARY KEY,
+      stage_season_id INTEGER NOT NULL REFERENCES stage_seasons(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('holiday','discussions','discussion_end')),
+      start_date DATE NOT NULL,
+      end_date DATE NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMP NOT NULL DEFAULT now(),
+      CHECK (end_date>=start_date),
+      UNIQUE(stage_season_id,kind,start_date,end_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_stage_calendar_blocks_lookup
+      ON stage_calendar_blocks(stage_season_id,start_date,end_date);
 
     -- ملفات الدروس التي وصلت من القناة قبل إدخال جدول ذلك اليوم.
     -- تُحفظ مؤقتًا ثم تُطابق تلقائيًا مع المواد المجدولة بعد استقرار إدخال الجدول،
@@ -2908,6 +2924,69 @@ async function resolvePendingChannelLessonPostBySource(chatId, messageId, lesson
   ).rows[0] || null;
 }
 
+// The active block date is always the stage-local calendar day (Asia/Baghdad).
+const validCalendarIso=(iso)=>/^\d{4}-\d{2}-\d{2}$/.test(iso)&&
+  !Number.isNaN(Date.parse(`${iso}T00:00:00Z`))&&new Date(`${iso}T00:00:00Z`).toISOString().slice(0,10)===iso;
+async function isStageCalendarBlocked(stageSeasonId,dateIso,kind='discussion',client=pool) {
+  if(!['lesson','discussion'].includes(kind)||!validCalendarIso(String(dateIso)))return false;
+  return (await client.query(`SELECT 1 FROM stage_calendar_blocks
+    WHERE stage_season_id=$1 AND start_date<=$2::date AND end_date>=$2::date
+      AND (kind='holiday' OR ($3='discussion' AND kind IN ('discussions','discussion_end')))
+    LIMIT 1`,[stageSeasonId,dateIso,kind])).rowCount>0;
+}
+async function addStageCalendarBlock(stageSeasonId,{kind,startDate,endDate,note=''}) {
+  if(!['holiday','discussions','discussion_end'].includes(kind))throw new Error('نوع التعطيل غير صالح.');
+  if(!validCalendarIso(String(startDate))|| (kind!=='discussion_end'&& !validCalendarIso(String(endDate))))
+    throw new Error('تاريخ التعطيل غير صالح.');
+  const until=kind==='discussion_end'?'9999-12-31':endDate;
+  if(until<startDate)throw new Error('نهاية التعطيل لا يمكن أن تسبق بدايته.');
+  const description=String(note||'').trim();if(description.length>250)throw new Error('الملاحظة طويلة جدًا.');
+  const c=await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const ss=(await c.query('SELECT ss.id,ss.stage_id FROM stage_seasons ss WHERE ss.id=$1 AND ss.is_active=true FOR UPDATE',[stageSeasonId])).rows[0];
+    if(!ss)throw new Error('موسم المرحلة غير نشط.');
+    const row=(await c.query(`INSERT INTO stage_calendar_blocks(stage_season_id,kind,start_date,end_date,note)
+      VALUES($1,$2,$3::date,$4::date,$5) ON CONFLICT(stage_season_id,kind,start_date,end_date)
+      DO UPDATE SET note=EXCLUDED.note RETURNING id,stage_season_id,kind,start_date::text,end_date::text,note`,
+      [stageSeasonId,kind,startDate,until,description])).rows[0];
+    // Previously queued but unsent notices must not leak through after an admin pause.
+    // Existing Telegram messages cannot be recalled; new enqueue paths are blocked below.
+    if(kind==='holiday')await c.query(`UPDATE notification_outbox n SET status='expired',lease_until=NULL
+      WHERE n.status='pending' AND n.dedupe_key LIKE $1
+        AND split_part(n.dedupe_key,':',3) BETWEEN $2 AND $3`,
+      [`daily:${ss.stage_id}:%`,startDate,until]);
+    await c.query(`UPDATE notification_outbox n SET status='expired',lease_until=NULL
+      WHERE n.status='pending' AND (
+        EXISTS(SELECT 1 FROM schedule_slots sl WHERE sl.stage_season_id=$1
+          AND n.dedupe_key LIKE 'slot:'||sl.id::text||':%'
+          AND split_part(n.dedupe_key,':',3) BETWEEN $2 AND $3)
+        OR EXISTS(SELECT 1 FROM mubahatha_sessions s
+          JOIN mubahatha_groups g ON g.id=s.group_id AND g.stage_season_id=$1
+          WHERE n.dedupe_key LIKE 'session:'||s.id::text||':%'
+            AND COALESCE(s.held_on,(s.opened_at+interval '3 hours')::date) BETWEEN $2::date AND $3::date)
+      )`,[stageSeasonId,startDate,until]);
+    if(kind==='holiday')await c.query(`UPDATE notification_outbox n SET status='expired',lease_until=NULL
+      WHERE n.status='pending' AND EXISTS(SELECT 1 FROM effective_lessons l
+        WHERE l.stage_season_id=$1 AND n.dedupe_key LIKE 'lesson-reminder:'||l.id::text||':%'
+          AND COALESCE(l.schedule_date,(l.activated_at+interval '3 hours')::date) BETWEEN $2::date AND $3::date)`,
+      [stageSeasonId,startDate,until]);
+    // Also cancel outstanding reminders for older lessons if today itself became a holiday.
+    if(kind==='holiday')await c.query(`UPDATE notification_outbox n SET status='expired',lease_until=NULL
+      WHERE n.status='pending'
+        AND (now() AT TIME ZONE 'Asia/Baghdad')::date BETWEEN $2::date AND $3::date
+        AND EXISTS(SELECT 1 FROM effective_lessons l
+          WHERE l.stage_season_id=$1 AND n.dedupe_key LIKE 'lesson-reminder:'||l.id::text||':%')`,
+      [stageSeasonId,startDate,until]);
+    await c.query('COMMIT');return row;
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+}
+async function removeStageCalendarBlock(stageSeasonId,id) {
+  const r=await pool.query(`DELETE FROM stage_calendar_blocks WHERE id=$1 AND stage_season_id=$2
+    RETURNING id,kind,start_date::text,end_date::text`,[id,stageSeasonId]);
+  return r.rows[0]||null;
+}
+
 // ---------------- جدول الدروس الدراسي ----------------
 function addMonthsIso(dateIso, months) {
   const d = new Date(`${dateIso}T00:00:00Z`);
@@ -2954,7 +3033,38 @@ async function getLessonSchedule(stageSeasonId) {
   const entries = (await pool.query(`SELECT id,subject_id,lesson_date::text AS lesson_date
     FROM lesson_schedule_entries WHERE stage_season_id=$1 ORDER BY lesson_date,subject_id`, [stageSeasonId])).rows;
   const startDate = normalizeDateString(ss.start_date) || '';
-  return { ...ss, start_date: startDate, end_date_exclusive: addMonthsIso(startDate, 6), subjects, entries, dates: lessonScheduleDates(startDate) };
+  const blocks=(await pool.query(`SELECT id,kind,start_date::text,end_date::text,note FROM stage_calendar_blocks
+    WHERE stage_season_id=$1 ORDER BY start_date,id`,[stageSeasonId])).rows;
+  return { ...ss, start_date: startDate, end_date_exclusive: addMonthsIso(startDate, 6), subjects, entries, blocks, dates: lessonScheduleDates(startDate) };
+}
+
+// مقارنة محايدة بين مواعيد جدول الدروس والدروس المفعلة فعليًا.
+// لا تُسقط درسًا من تقارير الطلاب ولا تحذف حضوره: التصحيح يتطلب مراجعة المصدر.
+async function getLessonScheduleAudit(stageSeasonId) {
+  const season=(await pool.query(`SELECT ss.id,ss.stage_id FROM stage_seasons ss WHERE ss.id=$1`,[stageSeasonId])).rows[0];
+  if(!season)return null;
+  const summaries=(await pool.query(`SELECT sub.id AS subject_id,sub.name AS subject_name,
+    (SELECT COUNT(*)::int FROM lesson_schedule_entries e
+     WHERE e.stage_season_id=$1 AND e.subject_id=sub.id) AS planned_count,
+    (SELECT COUNT(*)::int FROM effective_lessons l
+     WHERE l.stage_season_id=$1 AND l.subject_id=sub.id) AS activated_count
+    FROM subjects sub WHERE sub.stage_id=$2 ORDER BY sub.id`,[stageSeasonId,season.stage_id])).rows;
+  const lessons=(await pool.query(`WITH dated AS (
+    SELECT l.id,l.subject_id,l.activated_at,l.source_type,l.source_url,l.schedule_date,
+       COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date) AS lesson_day
+    FROM effective_lessons l
+    JOIN subjects sub ON sub.id=l.subject_id AND sub.stage_id=$2
+    WHERE l.stage_season_id=$1
+  ), ordered AS (
+    SELECT dated.*,ROW_NUMBER() OVER (PARTITION BY subject_id,lesson_day ORDER BY activated_at,id)::int AS day_order
+    FROM dated
+  )
+  SELECT o.id,o.subject_id,o.activated_at,o.lesson_day::text AS lesson_date,o.source_type,o.source_url,o.day_order,
+    EXISTS(SELECT 1 FROM lesson_schedule_entries e WHERE e.stage_season_id=$1
+       AND e.subject_id=o.subject_id AND e.lesson_date=o.lesson_day) AS in_schedule,
+    (SELECT COUNT(*)::int FROM attendance a WHERE a.lesson_id=o.id) AS attendance_count
+  FROM ordered o ORDER BY o.subject_id,o.lesson_day,o.activated_at,o.id`,[stageSeasonId,season.stage_id])).rows;
+  return summarizeLessonScheduleAudit(season.id,summaries,lessons);
 }
 
 // المواد المجدولة للنشر في تاريخ محدد داخل موسم المرحلة.
@@ -2967,6 +3077,8 @@ async function getScheduledSubjectsForDate(stageSeasonId, lessonDate) {
     JOIN subjects sub ON sub.id=lse.subject_id
     JOIN stage_seasons ss ON ss.id=lse.stage_season_id AND ss.stage_id=sub.stage_id
     WHERE lse.stage_season_id=$1 AND lse.lesson_date=$2
+      AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=lse.stage_season_id
+        AND b.kind='holiday' AND lse.lesson_date BETWEEN b.start_date AND b.end_date)
     ORDER BY sub.id`, [stageSeasonId, lessonDate])).rows;
 }
 
@@ -2982,6 +3094,8 @@ async function getPendingScheduledSubjectsForDate(stageSeasonId, lessonDate, que
     JOIN subjects sub ON sub.id=lse.subject_id
     JOIN stage_seasons ss ON ss.id=lse.stage_season_id AND ss.stage_id=sub.stage_id
     WHERE lse.stage_season_id=$1 AND lse.lesson_date=$2
+      AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=lse.stage_season_id
+        AND b.kind='holiday' AND lse.lesson_date BETWEEN b.start_date AND b.end_date)
       AND NOT EXISTS (
         SELECT 1
         FROM effective_lessons l
@@ -3004,6 +3118,7 @@ async function setLessonScheduleEntry(stageSeasonId,subjectId,lessonDate,checked
   if(!new Set(lessonScheduleDates(normalizedStartDate)).has(date))
     throw new Error('يمكن اختيار أيام الدراسة فقط، مع استبعاد الخميس والجمعة.');
   if(checked) {
+    if(await isStageCalendarBlocked(stageSeasonId,date,'lesson'))throw new Error('هذا اليوم عطلة للمرحلة؛ ألغِ العطلة أولًا لإضافة موعد نشر.');
     const inserted = await pool.query(`INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date)
       VALUES($1,$2,$3) ON CONFLICT(stage_season_id,subject_id,lesson_date) DO NOTHING RETURNING *`,
       [stageSeasonId, subjectId, date]);
@@ -3057,6 +3172,10 @@ module.exports = {
   getStudentActiveStageSeason,
   listStageSeasons,
   getLessonSchedule,
+  getLessonScheduleAudit,
+  isStageCalendarBlocked,
+  addStageCalendarBlock,
+  removeStageCalendarBlock,
   getScheduledSubjectsForDate,
   getPendingScheduledSubjectsForDate,
   queuePendingChannelLessonPost,

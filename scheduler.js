@@ -20,6 +20,8 @@ function createScheduler({ pool, studies }) {
         FROM mubahatha_sessions s JOIN mubahatha_groups g ON g.id=s.group_id
         JOIN subjects sub ON sub.id=g.subject_id JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
         WHERE s.id=$1 AND g.is_active=true AND participation_enabled(g.subject_id,g.stage_season_id) AND s.${field}=false
+          AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=g.stage_season_id
+            AND COALESCE(s.held_on,(s.opened_at+interval '3 hours')::date) BETWEEN b.start_date AND b.end_date)
           AND s.attendance_reopened_at IS NULL
           ${phase === 'start' ? `AND s.is_closed=false AND s.opened_at + make_interval(mins => ${Number(studies.START_ATTENDANCE_DELAY_MINUTES)}) <= now()` : 'AND s.end_opened_at IS NOT NULL AND s.end_opened_at <= now()'}
         FOR UPDATE OF s`, [sessionId]);
@@ -85,6 +87,8 @@ function createScheduler({ pool, studies }) {
         JOIN stage_seasons ss ON ss.id=sl.stage_season_id AND ss.is_active=true
         JOIN stages sg ON sg.id=ss.stage_id
         WHERE d.slot_id=$1 AND d.scheduled_date=$2::date AND d.decision=$4
+          AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=sl.stage_season_id
+            AND d.scheduled_date BETWEEN b.start_date AND b.end_date)
           AND sl.is_active=true AND participation_enabled(sl.subject_id,sl.stage_season_id)
         FOR UPDATE OF d`,[slotId,scheduledDate,studies.SCHEDULE_TZ,decision]);
       const slot=q.rows[0];
@@ -131,6 +135,8 @@ function createScheduler({ pool, studies }) {
       CROSS JOIN dates CROSS JOIN loc
       LEFT JOIN slot_decisions d ON d.slot_id=sl.id AND d.scheduled_date=dates.day
       WHERE sl.is_active=true AND participation_enabled(sl.subject_id,sl.stage_season_id)
+        AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=sl.stage_season_id
+          AND dates.day BETWEEN b.start_date AND b.end_date)
         AND EXTRACT(DOW FROM dates.day)::int=sl.day_of_week
         AND loc.local_now>=dates.day+make_time(sl.hour,sl.minute,0)+make_interval(hours=>sl.duration_hours)
         AND sl.created_at<=((dates.day+make_time(sl.hour,sl.minute,0)) AT TIME ZONE $1::text) AT TIME ZONE 'UTC'

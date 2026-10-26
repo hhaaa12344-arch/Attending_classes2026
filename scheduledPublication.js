@@ -3,15 +3,14 @@
 // post, or an old backlog must never silently consume today's first subject.
 const baghdadDay=date=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(date);
 const {classify,namedSubjects,messageText}=require('./lessonContent');
-// عند وجود اسم صريح للمادة يُعتمد الاسم فقط. وإن لم يوجد اسم:
-//  - مع {byOrder:true} تُؤخذ أول مادة مجدولة لم تُفعّل بعد (بترتيب أعمدة الجدول)،
-//    وهو المسار المعتاد لنشر ملف صوتي بلا وصف.
-//  - وبدونه لا يُختار إلا إذا بقيت مادة واحدة فقط.
-function chooseSubject(subjects,text,allSubjects=subjects,{byOrder=false}={}){
+// A caption/file name is authoritative only when it identifies exactly one subject.
+// A subjectless file must NEVER consume the first of several scheduled subjects:
+// publication order (or an anonymous MP3 number) does not establish its curriculum.
+// A sole scheduled subject for the ENTIRE day is the only safe schedule-only match.
+function chooseSubject(subjects,text,allSubjects=subjects,{singleScheduledSubject=false}={}){
   const matches=namedSubjects(allSubjects,text);
-  if(matches.length)return matches.length===1?subjects.find(s=>s.id===matches[0].id):null;
-  if(byOrder)return subjects[0]||null;
-  return subjects.length===1?subjects[0]:null;
+  if(matches.length)return matches.length===1?subjects.find(s=>Number(s.id)===Number(matches[0].id))||null:null;
+  return singleScheduledSubject&&subjects.length===1?subjects[0]:null;
 }
 function createScheduledPublication(db){
   async function publish({channel,message,sourceUrl,contentKind,edited=false,explicitSubjectId=null}){
@@ -58,15 +57,14 @@ function createScheduledPublication(db){
       // A titled link gets a short pairing interval. Link-only lectures are recovered
       // after the interval; a following file belongs to that same lecture.
       if(classification.kind==='title'||!autoMatch||!p.auto_match||p.status!=='pending'){await c.query('COMMIT');return {created:false,pending:p};}
-      // طابور الملفات التي بلا اسم مادة: الأقدم فيه يأخذ أول مادة مجدولة متبقية.
-      // الملفات المسمّاة (حتى لو كانت مادتها غير مجدولة بعد) لا تدخل الطابور كي لا تعطّل ما بعدها.
-      const queue=(await c.query(`SELECT id,content_text FROM pending_channel_lesson_posts p WHERE stage_season_id=$1 AND lesson_date=$2 AND status='pending' AND auto_match=true
-        AND NOT EXISTS(SELECT 1 FROM effective_lessons l WHERE l.source_chat_id=p.telegram_chat_id AND l.source_message_id=p.source_message_id)
-        ORDER BY received_at,source_message_id,id`,[channel.stage_season_id,day])).rows;
-      const first=queue.find(r=>!namedSubjects(allSubjects,r.content_text).length)||null;
       const subjects=await db.getPendingScheduledSubjectsForDate(channel.stage_season_id,day,c);
-      const subject=explicitSubjectId?allSubjects.find(s=>s.id===explicitSubjectId):chooseSubject(subjects,contentText,allSubjects,{byOrder:true});
-      if((!known&&(!first||Number(first.id)!==Number(p.id)))||!subject){await c.query('COMMIT');return {created:false,pending:p};}
+      // Count ALL scheduled subjects, not only unused slots. Otherwise an anonymous
+      // last file would be guessed to be the last remaining subject on a multi-subject day.
+      const scheduledCount=Number((await c.query(`SELECT COUNT(DISTINCT subject_id)::int AS n FROM lesson_schedule_entries
+        WHERE stage_season_id=$1 AND lesson_date=$2::date`,[channel.stage_season_id,day])).rows[0].n);
+      const subject=explicitSubjectId?allSubjects.find(s=>Number(s.id)===Number(explicitSubjectId)):
+        chooseSubject(subjects,contentText,allSubjects,{singleScheduledSubject:scheduledCount===1});
+      if(!subject){await c.query('COMMIT');return {created:false,pending:p};}
       const lesson=await db.activateLesson(subject.id,24,explicitSubjectId?'channel_hashtag':'channel_schedule',sourceUrl,message.chat.id,message.message_id,published,{client:c,scheduleDate:day});
       if(!lesson)throw Error('لم يعد موسم المرحلة متاحًا.');
       await c.query("UPDATE pending_channel_lesson_posts SET status='activated',lesson_id=$2,resolved_subject_id=$3,resolved_at=now() WHERE id=$1",[p.id,lesson.id,subject.id]);

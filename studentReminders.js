@@ -20,12 +20,16 @@ async function incompleteStudents(pool) {
       EXISTS(SELECT 1 FROM student_transitions tr WHERE tr.student_id=st.id AND tr.status='pending') AS pending_transition,
       COALESCE((SELECT array_agg(sub.name ORDER BY sub.name) FROM subjects sub
         WHERE sub.stage_id=a.stage_id AND participation_enabled(sub.id,a.stage_season_id)
+          AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=a.stage_season_id
+            AND b.kind='discussion_end' AND (now() AT TIME ZONE 'Asia/Baghdad')::date>=b.start_date)
           AND NOT EXISTS(SELECT 1 FROM participation_modes pm WHERE pm.student_id=st.id
             AND pm.subject_id=sub.id AND pm.stage_season_id=a.stage_season_id)),ARRAY[]::text[]) AS missing_modes,
       COALESCE((SELECT array_agg(sub.name ORDER BY sub.name) FROM participation_modes pm
         JOIN subjects sub ON sub.id=pm.subject_id
         WHERE pm.student_id=st.id AND pm.stage_season_id=a.stage_season_id AND pm.mode='mubahatha'
           AND participation_enabled(pm.subject_id,pm.stage_season_id)
+          AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=a.stage_season_id
+            AND b.kind='discussion_end' AND (now() AT TIME ZONE 'Asia/Baghdad')::date>=b.start_date)
           AND NOT EXISTS(SELECT 1 FROM group_memberships gm WHERE gm.student_id=st.id
             AND gm.subject_id=pm.subject_id AND gm.stage_season_id=pm.stage_season_id)),ARRAY[]::text[]) AS missing_groups
       ,COALESCE((SELECT array_agg(sub.name ORDER BY sub.name) FROM participation_modes pm

@@ -91,6 +91,20 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(route==='/schedule')result=await studies.listStageSeasonSlots(positiveInt(q.seasonId));
         else if(route==='/schedule-batch-import')result=await scheduleBatchImport.status();
         else if(route==='/lesson-schedule')result=await db.getLessonSchedule(positiveInt(q.stageSeasonId));
+        else if(route==='/lesson-schedule/audit')result=await db.getLessonScheduleAudit(positiveInt(q.stageSeasonId));
+        else if(route==='/exam-date-check'){
+          const seasonId=positiveInt(q.stageSeasonId);
+          positiveInt(q.subjectId);
+          const date=String(q.dateIso||'');
+          if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||Number.isNaN(Date.parse(`${date}T00:00:00Z`))||new Date(`${date}T00:00:00Z`).toISOString().slice(0,10)!==date)
+            throw appError('تاريخ الامتحان غير صالح.');
+          const exceptId=q.exceptId?positiveInt(q.exceptId):null;
+          const {findExamDayConflict}=require('./examDayPolicy');
+          // المرحلة والموسم نفسيهما؛ قد يكون الحجز لمادة مختلفة.
+          const other=await findExamDayConflict(db.pool,seasonId,date,exceptId);
+          result={available:!other,conflictingExamNumber:other?Number(other.exam_number):null,
+            conflictingSubjectName:other?.subject_name||null};
+        }
         else if(/^\/exams\/\d+$/.test(route)){
           const id=positiveInt(route.split('/')[2]);const exam=await studies.getExamById(id);
           if(!exam)throw appError('الامتحان غير موجود.','NOT_FOUND',404);
@@ -206,6 +220,17 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           if(!teacher?.is_active)throw appError('اختر أستاذًا نشطًا.');
           result=await db.assignTeacherToSubject(teacher.id,positiveInt(body.subjectId));
           if(result)await audit(actor.id,'assign_teacher','subject',Number(body.subjectId),null,{teacher_id:teacher.id});
+        }
+        else if(route==='/stage-calendar'&&req.method==='POST'){
+          const stageSeasonId=positiveInt(body.stageSeasonId);
+          result=await db.addStageCalendarBlock(stageSeasonId,body);
+          await audit(actor.id,'add_stage_calendar_block','stage_calendar_block',result.id,null,result);
+        }
+        else if((m=/^\/stage-calendar\/(\d+)\/remove$/.exec(route))&&req.method==='POST'){
+          const stageSeasonId=positiveInt(body.stageSeasonId),id=positiveInt(m[1]);
+          result={removed:await db.removeStageCalendarBlock(stageSeasonId,id)};
+          if(!result.removed)throw appError('التعطيل غير موجود في هذه المرحلة.','NOT_FOUND',404);
+          await audit(actor.id,'remove_stage_calendar_block','stage_calendar_block',id,result.removed,{removed:true});
         }
         else if(route==='/lesson-schedule'&&req.method==='POST'){
           result=await db.setLessonScheduleEntry(positiveInt(body.stageSeasonId),positiveInt(body.subjectId),body.lessonDate,body.checked===true);
