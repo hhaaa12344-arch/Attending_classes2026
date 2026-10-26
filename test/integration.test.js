@@ -182,7 +182,7 @@ test('exam creation, concurrent starts, cross-exam answers, resumption and final
   await assert.rejects(()=>studies.updateExam(exam.id,{title:'موضوع جديد',dateIso:'2030-01-02',hours:2}),{code:'ALREADY_TAKEN'});
   await assert.rejects(()=>studies.updateExamQuestion(qs[0].id,{type:'tf',prompt:'سؤال معدل',correct:'خطأ'}),{code:'ALREADY_TAKEN'});
   await assert.rejects(()=>studies.deleteExam(exam.id),{code:'ALREADY_TAKEN'});
-  const other=await studies.createExam(subject.id,ss,teacher.id,{examNumber:2,dateIso:'2030-01-01',hours:2});
+  const other=await studies.createExam(subject.id,ss,teacher.id,{examNumber:2,dateIso:'2030-01-03',hours:2});
   const otherQ=await studies.addExamQuestion(other.id,{type:'tf',prompt:'سؤال لامتحان آخر',correct:'صح'});
   await assert.rejects(()=>studies.submitAnswer(a.id,otherQ.id,'صح'));
   await studies.submitAnswer(a.id,qs[1].id,'ب');

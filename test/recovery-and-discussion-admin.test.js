@@ -93,15 +93,14 @@ test('old named audio is found after adding its subject today, becomes first and
   assert.equal((await app.recoverPendingChannelLessonsForDate(today)).recovered,0);
 });
 
-test('one verified old audio matches the single newly scheduled missing subject; two anonymous audios never guess',async()=>{
+test('old anonymous audio never consumes a different publication day even if it is the only pending file',async()=>{
   const today=app.currentDateInTimeZone('Asia/Baghdad'),old=new Date(Date.now()-2*86400000);
   for(const count of [2,1]){
     const f=await fixture();
     for(let i=0;i<count;i++)await db.queuePendingChannelLessonPost({chatId:f.chat,messageId:90+i,stageId:f.stage.id,stageSeasonId:f.ss,lessonDate:old.toISOString().slice(0,10),receivedAt:old,autoMatch:true,contentKind:'audio'});
     await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,f.b.id,today]);
     await app.recoverPendingChannelLessonsForDate(today);
-    if(count===1){const l=await db.getLessonBySource(f.chat,90);assert.equal(l.subject_id,f.b.id);assert.equal(l.active_until-l.attendance_opened_at,86400000);}
-    else assert.equal(await db.getLessonBySource(f.chat,90),undefined);
+    assert.equal(await db.getLessonBySource(f.chat,90),undefined);
   }
 });
 
@@ -124,7 +123,7 @@ test('two anonymous files cannot compete for one subject on their original publi
   }
 });
 
-test('unnamed audios published today follow schedule order; an extra audio waits, then opens 24h with a notice once its subject is added',async()=>{
+test('unnamed audio does not become a different subject after a later schedule edit',async()=>{
   const f=await fixture(),today=app.currentDateInTimeZone('Asia/Baghdad');
   await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,f.a.id,today]);
   const send=id=>app.bot.handleUpdate({update_id:++seq,channel_post:{message_id:id,date:Math.floor(Date.now()/1000),chat:{id:f.chat,type:'channel',title:'قناة المرحلة'},audio:{file_id:'offline',file_unique_id:'order'+id,duration:60}}});
@@ -133,10 +132,9 @@ test('unnamed audios published today follow schedule order; an extra audio waits
   assert.equal(await db.getLessonBySource(f.chat,201),undefined);
   assert.equal((await db.getPendingChannelLessonPosts(f.ss,today)).filter(p=>Number(p.source_message_id)===201).length,1);
   await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,f.b.id,today]);
-  assert.equal((await app.recoverPendingChannelLessonsForDate(today)).recovered,1);
-  const late=await db.getLessonBySource(f.chat,201);
-  assert.equal(late.subject_id,f.b.id);assert.equal(late.active_until-late.attendance_opened_at,86400000);
-  assert.equal((await db.pool.query('SELECT * FROM notification_outbox WHERE dedupe_key LIKE $1',[`lesson-recovered:${late.id}:%`])).rows.length,1);
+  assert.equal((await app.recoverPendingChannelLessonsForDate(today)).recovered,0);
+  assert.equal(await db.getLessonBySource(f.chat,201),undefined);
+  assert.ok((await db.getPendingChannelLessonPosts(f.ss,today)).some(p=>Number(p.source_message_id)===201));
   assert.equal((await db.getLessonBySource(f.chat,200)).subject_id,f.a.id);
   assert.equal((await app.recoverPendingChannelLessonsForDate(today)).recovered,0);
 });

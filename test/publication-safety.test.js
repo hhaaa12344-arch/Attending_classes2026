@@ -44,7 +44,7 @@ test('old edited media and companion links cannot steal today slots; a named ا�
   const link=post(f,26,{text:'https://example.test/lesson'});link.contentKind='link';delete link.message.audio;
   assert.equal((await publisher.publish(link)).created,false);
   const r=await publisher.publish(post(f,27,{caption:'درس العقائد'}));assert.equal(r.lesson.subject_id,f.b.id);
-  assert.equal((await publisher.publish(post(f,28))).lesson.subject_id,f.a.id);
+  assert.equal((await publisher.publish(post(f,28))).created,false, 'anonymous second file stays pending on a multi-subject day');
   assert.equal(await db.getLessonBySource(f.chat,25),undefined);
   assert.equal(await db.getLessonBySource(f.chat,26),undefined);
 });
@@ -56,14 +56,14 @@ test('a second file naming an already used subject stays pending instead of beco
   assert.deepEqual((await db.getPendingScheduledSubjectsForDate(f.ss,f.day)).map(s=>s.id),[f.b.id]);
 });
 
-test('a named file whose subject is not scheduled yet waits without taking another slot or blocking later unnamed files',async()=>{
+test('a named file without a schedule and an unnamed file both wait for verified identification',async()=>{
   const f=await fixture(),extra=await db.addSubject(f.stage.id,'التفسير','تفسير'+(++seq));
   const waiting=await publisher.publish(post(f,60,{caption:'درس التفسير'}));
   assert.equal(waiting.created,false);
   const next=await publisher.publish(post(f,61));
-  assert.equal(next.lesson.subject_id,f.a.id);
+  assert.equal(next.created,false);
   await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,extra.id,f.day]);
-  assert.deepEqual((await db.getPendingScheduledSubjectsForDate(f.ss,f.day)).map(s=>s.id).sort((x,y)=>x-y),[f.b.id,extra.id].sort((x,y)=>x-y));
+  assert.deepEqual((await db.getPendingScheduledSubjectsForDate(f.ss,f.day)).map(s=>s.id).sort((x,y)=>x-y),[f.a.id,f.b.id,extra.id].sort((x,y)=>x-y));
 });
 
 test('schedule-only rows appear in lesson management without fabricated attendance, then explicit old publication becomes first',async()=>{
