@@ -5,8 +5,8 @@ const date=value=>value?new Date(value).toLocaleDateString('ar-IQ',{timeZone:'As
 const stamp=value=>value?new Date(value).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad'}):'—';
 const baghdadIso=value=>{const d=new Date(value);return Number.isNaN(d.getTime())?'':new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad',year:'numeric',month:'2-digit',day:'2-digit'}).format(d);};
 const labels={pending:'بانتظار القرار',approved:'معتمدة',rejected:'مرفوضة',ended:'منتهية',cancelled:'ملغاة',sent:'أُرسلت',sending:'قيد الإرسال',failed:'تعذّر إرسالها',expired:'انتهت المهلة',draft:'مسودة',published:'منشور'};
-const actionLabels={cancel_leave:'إلغاء إجازة وتصحيح الرصيد والغياب',reduce_leave:'تقليل أيام الإجازة',change_participation_mode:'تغيير متابعة مادة للطالب',participation_settings:'إعدادات المباحثات والتقارير',update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',update_group:'تعديل مجموعة',assign_teacher:'إسناد أستاذ',unassign_teacher:'إلغاء إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',set_lesson_schedule:'إضافة موعد نشر في جدول الدروس',remove_lesson_schedule:'إزالة موعد نشر من جدول الدروس',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',exam_cancel:'إلغاء امتحان وإشعار الطلبة',remove_question:'حذف سؤال',create_teacher:'إضافة أستاذ',update_teacher:'تعديل أستاذ',toggle_teacher:'تفعيل/إيقاف أستاذ',regenerate_code:'توليد كود ربط',reopen_lesson:'إعادة فتح درس',mark_all_present:'تحضير جميع الطلبة',cancel_lesson:'إلغاء تفعيل درس',unlink_channel:'فكّ ربط قناة',reopen_session:'إعادة فتح مباحثة','mark-all_session':'تحضير طلبة مباحثة',cancel_session:'حذف مباحثة'};
-const entityLabels={student:'طالب',stage:'مرحلة',subject:'مادة',group:'مجموعة',leave:'إجازة',report:'تقرير',session:'مباحثة',slot:'موعد',exam:'امتحان',question:'سؤال',teacher:'أستاذ',assignment:'إسناد',lesson_schedule:'جدول الدروس',lesson:'درس',channel:'قناة'};
+const actionLabels={cancel_leave:'إلغاء إجازة وتصحيح الرصيد والغياب',reduce_leave:'تقليل أيام الإجازة',change_participation_mode:'تغيير متابعة مادة للطالب',participation_settings:'إعدادات المباحثات والتقارير',update_student:'تعديل طالب',move_stage:'نقل مرحلة',move_group:'نقل مجموعة',leave_decision:'قرار إجازة',grade_report:'تقييم تقرير',end_session:'إنهاء مباحثة',create_stage:'إضافة مرحلة',create_subject:'إضافة مادة',create_group:'إضافة مجموعة',update_group:'تعديل مجموعة',assign_teacher:'إسناد أستاذ',unassign_teacher:'إلغاء إسناد أستاذ',create_slot:'إضافة موعد',remove_slot:'إيقاف موعد',create_exam:'إنشاء امتحان',set_lesson_schedule:'إضافة موعد نشر في جدول الدروس',remove_lesson_schedule:'إزالة موعد نشر من جدول الدروس',add_stage_calendar_block:'إضافة تعطيل لتقويم المرحلة',remove_stage_calendar_block:'إزالة تعطيل من تقويم المرحلة',exam_question:'إضافة سؤال',exam_publish:'نشر امتحان',exam_postpone:'تغيير موعد امتحان',exam_cancel:'إلغاء امتحان وإشعار الطلبة',remove_question:'حذف سؤال',create_teacher:'إضافة أستاذ',update_teacher:'تعديل أستاذ',toggle_teacher:'تفعيل/إيقاف أستاذ',regenerate_code:'توليد كود ربط',reopen_lesson:'إعادة فتح درس',mark_all_present:'تحضير جميع الطلبة',cancel_lesson:'إلغاء تفعيل درس',unlink_channel:'فكّ ربط قناة',reopen_session:'إعادة فتح مباحثة','mark-all_session':'تحضير طلبة مباحثة',cancel_session:'حذف مباحثة'};
+const entityLabels={student:'طالب',stage:'مرحلة',subject:'مادة',group:'مجموعة',leave:'إجازة',report:'تقرير',session:'مباحثة',slot:'موعد',exam:'امتحان',question:'سؤال',teacher:'أستاذ',assignment:'إسناد',lesson_schedule:'جدول الدروس',stage_calendar_block:'تعطيل المرحلة',lesson:'درس',channel:'قناة'};
 actionLabels['retry-notifications_session']='إعادة محاولة إشعار المباحثة';
 actionLabels.selected_discussion_attendance='حضور إداري لطلبة محددين في المباحثة';
 actionLabels.restore_pending_lesson='نشر درس محفوظ';
@@ -361,15 +361,37 @@ async function newForm(kind){
     const teacherField=`<label>الأستاذ<select name="teacherId" required>${teachers.map(t=>`<option value="${t.id}">${esc(t.full_name)}</option>`).join('')}</select></label>`;
     const subjectField=`<label>المادة<select name="subjectId" required>${subjectOptions}</select></label>`;
     fields=kind==='assignment'?subjectField+teacherField:kind==='slot'?`<label>المجموعة<select name="groupId" required>${groupOptions(currentStage.groups.filter(g=>currentStage.subjects.find(sub=>sub.id===g.subject_id)?.participation_enabled!==false),'','اختر مباحثة المادة')}</select></label>${teacherField}<label>اليوم<select name="dayOfWeek">${DAY_ORDER.map(i=>`<option value="${i}">${DAY_NAMES[i]}</option>`).join('')}</select></label><label>الساعة (16–23، أي 4 عصرًا حتى 11 ليلًا)<input name="hour" type="number" min="16" max="23" required></label><label>الدقيقة<input name="minute" type="number" min="0" max="59" value="0" required></label><p class="subtle">المدة ساعة. اختر أستاذًا مسندًا لهذه المادة؛ يمنع النظام تداخل مواعيده.</p>`:
-      subjectField+teacherField+'<label>رقم الامتحان<input name="examNumber" type="number" min="1" max="3" required></label><label>العنوان<input name="title" maxlength="150" required></label><label>التاريخ<input name="dateIso" type="date" required></label><label>ساعات الإتاحة<input name="hours" type="number" min="1" max="720" value="24" required></label><p class="subtle">يبدأ الامتحان في الساعة المحددة بإعدادات المعهد (الافتراضي 22:00 بتوقيت بغداد). يُحفظ مسودة حتى تضيف الأسئلة وتنشره.</p>';
+      subjectField+teacherField+'<label>رقم الامتحان<input name="examNumber" type="number" min="1" max="3" required></label><label>العنوان<input name="title" maxlength="150" required></label><label>التاريخ<input name="dateIso" type="date" required></label><p class="exam-date-feedback subtle" role="status"></p><label>ساعات الإتاحة<input name="hours" type="number" min="1" max="720" value="24" required></label><p class="subtle">يبدأ الامتحان في الساعة المحددة بإعدادات المعهد (الافتراضي 22:00 بتوقيت بغداد). يُحفظ مسودة حتى تضيف الأسئلة وتنشره.</p>';
   }
   dialog({stage:'إضافة مرحلة',subject:'إضافة مادة',group:'إضافة مجموعة',assignment:'إسناد أستاذ لمادة',slot:'إضافة موعد',exam:'إنشاء امتحان'}[kind],`<form id="create-${kind}"><div class="form-grid">${fields}</div><div class="form-actions"><button class="primary">حفظ</button></div></form>`);
+}
+async function validateExamDayField(form){
+  const field=form?.elements?.dateIso;
+  if(!field)return;
+  const subjectId=form.id==='create-exam'?form.elements.subjectId?.value:currentExam?.subject_id;
+  const stageSeasonId=form.id==='create-exam'?currentStage?.stage_season_id:currentExam?.stage_season_id;
+  const feedback=form.querySelector('.exam-date-feedback');
+  const seq=(form.examDayCheckSeq||0)+1;form.examDayCheckSeq=seq;
+  field.setCustomValidity('');
+  if(!subjectId||!stageSeasonId||!field.value){if(feedback)feedback.textContent='';return;}
+  if(feedback)feedback.textContent='جارٍ التحقق من اليوم المحدد…';
+  try{
+    const info=await api('/exam-date-check?'+new URLSearchParams({subjectId,stageSeasonId,dateIso:field.value,
+      ...(form.id==='create-exam'?{}:{exceptId:currentExam.id})}));
+    if(seq!==form.examDayCheckSeq||!form.isConnected)return;
+    const message=info.available?'✓ هذا التاريخ متاح للمرحلة.':`هذا اليوم محجوز لامتحان مادة «${info.conflictingSubjectName||'أخرى'}» (رقم ${info.conflictingExamNumber}) في المرحلة نفسها؛ اختر يومًا آخر.`;
+    field.setCustomValidity(info.available?'':message);
+    if(feedback)feedback.textContent=(info.available?'':'❌ ')+message;
+  }catch(e){
+    if(seq!==form.examDayCheckSeq||!form.isConnected)return;
+    if(feedback)feedback.textContent='تعذر التحقق المبكر. سيُفحص التعارض عند الحفظ.';
+  }
 }
 async function showExam(id){
   const n=++dialogSequence;const exam=await api('/exams/'+id);if(n!==dialogSequence)return;currentExam=exam;
   const editable=exam.status!=='cancelled'&&Number(exam.attempt_count||0)===0&&!currentStage?.is_historical;
   dialog(exam.title||'الامتحان الشهري '+exam.exam_number,`<p>${esc(exam.subject_name)} · ${esc(labels[exam.status])}</p><p>يفتح: ${stamp(exam.opens_at)} · يغلق: ${stamp(exam.closes_at)}</p>`+
-    (editable?`<form id="update-exam" class="detail-section"><h3>تعديل الامتحان</h3><label>الموضوع<input name="title" value="${esc(exam.title)}" minlength="3" maxlength="150" required></label><label>التاريخ<input name="dateIso" type="date" value="${baghdadIso(exam.opens_at)}" required></label><label>مدة الإتاحة بالساعات<input name="hours" type="number" min="1" max="720" value="${Number(exam.available_hours)}" required></label><div class="form-actions"><button class="primary">حفظ التعديل</button>${button('حذف الامتحان','delete-exam',`data-id="${exam.id}"`,'danger')}</div></form>`:'<p class="subtle">بدأ أحد الطلبة الامتحان أو أُرشف الموسم؛ لا يمكن تعديل الامتحان أو حذفه.</p>')+
+    (editable?`<form id="update-exam" class="detail-section"><h3>تعديل الامتحان</h3><label>الموضوع<input name="title" value="${esc(exam.title)}" minlength="3" maxlength="150" required></label><label>التاريخ<input name="dateIso" type="date" value="${baghdadIso(exam.opens_at)}" required></label><p class="exam-date-feedback subtle" role="status"></p><label>مدة الإتاحة بالساعات<input name="hours" type="number" min="1" max="720" value="${Number(exam.available_hours)}" required></label><div class="form-actions"><button class="primary">حفظ التعديل</button>${button('حذف الامتحان','delete-exam',`data-id="${exam.id}"`,'danger')}</div></form>`:'<p class="subtle">بدأ أحد الطلبة الامتحان أو أُرشف الموسم؛ لا يمكن تعديل الامتحان أو حذفه.</p>')+
     (exam.status==='published'&&!currentStage?.is_historical&&new Date(exam.closes_at)<=new Date()?`<div class="form-actions">${button('إعادة فتح لطالب محدد','exam-student-window',`data-id="${exam.id}"`,'primary')}</div>`:'')+
     (exam.status==='published'&&!currentStage?.is_historical&&new Date(exam.closes_at)<=new Date()?`<form id="reopen-missing-exam" class="detail-section"><h3>🕓 إعادة فتح الامتحان للطلبة الذين لم يمتحنوا</h3><p class="subtle">تُفتح الفرصة للطلبة المسجلين الذين لم يُسلّموا امتحانهم، ولا تُغيّر درجات الممتحنين. تُرسل لهم رسالة بالموعد وزر أداء عند بداية النافذة.</p><div class="form-grid"><label>بداية الفتح بتوقيت بغداد<input name="opensAt" type="datetime-local" required></label><label>نهاية الفتح بتوقيت بغداد<input name="closesAt" type="datetime-local" required></label><label>ملاحظة اختيارية<input name="note" maxlength="500"></label></div><div class="form-actions"><button class="primary">إعادة الفتح وإشعار الطلبة</button></div></form>`:'')+
     ((exam.studentWindows||[]).length?'<h3>نوافذ الفتح الخاصة بالطلبة — بتوقيت بغداد</h3>'+table(['الطالب','بداية الفتح','نهاية الفتح','الملاحظة','المسؤول'],exam.studentWindows.map(w=>[esc(w.full_name),stamp(w.opens_at),stamp(w.closes_at),esc(w.note||'—'),esc(w.created_by)])):'')+
@@ -377,7 +399,7 @@ async function showExam(id){
     table(['السؤال','الخيارات','الصحيح','الإجراء'],exam.questions.map(q=>[esc(q.prompt),esc((q.options||['صح','خطأ']).join(' / ')),esc(q.correct_answer),editable?button('تعديل','edit-question',`data-id="${q.id}"`)+button('حذف','remove-question',`data-id="${q.id}"`):'محمي بعد بدء المحاولات']))+
     (editable?`<form id="exam-question" class="detail-section"><h3>إضافة سؤال</h3><label>النوع<select name="type"><option value="tf">صح أو خطأ</option><option value="mcq">اختيار من متعدد</option></select></label><label>نص السؤال<textarea name="prompt" maxlength="3000" required></textarea></label><label>الخيارات: كل خيار في سطر (للاختيار المتعدد فقط)<textarea name="options"></textarea></label><label>الإجابة الصحيحة بالنص المطابق للخيار<input name="correct" maxlength="300" required placeholder="صح أو خطأ أو نص أحد الخيارات"></label><div class="form-actions"><button class="primary">إضافة السؤال</button></div></form>${exam.status==='draft'?`<div class="form-actions">${button('نشر الامتحان وإشعار الطلبة','publish-exam','','primary')}</div>`:''}`:'')+
     (exam.status==='cancelled'?`<p class="subtle">أُلغي هذا الامتحان، ولا يظهر للطلبة.${exam.cancellation_reason?' السبب: '+esc(exam.cancellation_reason):''}</p>`:
-      `<form id="postpone-exam" class="detail-section"><h3>تغيير الموعد</h3><p class="subtle">متاح فقط قبل بدء أي طالب محاولة. تُحفظ الإجابات السابقة.</p><label>التاريخ الجديد<input name="dateIso" type="date" required></label><div class="form-actions"><button>حفظ الموعد</button></div></form>`+
+      `<form id="postpone-exam" class="detail-section"><h3>تغيير الموعد</h3><p class="subtle">متاح فقط قبل بدء أي طالب محاولة. تُحفظ الإجابات السابقة.</p><label>التاريخ الجديد<input name="dateIso" type="date" required></label><p class="exam-date-feedback subtle" role="status"></p><div class="form-actions"><button>حفظ الموعد</button></div></form>`+
       `<form id="cancel-exam" class="detail-section"><h3>إلغاء الامتحان وإشعار الطلبة</h3><p class="subtle">متاح قبل بدء أي طالب محاولة. يبقى سجل الامتحان محفوظًا.</p><label>سبب الإلغاء (اختياري)<input name="reason" maxlength="500"></label><div class="form-actions"><button>إلغاء الامتحان وإشعار الطلبة</button></div></form>`));
 }
 
@@ -401,8 +423,14 @@ function scheduleOpenMonth(months){
 }
 async function renderLessonSchedule(eligible){
   const stage=eligible.find(x=>String(x.id)===String(lessonScheduleStageId));if(!stage)return;
-  const data=await api('/lesson-schedule?stageSeasonId='+stage.stage_season_id);lessonScheduleData=data;
+  const [data,audit]=await Promise.all([api('/lesson-schedule?stageSeasonId='+stage.stage_season_id),api('/lesson-schedule/audit?stageSeasonId='+stage.stage_season_id)]);lessonScheduleData=data;
   const checked=new Set(data.entries.map(e=>`${e.subject_id}:${e.lesson_date}`));
+  const activeBlock=(iso,kind)=>data.blocks.some(b=>b.kind===kind&&iso>=b.start_date&&iso<=b.end_date);
+  const blockKindLabel={holiday:'عطلة الدروس والمباحثات',discussions:'تعطيل المباحثات فقط',discussion_end:'إنهاء موسم المباحثات'};
+  const blocksTable=(data.blocks||[]).length?table(['النوع','البداية','النهاية','ملاحظة','إجراء'],data.blocks.map(b=>[
+    esc(blockKindLabel[b.kind]||b.kind),esc(b.start_date),b.kind==='discussion_end'?'حتى إزالة نهاية الموسم':esc(b.end_date),esc(b.note||'—'),
+    button('حذف التعطيل','stage-calendar-remove',`data-id="${b.id}" data-kind="${b.kind}"`,'danger')])):
+    '<p class="subtle">لا توجد عطل أو تعطيلات مسجلة لهذه المرحلة.</p>';
   const byMonth=new Map();for(const iso of data.dates||[]){const key=iso.slice(0,7);if(!byMonth.has(key))byMonth.set(key,[]);byMonth.get(key).push(iso);}
   const months=[...byMonth.keys()],openMonth=scheduleOpenMonth(months),span=2+data.subjects.length;
   const rows=months.map(key=>{
@@ -410,17 +438,42 @@ async function renderLessonSchedule(eligible){
     const planned=days.reduce((n,iso)=>n+data.subjects.filter(sub=>checked.has(`${sub.id}:${iso}`)).length,0);
     const head=`<tr class="month-row"><td class="month-row-cell" colspan="${span}"><button type="button" class="month-toggle" data-action="schedule-month-toggle" data-month="${key}" aria-expanded="${open}"><span class="month-arrow">${open?'▾':'◂'}</span> ${esc(monthLabel(days[0]))} <span class="subtle">· ${days.length} يومًا · <span class="month-planned">${planned}</span> موعد</span></button></td></tr>`;
     return head+days.map(iso=>{
-      const wd=weekdayIndex(iso);
+      const wd=weekdayIndex(iso),holiday=activeBlock(iso,'holiday'),discussionOff=activeBlock(iso,'discussions')||activeBlock(iso,'discussion_end');
       const cells=data.subjects.map(sub=>{const k=`${sub.id}:${iso}`,on=checked.has(k);
-        return `<td><button type="button" class="schedule-check ${on?'checked':''}" data-action="lesson-schedule-toggle" data-subject-id="${sub.id}" data-date="${iso}" data-checked="${on?'true':'false'}" aria-label="${esc(sub.name)} ${esc(WEEKDAY_NAMES[wd])} ${esc(isoDateLabel(iso))}">${on?'✓':'·'}</button></td>`;}).join('');
-      return `<tr class="day-${wd}" data-month="${key}" ${open?'':'hidden'}><td class="day-cell">${WEEKDAY_NAMES[wd]}</td><td class="date-cell">${esc(isoDateLabel(iso))}</td>${cells}</tr>`;
+        return `<td><button type="button" class="schedule-check ${on?'checked':''}" data-action="lesson-schedule-toggle" data-subject-id="${sub.id}" data-date="${iso}" data-checked="${on?'true':'false'}" ${holiday&&!on?'disabled title="عطلة رسمية"':''} aria-label="${esc(sub.name)} ${esc(WEEKDAY_NAMES[wd])} ${esc(isoDateLabel(iso))}">${on?'✓':'·'}</button></td>`;}).join('');
+      return `<tr class="day-${wd}" data-month="${key}" ${open?'':'hidden'}><td class="day-cell">${WEEKDAY_NAMES[wd]}${holiday?' · 🏖️ عطلة':discussionOff?' · مباحثات معطلة':''}</td><td class="date-cell">${esc(isoDateLabel(iso))}</td>${cells}</tr>`;
     }).join('');
   }).join('');
+  const auditRows=audit?.subjects||[];
+  const problems=auditRows.filter(s=>Number(s.outside_count)+Number(s.repeated_count)>0);
+  const auditSummary=table(['المادة','مواعيد الجدول','الدروس المفعّلة','مطابقة للجدول','مواعيد بلا تفعيل','خارج الجدول','تكرار في اليوم','المراجعة'],
+    auditRows.map(s=>[esc(s.subject_name),esc(s.planned_count),esc(s.activated_count),esc(s.matched_count),esc(s.missing_count),
+      esc(s.outside_count),esc(s.repeated_count),button('فتح دروس المادة','lesson-audit-open',`data-subject-id="${s.subject_id}"`)]));
+  const auditProblems=problems.map(s=>`<h3>${esc(s.subject_name)} — ${s.exceptions.length} سجلًا للمراجعة</h3>`+
+    table(['معرّف الدرس','التاريخ','الملاحظة','المصدر','حضور محفوظ','رابط المنشور'],s.exceptions.map(l=>[
+      `#${esc(l.id)}`,esc(l.lesson_date),l.issue==='repeated_day'?'الدرس الثاني أو اللاحق في التاريخ نفسه':'لا توجد علامة ✓ للمادة في هذا اليوم',
+      esc(lessonSource(l.source_type)),esc(l.attendance_count),/^https:\/\//i.test(l.source_url||'')?`<a href="${esc(l.source_url)}" target="_blank" rel="noopener noreferrer">فتح المصدر</a>`:'—'
+    ]))).join('');
+  const auditPanel=`<section class="detail-section"><h2>مطابقة جدول الدروس مع الدروس المفعّلة</h2>
+    <p class="subtle">مواعيد الجدول ✓ ليست هي الدروس المفعّلة. عدد الطالب يُحتسب من الدروس المفعّلة بحسب استحقاقه، وقد تظهر زيادات عند التفعيل بالهاشتاغ خارج أيام الجدول أو نشر أكثر من ملف للمادة في اليوم نفسه. الأرقام أدناه لكل موسم المرحلة.</p>
+    ${auditSummary}
+    ${problems.length?`<p><strong>${problems.length} مادة فيها اختلافات تستحق المراجعة.</strong> هذه مؤشرات للفحص وليست حكمًا بأن المنشورات زائدة؛ افحص محتواها وحضورها قبل إلغائها.</p>${auditProblems}`:'<p>لا توجد دروس مفعلة خارج الجدول ولا أكثر من درس واحد لنفس المادة في اليوم نفسه.</p>'}
+    <p class="subtle">حذف علامة من الجدول لا يحذف الدرس المفعّل ولا حضور الطلبة. التصحيح يتم بعد مراجعة رابط المنشور من «الدروس المفعّلة».</p></section>`;
   setContent(head('جدول الدروس','ضع علامة ✓ في تاريخ نشر كل مادة. هذا الجدول التخطيطي لا يفعّل الدرس ولا يرسل الإشعارات.')+
     `<div class="toolbar"><label>المرحلة الدراسية<select id="lesson-schedule-stage">${eligible.map(e=>`<option value="${e.id}" ${String(e.id)===String(lessonScheduleStageId)?'selected':''}>${esc(e.name)}</option>`).join('')}</select></label>
     <div class="subtle">من ${esc(isoDateLabel(data.start_date))} إلى ما قبل ${esc(isoDateLabel(data.end_date_exclusive))} · الخميس والجمعة مستبعدان تلقائيًا.</div>
     ${months.length>1?`<button type="button" data-action="schedule-months-all" data-current="${openMonth}">فتح كل الأشهر</button>`:''}</div>`+
     `<div class="summary"><div><b>${data.dates.length}</b> يومًا دراسيًا</div><div><b>${data.subjects.length}</b> مادة</div><div><b class="lesson-schedule-summary-count">${data.entries.length}</b> موعد نشر مخطط</div></div>`+
+    `<section class="detail-section"><h2>العطل وتعطيل المباحثات لهذه المرحلة</h2>
+      <p class="subtle">تسري القرارات على جميع طلبة ومجموعات المرحلة في هذا الموسم فقط. العطلة توقف التفعيل التلقائي للدروس وإشعاراتها ومواعيد المباحثات؛ تعطيل المباحثات لا يؤثر في الدروس؛ نهاية الموسم توقف المباحثات من تاريخها حتى إزالة القرار.</p>
+      <form id="stage-calendar-add"><div class="form-grid">
+        <label>نوع القرار<select name="kind"><option value="holiday">عطلة الدروس والمباحثات</option><option value="discussions">تعطيل المباحثات فقط</option><option value="discussion_end">نهاية موسم المباحثات</option></select></label>
+        <label>من تاريخ<input name="startDate" type="date" required></label>
+        <label>إلى تاريخ (لا يُستخدم عند نهاية الموسم)<input name="endDate" type="date"></label>
+        <label>سبب أو وصف (اختياري)<input name="note" maxlength="250" placeholder="مثل: العطلة الرسمية"></label>
+      </div><div class="form-actions"><button class="primary">إضافة القرار للمرحلة المختارة</button></div></form>
+      <h3>القرارات المحفوظة</h3>${blocksTable}</section>`+
+    auditPanel+
     `<div class="table-wrap lesson-schedule-wrap"><table class="lesson-schedule"><thead><tr><th>اليوم</th><th>التاريخ</th>${data.subjects.map(s=>`<th>${esc(s.name)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 let mgtStageId='',mgtSubjectId='',mgtPage=0,sessionSubjectId='',sessionPage=0;
@@ -729,6 +782,13 @@ document.addEventListener('click',async event=>{
     }else if(a==='teachers')await loadTeachers();
     else if(a==='schedule-matrix')await loadScheduleMatrix();
     else if(a==='lesson-schedule')await loadLessonSchedule();
+    else if(a==='stage-calendar-remove'){
+      if(!lessonScheduleData)return;
+      if(!await confirmAction('حذف قرار العطلة أو التعطيل لهذه المرحلة؟ سيُستأنف الجدول المعتاد في الأيام القادمة، لكن الإشعارات التي انتهت صلاحيتها لن تُعاد تلقائيًا.'))return;
+      busy=true;await api('/stage-calendar/'+target.dataset.id+'/remove',{stageSeasonId:lessonScheduleData.stage_season_id},'POST');
+      await renderLessonSchedule(stages.filter(s=>s.stage_season_id));notify('حُذف قرار التعطيل لهذه المرحلة.');
+    }
+    else if(a==='lesson-audit-open'){mgtStageId=String(lessonScheduleStageId);mgtSubjectId=String(target.dataset.subjectId);mgtPage=0;currentSeasonId='';await loadLessonManagement();}
     else if(a==='lesson-management')await loadLessonManagement();
     else if(a==='management-page'){
       if(target.dataset.kind==='lessons'){mgtPage=Number(target.dataset.page);await loadLessonManagement();}
@@ -797,6 +857,7 @@ document.addEventListener('click',async event=>{
         const monthKey=target.closest('tr')?.dataset.month;
         const planned=document.querySelector(`.lesson-schedule .month-toggle[data-month="${monthKey}"] .month-planned`);
         if(planned)planned.textContent=String(document.querySelectorAll(`.lesson-schedule tr[data-month="${monthKey}"] .schedule-check.checked`).length);
+        await renderLessonSchedule(stages.filter(s=>s.stage_season_id));
         notify(next?'تمت إضافة تاريخ النشر إلى الجدول.':'أزيل تاريخ النشر من الجدول.');
       }catch(e){notify(e.message,true);}finally{busy=false;}
     }
@@ -873,6 +934,8 @@ document.addEventListener('change',async event=>{
     else adminSelection.selected.delete(id);
     updateOverrideSelected();return;
   }
+  const examDateForm=event.target.closest('#create-exam,#update-exam,#postpone-exam');
+  if(examDateForm&&(event.target.name==='dateIso'||event.target.name==='subjectId')){await validateExamDayField(examDateForm);return;}
   const selected=event.target.value;
   clearNotice();
   try{
@@ -966,6 +1029,15 @@ document.addEventListener('submit',async event=>{
       await api('/leaves/'+form.dataset.id,{days:Number(body.days),expectedDays:Number(form.dataset.days),expectedStatus:form.dataset.status},'PATCH');closeDetail();await refresh();if(form.dataset.profile)await showStudent(form.dataset.profile);notify('قُلّلت الأيام وصُحح الرصيد والغياب.');
     }
     else if(form.id==='report-filter'){filters.groupId=body.groupId;page=0;await renderStage();}
+    else if(form.id==='stage-calendar-add'){
+      if(!lessonScheduleData)throw Error('اختر المرحلة أولًا.');
+      if(body.kind!=='discussion_end'&&!body.endDate)throw Error('حدد نهاية مدة التعطيل.');
+      if(body.kind!=='discussion_end'&&body.endDate<body.startDate)throw Error('نهاية التعطيل تسبق البداية.');
+      const explanation=body.kind==='holiday'?'تعطيل الدروس والمباحثات':body.kind==='discussions'?'تعطيل المباحثات فقط':'إنهاء موسم المباحثات';
+      if(!await confirmAction(`تأكيد ${explanation} لهذه المرحلة بكل مجموعاتها وطلبتها، بدءًا من ${body.startDate}؟`))return;
+      await api('/stage-calendar',{...body,stageSeasonId:lessonScheduleData.stage_season_id},'POST');
+      await renderLessonSchedule(stages.filter(s=>s.stage_season_id));notify('حُفظ القرار لهذه المرحلة وأُلغيت الإشعارات المعلقة خلال فترته.');
+    }
     else if(form.id==='matrix-slot'){await api('/schedule',body,'POST');closeDetail();await renderScheduleMatrix();notify('حُفظ موعد المباحثة.');}
     else if(form.id==='edit-student'){await api('/students/'+currentStudent.id,{...body,expectedName:currentStudent.full_name},'PATCH');closeDetail();await refresh();notify('حُفظ اسم الطالب.');}
     else if(form.id==='move-group'){if(!await confirmAction('توحيد رقم المجموعة المختارة في جميع مواد الطالب لهذا الموسم؟ سيُرفض النقل كله إذا غابت مجموعة مطابقة أو امتلأت. تبقى التقارير السابقة محفوظة.'))return;await api('/students/'+currentStudent.id+'/group',body,'POST');closeDetail();await refresh();notify('وُحّد رقم المجموعة في مواد الطالب.');}
