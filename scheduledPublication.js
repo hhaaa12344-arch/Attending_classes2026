@@ -6,11 +6,11 @@ const {classify,namedSubjects,messageText}=require('./lessonContent');
 // A caption/file name is authoritative only when it identifies exactly one subject.
 // A subjectless file must NEVER consume the first of several scheduled subjects:
 // publication order (or an anonymous MP3 number) does not establish its curriculum.
-// A sole scheduled subject for the ENTIRE day is the only safe schedule-only match.
-function chooseSubject(subjects,text,allSubjects=subjects,{singleScheduledSubject=false}={}){
+// Even a single scheduled subject does not identify an anonymous recording.
+function chooseSubject(subjects,text,allSubjects=subjects){
   const matches=namedSubjects(allSubjects,text);
   if(matches.length)return matches.length===1?subjects.find(s=>Number(s.id)===Number(matches[0].id))||null:null;
-  return singleScheduledSubject&&subjects.length===1?subjects[0]:null;
+  return null;
 }
 function createScheduledPublication(db){
   async function publish({channel,message,sourceUrl,contentKind,edited=false,explicitSubjectId=null}){
@@ -33,6 +33,8 @@ function createScheduledPublication(db){
       const classification=classify(message,allSubjects);
       if(classification.kind==='ignore'){await c.query('COMMIT');return {created:false,ignored:true};}
       const text=messageText(message);
+      const hashtagOnly=contentKind==='hashtag_only'&&explicitSubjectId&&
+        /^(?:#[\p{L}\p{N}_\u0640]+(?:[\s،,؛;]*)?)+$/u.test(text.trim());
       const ownMatches=namedSubjects(allSubjects,text);
       const previous=classification.kind==='media'?(await c.query(`SELECT * FROM pending_channel_lesson_posts WHERE telegram_chat_id=$1 AND stage_season_id=$2
         AND source_message_id=$3 AND content_kind='lesson_title' AND lesson_date=$4 AND received_at<=$5 AND received_at>=$5::timestamp-interval '24 hours'`,
@@ -41,9 +43,26 @@ function createScheduledPublication(db){
       const contentText=inherited&&!ownMatches.length?`${inherited.content_text||''} ${text}`:text;
       const known=namedSubjects(allSubjects,contentText).length===1||explicitSubjectId;
       const autoMatch=!!published&&!edited&&published<=now&&day===baghdadDay(now)&&
-        (classification.kind==='title'||(classification.kind==='media'&&(['voice','audio','audio_document','document'].includes(contentKind)||known||inherited)));
+        (hashtagOnly||classification.kind==='title'||(classification.kind==='media'&&(['voice','audio','audio_document','document'].includes(contentKind)||known||inherited)));
       const p=await db.queuePendingChannelLessonPost({chatId:message.chat.id,messageId:message.message_id,stageId:channel.stage_id,stageSeasonId:channel.stage_season_id,
-        lessonDate:day,sourceUrl,contentKind:classification.kind==='title'?'lesson_title':contentKind,receivedAt:published,autoMatch:!!autoMatch,contentText,titleMessageId:inherited?.source_message_id||null},c);
+        lessonDate:day,sourceUrl,contentKind:hashtagOnly||classification.kind==='title'?'lesson_title':contentKind,receivedAt:published,autoMatch:!!autoMatch,contentText,titleMessageId:inherited?.source_message_id||null,
+        mediaUniqueId:(message.audio||message.voice||message.video||message.document)?.file_unique_id||null},c);
+      const evidence=namedSubjects(allSubjects,contentText);
+      if(p.status==='pending'&&p.media_unique_id){
+        const prior=(await c.query(`SELECT DISTINCT l.* FROM effective_lessons l JOIN pending_channel_lesson_posts prev ON prev.lesson_id=l.id
+          WHERE prev.stage_season_id=$1 AND prev.telegram_chat_id=$2 AND prev.media_unique_id=$3
+            AND prev.id<>$4 AND prev.status IN ('activated','duplicate')`,[channel.stage_season_id,message.chat.id,p.media_unique_id,p.id])).rows;
+        if(prior.length){
+          const lesson=prior.length===1?prior[0]:null;
+          if(lesson&&evidence.length<=1&&(!evidence.length||Number(evidence[0].id)===Number(lesson.subject_id))&&
+             (!explicitSubjectId||Number(explicitSubjectId)===Number(lesson.subject_id))){
+            await c.query("UPDATE pending_channel_lesson_posts SET status='duplicate',lesson_id=$2,resolved_subject_id=$3,auto_match=false,resolved_at=now() WHERE id=$1",[p.id,lesson.id,lesson.subject_id]);
+            await c.query('COMMIT');return {lesson,created:false};
+          }
+          await c.query('UPDATE pending_channel_lesson_posts SET auto_match=false WHERE id=$1',[p.id]);
+          await c.query('COMMIT');return {created:false,pending:p,reviewRequired:true};
+        }
+      }
       if(inherited&&p.status==='pending'){
         await c.query('UPDATE pending_channel_lesson_posts SET auto_match=false WHERE id=$1',[inherited.id]);
         if(inherited.lesson_id){
@@ -58,13 +77,20 @@ function createScheduledPublication(db){
       // after the interval; a following file belongs to that same lecture.
       if(classification.kind==='title'||!autoMatch||!p.auto_match||p.status!=='pending'){await c.query('COMMIT');return {created:false,pending:p};}
       const subjects=await db.getPendingScheduledSubjectsForDate(channel.stage_season_id,day,c);
-      // Count ALL scheduled subjects, not only unused slots. Otherwise an anonymous
-      // last file would be guessed to be the last remaining subject on a multi-subject day.
-      const scheduledCount=Number((await c.query(`SELECT COUNT(DISTINCT subject_id)::int AS n FROM lesson_schedule_entries
-        WHERE stage_season_id=$1 AND lesson_date=$2::date`,[channel.stage_season_id,day])).rows[0].n);
-      const subject=explicitSubjectId?allSubjects.find(s=>Number(s.id)===Number(explicitSubjectId)):
-        chooseSubject(subjects,contentText,allSubjects,{singleScheduledSubject:scheduledCount===1});
+      // Timetable availability constrains a known subject; it never identifies one.
+      const identified=namedSubjects(allSubjects,contentText);
+      const subject=explicitSubjectId
+        ? identified.length===1&&Number(identified[0].id)===Number(explicitSubjectId)?identified[0]:null
+        : chooseSubject(subjects,contentText,allSubjects);
       if(!subject){await c.query('COMMIT');return {created:false,pending:p};}
+      const fallback=(await c.query(`SELECT id FROM effective_lessons WHERE subject_id=$1 AND stage_season_id=$2
+        AND source_type='schedule_fallback' AND source_message_id IS NULL AND schedule_date=$3::date LIMIT 1`,[subject.id,channel.stage_season_id,day])).rows[0];
+      if(fallback){
+        // Preserve both the old marks and this newly identified recording. An
+        // administrator must establish whether the fallback was this lecture.
+        await c.query('UPDATE pending_channel_lesson_posts SET auto_match=false WHERE id=$1',[p.id]);
+        await c.query('COMMIT');return {created:false,pending:p,reviewRequired:true,fallbackLessonId:Number(fallback.id)};
+      }
       const lesson=await db.activateLesson(subject.id,24,explicitSubjectId?'channel_hashtag':'channel_schedule',sourceUrl,message.chat.id,message.message_id,published,{client:c,scheduleDate:day});
       if(!lesson)throw Error('لم يعد موسم المرحلة متاحًا.');
       await c.query("UPDATE pending_channel_lesson_posts SET status='activated',lesson_id=$2,resolved_subject_id=$3,resolved_at=now() WHERE id=$1",[p.id,lesson.id,subject.id]);

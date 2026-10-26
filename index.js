@@ -6516,6 +6516,15 @@ async function activateChannelLesson({
 }
 
 let pendingLessonRecoveryRunning = false;
+async function restoreIdentifiedPost(post,subjectId,options){
+  try{return await lessonRecovery.restore(post.id,subjectId,options);}
+  catch(err){
+    if(err.code!=='REVIEW_REQUIRED')throw err;
+    // One ambiguous historical post must not stop the remaining stages.
+    await db.pool.query("UPDATE pending_channel_lesson_posts SET auto_match=false WHERE id=$1 AND status='pending'",[post.id]);
+    return {created:false,reviewRequired:true};
+  }
+}
 
 // إذا وصلت ملفات الدرس قبل أن يضيف الأدمن جدول اليوم، نحفظها ثم نعيد مطابقتها لاحقًا.
 // ننتظر قليلًا بعد آخر تعديل للجدول كي لا نطابق أول ملف مع مادة خاطئة أثناء إدخال عدة مواد متتابعة.
@@ -6552,15 +6561,12 @@ async function recoverPendingChannelLessonsForDate(lessonDate) {
         const oldDate=publicationDay(old),oldSlots=await db.getPendingScheduledSubjectsForDate(stageSeasonId,oldDate);
         const named=require('./lessonContent').namedSubjects(allStageSubjects,old.content_text);
         if(!named.length&&posts.filter(p=>publicationDay(p)===oldDate&&!require('./lessonContent').namedSubjects(allStageSubjects,p.content_text).length).length>1)continue;
-        const currentSlots=await db.getPendingScheduledSubjectsForDate(stageSeasonId,lessonDate);
-        const oldAudio=posts.filter(p=>publicationDay(p)<lessonDate&&['voice','audio','audio_document','document'].includes(p.content_kind));
-        const uniqueMissing=!named.length&&oldAudio.length===1&&Number(oldAudio[0].id)===Number(old.id)&&currentSlots.length===1?currentSlots[0]:null;
-        const oldSchedule=await db.getScheduledSubjectsForDate(stageSeasonId,oldDate);
+          const oldSchedule=await db.getScheduledSubjectsForDate(stageSeasonId,oldDate);
         const subject=require('./scheduledPublication').chooseSubject(oldSlots,old.content_text,allStageSubjects,{singleScheduledSubject:oldSchedule.length===1})
-          ||(named.length===1?named[0]:(oldSchedule.length===1?uniqueMissing:null));
+          ||(named.length===1?named[0]:null);
         if(!subject)continue;
         const recoveryDate=oldSlots.some(x=>x.id===subject.id)?oldDate:lessonDate;
-        const result=await lessonRecovery.restore(old.id,subject.id,{scheduleDate:recoveryDate});
+        const result=await restoreIdentifiedPost(old,subject.id,{scheduleDate:recoveryDate});
         if(result.created)recovered++;
       }
       posts=posts.filter(p=>publicationDay(p)===lessonDate);
@@ -6595,7 +6601,7 @@ async function recoverPendingChannelLessonsForDate(lessonDate) {
         const channel = await db.getChannelByChatId(post.telegram_chat_id);
         if (!channel || Number(channel.stage_season_id) !== Number(stageSeasonId)) continue;
 
-        const result=await lessonRecovery.restore(post.id,subject.id,{scheduleDate:lessonDate});
+        const result=await restoreIdentifiedPost(post,subject.id,{scheduleDate:lessonDate});
         if(!result.created)continue;
         recovered += 1;
         console.log(
@@ -6695,22 +6701,20 @@ async function handleChannelLesson(ctx) {
     // وجهة الطالب هي منشور الدرس نفسه داخل قناة مرحلته، حتى إن احتوى المنشور رابطًا خارجيًا.
     const sourceUrl = postLink || externalUrl;
 
-    // الهاشتاغ والجدول الدراسي يعملان داخل مسار اكتشاف واحد للدرس:
-    // 1) إذا وُجد هاشتاغ صحيح، فهو تعريف صريح للمادة ويأخذ الأولوية.
-    // 2) إذا لم يوجد هاشتاغ، نستخدم جدول اليوم للمواد التي لم تُفعّل بعد.
-    // 3) إذا كانت هناك عدة مواد في اليوم نفسه (وهو الوضع الطبيعي)، يطابق كل منشور
-    //    غير مُهاشتك المادة التالية غير المُفعّلة بحسب ترتيب أعمدة الجدول.
-    // 4) إذا سبق تفعيل إحدى المواد بالهاشتاغ، تُستبعد من قائمة الجدول تلقائيًا،
-    //    فيستمر المنشور التالي على المادة التالية دون تعارض.
+    // Hashtags and named content identify the subject. The timetable constrains
+    // publication dates; anonymous recordings remain available for admin review.
     let subject = null;
-    let activationSourceType = standaloneHashtag ? 'channel_hashtag' : 'channel';
 
+    const hashtagSubjects=new Map();
     for (const tag of hashtags) {
-      subject = await db.findSubjectByHashtag(channel.stage_id, tag);
-      if (subject) break;
+      const matched=await db.findSubjectByHashtag(channel.stage_id,tag);
+      if(matched)hashtagSubjects.set(Number(matched.id),matched);
     }
+    subject=hashtagSubjects.size===1?[...hashtagSubjects.values()][0]:null;
+    const needsReview=hashtagSubjects.size>1||!!ctx.editedChannelPost||
+      (message.date&&require('./scheduledPublication').baghdadDay(new Date(message.date*1000))!==currentDate);
 
-    if ((!subject && hashtags.length === 0) || (subject && !standaloneHashtag)) {
+    if (needsReview||hashtags.length===0||subject) {
       const result=await scheduledPublication.publish({channel,message,sourceUrl,
         contentKind:channelPostContentKind(message,standaloneHashtag),edited:!!ctx.editedChannelPost,explicitSubjectId:subject?.id||null});
       if(result.created){
@@ -6765,45 +6769,6 @@ async function handleChannelLesson(ctx) {
       return;
     }
 
-    // التعديل المتكرر لنفس منشور القناة لا ينشئ درسًا جديدًا ولا يكرر الإشعار.
-    const existing = await db.getLessonBySource(chatId, message.message_id);
-    if (existing) {
-      activityLessonId = existing.id;
-      const existingLesson = await db.getLessonById(existing.id);
-      await db.resolvePendingChannelLessonPostBySource(
-        chatId,
-        message.message_id,
-        existing.id,
-        existingLesson?.subject_id || existing.subject_id,
-        'duplicate'
-      );
-      await db.setChannelPostActivityOutcome(
-        chatId,
-        activityMessageId,
-        'duplicate_post',
-        `هذا المنشور سبق أن فعّل الدرس #${existing.id}؛ لم يُنشأ درس مكرر.`,
-        { stageId: activityStageId, stageSeasonId: activityStageSeasonId, lessonId: activityLessonId }
-      );
-      return;
-    }
-
-    const result = await activateChannelLesson({
-      channel,
-      subject,
-      sourceType: activationSourceType,
-      sourceUrl,
-      chatId,
-      messageId: message.message_id,
-      notificationDate: currentDate,
-      activatedAt: message.date ? new Date(message.date*1000) : null,
-      activityMessageId,
-    });
-    activityLessonId = result.lesson.id;
-    if(standaloneHashtag){
-      await db.queuePendingChannelLessonPost({chatId,messageId:message.message_id,stageId:channel.stage_id,stageSeasonId:channel.stage_season_id,
-        lessonDate:currentDate,sourceUrl,contentKind:'lesson_title',receivedAt:message.date?new Date(message.date*1000):null,contentText:message.text});
-      await db.resolvePendingChannelLessonPostBySource(chatId,message.message_id,result.lesson.id,subject.id,'activated');
-    }
   } catch (err) {
     if (activityChatId != null) {
       try {

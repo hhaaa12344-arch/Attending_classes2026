@@ -6,3 +6,5 @@ test-results/
 pgdata/
 *.dump
 *.sql.gz
+*.json.gz
+audit-output*/

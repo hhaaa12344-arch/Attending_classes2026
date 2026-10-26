@@ -36,3 +36,8 @@ test('classification ignores irrelevant season subjects and never mutates inputs
   assert.equal(r.subjects[0].outside_count,0);
   assert.equal(lessons[0].issue,undefined);
 });
+test('outside timetable and multiple lessons on one day are independent review indicators',()=>{
+  const r=summarizeLessonScheduleAudit(1,[{subject_id:1,planned_count:0,activated_count:2,today_count:1,open_count:2,reopened_count:1}],
+    [{id:1,subject_id:1,in_schedule:false,day_order:1},{id:2,subject_id:1,in_schedule:false,day_order:2}]).subjects[0];
+  assert.equal(r.outside_count,2);assert.equal(r.repeated_count,1);assert.equal(r.today_count,1);assert.equal(r.open_count,2);assert.equal(r.reopened_count,1);
+});

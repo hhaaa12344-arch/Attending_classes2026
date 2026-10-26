@@ -409,7 +409,7 @@ async function loadLessonSchedule(){
   view='lesson-schedule';currentStage=null;setNav('lesson-schedule');$('#breadcrumb').textContent='المعهد / جدول الدروس';const n=++sequence;
   if(!stages.length)stages=await api('/stages');if(n!==sequence)return;
   const eligible=stages.filter(s=>s.stage_season_id);
-  if(!eligible.length){setContent(head('جدول الدروس','خطة نشر مكملة للهاشتاك؛ عند غياب الهاشتاك يمكن للجدول تحديد المادة تلقائيًا إذا كانت مادة واحدة مجدولة في ذلك اليوم.')+empty('لا توجد مراحل مرتبطة بموسم نشط.'));return;}
+  if(!eligible.length){setContent(head('جدول الدروس','خطة نشر مكملة للعنوان والهاشتاغ؛ الملفات غير محددة المادة تُحفظ للمراجعة.')+empty('لا توجد مراحل مرتبطة بموسم نشط.'));return;}
   if(!lessonScheduleStageId||!eligible.some(s=>String(s.id)===String(lessonScheduleStageId)))lessonScheduleStageId=eligible[0].id;
   await renderLessonSchedule(eligible);
 }
@@ -425,7 +425,7 @@ async function renderLessonSchedule(eligible){
   const stage=eligible.find(x=>String(x.id)===String(lessonScheduleStageId));if(!stage)return;
   const [data,audit]=await Promise.all([api('/lesson-schedule?stageSeasonId='+stage.stage_season_id),api('/lesson-schedule/audit?stageSeasonId='+stage.stage_season_id)]);lessonScheduleData=data;
   const checked=new Set(data.entries.map(e=>`${e.subject_id}:${e.lesson_date}`));
-  const activeBlock=(iso,kind)=>data.blocks.some(b=>b.kind===kind&&iso>=b.start_date&&iso<=b.end_date);
+  const activeBlock=(iso,kind)=>(data.blocks||[]).some(b=>b.kind===kind&&iso>=b.start_date&&iso<=b.end_date);
   const blockKindLabel={holiday:'عطلة الدروس والمباحثات',discussions:'تعطيل المباحثات فقط',discussion_end:'إنهاء موسم المباحثات'};
   const blocksTable=(data.blocks||[]).length?table(['النوع','البداية','النهاية','ملاحظة','إجراء'],data.blocks.map(b=>[
     esc(blockKindLabel[b.kind]||b.kind),esc(b.start_date),b.kind==='discussion_end'?'حتى إزالة نهاية الموسم':esc(b.end_date),esc(b.note||'—'),
@@ -446,8 +446,8 @@ async function renderLessonSchedule(eligible){
   }).join('');
   const auditRows=audit?.subjects||[];
   const problems=auditRows.filter(s=>Number(s.outside_count)+Number(s.repeated_count)>0);
-  const auditSummary=table(['المادة','مواعيد الجدول','الدروس المفعّلة','مطابقة للجدول','مواعيد بلا تفعيل','خارج الجدول','تكرار في اليوم','المراجعة'],
-    auditRows.map(s=>[esc(s.subject_name),esc(s.planned_count),esc(s.activated_count),esc(s.matched_count),esc(s.missing_count),
+  const auditSummary=table(['المادة','مواعيد الجدول','الدروس المفعّلة','نُشرت اليوم','مفتوحة للحضور','أُعيد نشرها','مطابقة للجدول','مواعيد بلا تفعيل','خارج الجدول','أكثر من درس في اليوم','المراجعة'],
+    auditRows.map(s=>[esc(s.subject_name),esc(s.planned_count),esc(s.activated_count),esc(s.today_count||0),esc(s.open_count||0),esc(s.reopened_count||0),esc(s.matched_count),esc(s.missing_count),
       esc(s.outside_count),esc(s.repeated_count),button('فتح دروس المادة','lesson-audit-open',`data-subject-id="${s.subject_id}"`)]));
   const auditProblems=problems.map(s=>`<h3>${esc(s.subject_name)} — ${s.exceptions.length} سجلًا للمراجعة</h3>`+
     table(['معرّف الدرس','التاريخ','الملاحظة','المصدر','حضور محفوظ','رابط المنشور'],s.exceptions.map(l=>[
