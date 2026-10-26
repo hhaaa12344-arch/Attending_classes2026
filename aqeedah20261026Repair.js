@@ -4,6 +4,8 @@
 const {createHash}=require('node:crypto');
 const {positiveInt,appError}=require('./integrity');
 const KEY='aqeedah-stage4-season5-20261026-reviewed-v1';
+// Important: NEVER infer attendance for a different lesson from a wrong classification.
+const ATTENDANCE_POLICY='NO_TRANSFER_V2';
 const CHAT='-1004311434262',STAGE=4,SS=5,SUBJECT=18;
 const PAIRS=[
   {day:'2026-09-30',wrong:169,wrongMessage:70,right:193,rightMessage:72},
@@ -59,12 +61,19 @@ function createAqeedah20261026Repair(db){
     if(currentCount!==19)mismatch('أصبح مجموع الدروس '+currentCount+' بدلاً من 19');
     const attendance=(await client.query(`SELECT student_id,lesson_id,listened_at,marking_kind,marked_by,admin_note
       FROM attendance WHERE lesson_id=ANY($1::int[]) ORDER BY lesson_id,student_id`,[ids])).rows;
-    const view={key:KEY,stageId:STAGE,stageSeasonId:SS,subjectId:SUBJECT,channel:CHAT,counts:{scheduled:11,effective:currentCount,extra:PAIRS.length,expectedAfter:11},
+    const impact=PAIRS.map(pair=>{
+      const wrongStudents=new Set(attendance.filter(a=>Number(a.lesson_id)===pair.wrong).map(a=>String(a.student_id)));
+      const rightStudents=new Set(pair.right?attendance.filter(a=>Number(a.lesson_id)===pair.right).map(a=>String(a.student_id)):[]);
+      return {wrongLesson:pair.wrong,previousMarks:wrongStudents.size,withoutConfirmedMarkOnNamedLesson:[...wrongStudents].filter(id=>!rightStudents.has(id)).length};
+    });
+    const view={attendancePolicy:ATTENDANCE_POLICY,key:KEY,stageId:STAGE,stageSeasonId:SS,subjectId:SUBJECT,channel:CHAT,counts:{scheduled:11,effective:currentCount,extra:PAIRS.length,expectedAfter:11},
       pairs:PAIRS.map(p=>({date:p.day,wrongLesson:p.wrong,wrongPost:p.wrongMessage,originalAttendance:Number(indexed.get(p.wrong).attendance_count),
         correctLesson:p.right,correctPost:p.rightMessage,correctAttendance:p.right?Number(indexed.get(p.right).attendance_count):0})),
-      warning:'تحقق من المنشورات العامة التسعة بنفسك: لا تظهر هوية مادتها في النص. ستُستبعد من عداد العقائد، ويُنقل حضورها إلى درس العقائد المسمّى في يومها. لن تُحذف السجلات الأصلية.'};
+      attendanceReview:{originalMarksOnAmbiguousLessons:impact.reduce((n,p)=>n+p.previousMarks,0),marksWithoutConfirmedAttendanceOnNamedLessons:impact.reduce((n,p)=>n+p.withoutConfirmedMarkOnNamedLesson,0),addedToNamedLessons:0,byLesson:impact},
+      warning:'آمن للحضور: لا نقل ولا نسخ ولا إنشاء لتأشيرات حضور. تُحفَظ سجلات الدروس العامة الأصلية للتدقيق، ولكن تُستبعد من عداد العقائد؛ بعض الطلاب قد يلزم مراجعة استحقاقهم يدوياً. افحص المنشورات العامة التسعة قبل التأكيد.'};
     const signature={linked,lessonRows,postRows,todayTitle,attendance,currentCount};
-    const token=createHash('sha256').update(JSON.stringify(signature)).digest('hex');
+    // Invalidate preview tokens issued by the previous transfer-attendance implementation.
+    const token=createHash('sha256').update(JSON.stringify({attendancePolicy:ATTENDANCE_POLICY,signature})).digest('hex');
     return {view,token,signature,todayPost,wrongToday:indexed.get(todayPair.wrong)};
   }
   async function preview(){const s=await snapshot();return {...s.view,token:s.token};}
@@ -88,8 +97,8 @@ function createAqeedah20261026Repair(db){
       // Aqeedah lecture. This removes the wrong slot claim atomically.
       for(const pair of PAIRS){
         await c.query(`INSERT INTO lesson_corrections(lesson_id,canonical_lesson_id,reason,actor_id)
-          VALUES($1,$2,$3,$4)`,[pair.wrong,pair.right,
-          'منشور بلا تسمية للمادة سُجل على العقائد خطأً. صحّح الربط بعد فحص عنوان المحاضرة. السجل الأصلي والحضور محفوظان.',actorId]);
+          VALUES($1,$2,$3,$4)`,[pair.wrong,null,
+          'منشور بلا تسمية للمادة استُبعد من عداد العقائد بعد المراجعة؛ لم يُنقل أي حضور، والسجل الأصلي باقٍ للتدقيق.',actorId]);
       }
       const right=await db.activateLesson(SUBJECT,24,'channel_schedule_recovered',`https://t.me/c/4311434262/${today.rightMessage}`,
         CHAT,today.rightMessage,new Date(s.wrongToday.activated_at),{client:c,scheduleDate:today.day});
@@ -97,22 +106,25 @@ function createAqeedah20261026Repair(db){
       // Preserve the original window rather than silently opening a new one.
       await c.query('UPDATE lessons SET active_until=$2,attendance_opened_at=$3 WHERE id=$1',
         [right.id,s.wrongToday.active_until,s.wrongToday.attendance_opened_at]);
-      await c.query("UPDATE lesson_corrections SET canonical_lesson_id=$2 WHERE lesson_id=$1",[today.wrong,right.id]);
       await c.query("UPDATE pending_channel_lesson_posts SET status='activated',lesson_id=$2,resolved_subject_id=$3,auto_match=false,resolved_at=now() WHERE id=$1",
         [post.id,right.id,SUBJECT]);
       await c.query("UPDATE pending_channel_lesson_posts SET status='duplicate',lesson_id=$2,resolved_subject_id=$3,auto_match=false,resolved_at=now() WHERE telegram_chat_id=$1 AND stage_season_id=$4 AND source_message_id=285",
         [CHAT,right.id,SUBJECT,SS]);
-      let copied=0;
+      // Never copy attendance from an ambiguous post to an explicitly named lesson.
+      // Keep existing raw rows untouched; expire only queued reminder messages.
       for(const pair of PAIRS){
-        const canonical=pair.right||right.id;
-        const inserted=await c.query(`INSERT INTO attendance(student_id,lesson_id,listened_at,marking_kind,marked_by,admin_note)
-          SELECT student_id,$2,listened_at,marking_kind,marked_by,admin_note FROM attendance WHERE lesson_id=$1
-          ON CONFLICT(student_id,lesson_id) DO NOTHING RETURNING id`,[pair.wrong,canonical]);
-        copied+=inserted.rowCount;
         await c.query(`UPDATE notification_outbox SET status='expired',expires_at=now()
           WHERE status='pending' AND (dedupe_key LIKE $1 OR dedupe_key LIKE $2 OR dedupe_key LIKE $3)`,
           [`lesson-reminder:${pair.wrong}:%`,`lesson-recovered:${pair.wrong}:%`,`lesson-republished:${pair.wrong}:%`]);
       }
+      // New, correctly named lesson 11 must start with ZERO inferred attendance.
+      const createdAttendance=Number((await c.query('SELECT COUNT(*)::int AS n FROM attendance WHERE lesson_id=$1',[right.id])).rows[0].n);
+      if(createdAttendance!==0)throw appError('ظهر حضور غير متوقع في الدرس الجديد؛ أُلغيت العملية.','CONFLICT',409);
+      // A live mark during execution must force a retry, never a silent overwrite.
+      const preserved=(await c.query(`SELECT student_id,lesson_id,listened_at,marking_kind,marked_by,admin_note
+        FROM attendance WHERE lesson_id=ANY($1::int[]) ORDER BY lesson_id,student_id`,[ids])).rows;
+      if(JSON.stringify(preserved)!==JSON.stringify(s.signature.attendance))
+        mismatch('تغيّرت تأشيرات الحضور أثناء الإصلاح');
       // Rebuild the cached aggregate, including the total lesson count, since
       // a plain refreshAdministrativeAttendance does not recalculate that column.
       await c.query(`UPDATE student_attendance_days d SET lesson_count=x.total,
@@ -131,7 +143,7 @@ function createAqeedah20261026Repair(db){
       if(studentIds.length)await require('./absence').refreshAdministrativeAttendance(c,studentIds,SS,'Asia/Baghdad');
       const afterCount=Number((await c.query('SELECT COUNT(*)::int AS n FROM effective_lessons WHERE subject_id=$1 AND stage_season_id=$2',[SUBJECT,SS])).rows[0].n);
       if(afterCount!==11)throw appError('لم يصل عدد العقائد إلى 11؛ تم إلغاء العملية كلها.','CONFLICT',409);
-      const after={afterCount,correctedLessonId:right.id,originalAttendancePreserved:before.preservedRawAttendance,copiedAttendance:copied};
+      const after={afterCount,attendancePolicy:ATTENDANCE_POLICY,correctedLessonId:right.id,originalAttendancePreserved:before.preservedRawAttendance,addedAttendance:0,copiedAttendance:0,attendanceNeedsManualReview:s.view.attendanceReview.marksWithoutConfirmedAttendanceOnNamedLessons};
       await c.query(`INSERT INTO lesson_repair_batches(key,actor_id,before_data,after_data) VALUES($1,$2,$3::jsonb,$4::jsonb)`,
         [KEY,actorId,JSON.stringify(before),JSON.stringify(after)]);
       await c.query(`INSERT INTO admin_audit_log(actor_id,action,entity_type,entity_id,before_data,after_data)
