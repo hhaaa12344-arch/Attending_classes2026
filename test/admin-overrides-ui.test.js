@@ -13,6 +13,7 @@ async function setup(){
     requests.push({url,options});const u=new URL(url,'https://test.example');let data;
     if(u.pathname.endsWith('/auth'))data={token:'a'.repeat(64),user:{name:'admin'}};
     else if(u.pathname.endsWith('/seasons'))data=[];
+    else if(u.pathname.endsWith('/one-time-lesson-cleanup/status'))data={completed:false};
     else if(u.pathname.endsWith('/stages'))data=[stage];
     else if(u.pathname.endsWith('/stages/1'))data=stage;
     else if(u.pathname.endsWith('/students'))data={rows:[],total:0,page:0,size:25};

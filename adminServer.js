@@ -23,6 +23,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
   const historicalRepair=require('./historicalLessonRepair').createHistoricalLessonRepair(db);
   const studentContact=require('./studentContact').createStudentContact(db.pool);
   const oneTimeCohortMove=require('./oneTimeCohortMove').createOneTimeCohortMove(db.pool);
+  const oneTimeLessonCleanup=require('./oneTimeLessonCleanup').createOneTimeLessonCleanup(db.pool);
   const scheduleBatchImport=require('./scheduleBatchImport').createScheduleBatchImport(db.pool);
   const sessions=createSessions();const authLimits=new Map();let active=0;
   const teacherWeb=require('./teacherWeb').createTeacherWeb({db,studies,scheduler,botToken,origin,readJson});
@@ -80,6 +81,8 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if(route==='/session-management')result=await adminData.managedItems('sessions',q);
         else if(route==='/lesson-attendance')result=await adminData.lessonAttendance(q);
         else if(route==='/students')result=await adminData.students(q);
+        else if(route==='/one-time-lesson-cleanup/status')result={completed:await oneTimeLessonCleanup.completed()};
+        else if(route==='/one-time-lesson-cleanup')result=await oneTimeLessonCleanup.preview();
         else if(route==='/one-time-cohort-move')result=await oneTimeCohortMove.status();
         else if(route==='/student-contact')result=await studentContact.search({actorId:actor.id,role:'admin',q:q.q||'',page:q.page||0});
         else if(/^\/student-contact\/\d+$/.test(route))result=await studentContact.history({actorId:actor.id,role:'admin',studentId:positiveInt(route.split('/')[2])});
@@ -164,6 +167,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           result=await historicalRepair.apply(positiveInt(body.stageId),body.token,actor.id);
           if(result.applied&&wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Corrected lesson delivery failed:',err.code||'DELIVERY_ERROR'));
         }
+        else if(route==='/one-time-lesson-cleanup'&&req.method==='POST')result=await oneTimeLessonCleanup.execute(body,actor.id);
         else if(route==='/one-time-cohort-move'&&req.method==='POST')result=await oneTimeCohortMove.execute(body.studentIds,actor.id);
         else if((m=/^\/students\/(\d+)$/.exec(route))&&req.method==='PATCH')result=await adminData.updateStudent(positiveInt(m[1]),body,actor.id);
         else if((m=/^\/students\/(\d+)\/subjects\/(\d+)\/participation$/.exec(route))&&req.method==='PATCH'){
