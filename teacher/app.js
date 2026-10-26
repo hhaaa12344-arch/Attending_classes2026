@@ -46,6 +46,35 @@
     return data;
   }
 
+  // عند اختيار تاريخ الامتحان افحص جميع مواد المرحلة، وليس مادة الأستاذ فقط.
+  function attachExamDayCheck(field,feedback,sub,exceptId=null){
+    let seq=0;
+    async function check(){
+      const current=++seq;
+      field.setCustomValidity('');
+      if(!field.value){feedback.textContent='';return false;}
+      feedback.textContent='جارٍ التحقق من توفر اليوم في جدول امتحانات المرحلة…';
+      try{
+        const info=await api('/api/teacher/exam-date-check?'+new URLSearchParams({
+          subjectId:sub.subject_id,seasonId:sub.stage_season_id,dateIso:field.value,
+          ...(exceptId?{exceptId}:{})}));
+        if(current!==seq)return false;
+        const message=info.available?'✓ لا يوجد امتحان آخر في هذه المرحلة بهذا اليوم.':
+          `❌ هذا اليوم محجوز لامتحان مادة «${info.conflictingSubjectName||'أخرى'}» (رقم ${info.conflictingExamNumber}). اختر يومًا آخر.`;
+        field.setCustomValidity(info.available?'':message);
+        feedback.textContent=message;
+        return info.available;
+      }catch(err){
+        if(current!==seq)return false;
+        feedback.textContent='تعذر الفحص المسبق. سيتحقق الخادم عند الحفظ.';
+        return true;
+      }
+    }
+    field.addEventListener('change',check);
+    if(exceptId)check();
+    return check;
+  }
+
   async function authenticate(){
     const initData=tg?.initData||'';
     if(!initData)throw new Error('افتح لوحة الأستاذ من زر «فتح لوحة الأستاذ» داخل المحادثة الخاصة مع البوت.');
@@ -260,13 +289,16 @@
         <label><span class="field-label">رقم الامتحان</span><select id="examNumber" class="select-control" required>${choices}</select></label>
         <label><span class="field-label">موضوع الامتحان</span><input id="examTitle" class="text-control" type="text" minlength="3" maxlength="150" placeholder="مثال: أحكام البيع" required></label>
         <label><span class="field-label">تاريخ الامتحان</span><input id="examDate" class="text-control" type="date" value="${todayIso()}" required></label>
+        <p id="examDateFeedback" class="form-hint" role="status"></p>
         <label><span class="field-label">مدة الإتاحة بالساعات</span><input id="examHours" class="text-control" type="number" min="1" max="720" step="1" value="24" inputmode="numeric" required></label>
         <p class="form-hint">عند إنشاء الامتحان يصل إشعار لطلبة المادة يتضمن الموضوع والموعد. أضف الأسئلة فقط، وسيصبح الامتحان متاحًا تلقائيًا عند الموعد المحدد دون زر نشر.</p>
         <div class="form-actions"><button class="secondary-button" id="cancelExamCreate" type="button">رجوع</button><button class="primary-button" type="submit">إنشاء وجدولة الامتحان</button></div>
       </form>`;
     $('#cancelExamCreate').addEventListener('click',()=>openExams(sub));
+    const checkDate=attachExamDayCheck($('#examDate'),$('#examDateFeedback'),sub);
     $('#examCreateForm').addEventListener('submit',async e=>{
       e.preventDefault();
+      if(!await checkDate()){notify('اختر يومًا لا يوجد فيه امتحان آخر لهذه المرحلة.');return;}
       const examNumber=n($('#examNumber').value),dateIso=$('#examDate').value,hours=n($('#examHours').value),title=$('#examTitle').value.trim();
       const submit=e.submitter;submit.disabled=true;submit.textContent='جاري الإنشاء…';
       try{
@@ -283,7 +315,7 @@
       sheetBody.innerHTML=`
         <div class="detail-grid"><div class="detail-box"><span>الحالة</span><strong>${cancelled?'ملغى':draft?'مجدول تلقائيًا':'منشور'}</strong></div><div class="detail-box"><span>عدد الأسئلة</span><strong>${questions.length}</strong></div></div>
         <article class="list-card exam-summary"><div class="list-card-head"><div><h4>${esc(e.title||`الامتحان الشهري ${e.exam_number}`)}</h4><p>يفتح: ${esc(dateTime(e.opens_at))}<br>يغلق: ${esc(dateTime(e.closes_at))} · الدرجة: ${esc(e.max_score)}</p></div><span class="badge ${draft?'':'live'}">${cancelled?'ملغى':draft?'مجدول':'منشور'}</span></div></article>
-        ${editable?`<form id="editExamForm" class="form-stack"><label><span class="field-label">موضوع الامتحان</span><input id="editExamTitle" class="text-control" value="${esc(e.title)}" minlength="3" maxlength="150" required></label><label><span class="field-label">تاريخ الامتحان</span><input id="editExamDate" class="text-control" type="date" value="${baghdadIso(e.opens_at)}" required></label><label><span class="field-label">مدة الإتاحة بالساعات</span><input id="editExamHours" class="text-control" type="number" min="1" max="720" value="${n(e.available_hours)}" required></label><button class="primary-button" type="submit">حفظ تعديل الامتحان</button></form><div class="exam-editor-actions"><button class="mini-button" id="addTfQuestion" type="button">➕ صح / خطأ</button><button class="mini-button" id="addMcqQuestion" type="button">➕ اختيار متعدد</button><button class="mini-button" id="deleteExamBtn" type="button">حذف الامتحان</button></div>`:'<p class="form-hint">بدأ أحد الطلبة الامتحان؛ حُفظت أسئلته ودرجاته ولا يمكن تعديلها أو حذفه.</p>'}
+        ${editable?`<form id="editExamForm" class="form-stack"><label><span class="field-label">موضوع الامتحان</span><input id="editExamTitle" class="text-control" value="${esc(e.title)}" minlength="3" maxlength="150" required></label><label><span class="field-label">تاريخ الامتحان</span><input id="editExamDate" class="text-control" type="date" value="${baghdadIso(e.opens_at)}" required></label><p id="editExamDateFeedback" class="form-hint" role="status"></p><label><span class="field-label">مدة الإتاحة بالساعات</span><input id="editExamHours" class="text-control" type="number" min="1" max="720" value="${n(e.available_hours)}" required></label><button class="primary-button" type="submit">حفظ تعديل الامتحان</button></form><div class="exam-editor-actions"><button class="mini-button" id="addTfQuestion" type="button">➕ صح / خطأ</button><button class="mini-button" id="addMcqQuestion" type="button">➕ اختيار متعدد</button><button class="mini-button" id="deleteExamBtn" type="button">حذف الامتحان</button></div>`:'<p class="form-hint">بدأ أحد الطلبة الامتحان؛ حُفظت أسئلته ودرجاته ولا يمكن تعديلها أو حذفه.</p>'}
         <div class="section-head compact-head"><div><span class="section-kicker">الأسئلة</span><h3>${questions.length} سؤال</h3></div></div>
         <div class="question-list">${questions.length?questions.map((q,i)=>`<article class="question-card"><span class="question-number">${i+1}</span><div><h4>${esc(q.prompt)}</h4><p>${q.question_type==='tf'?'صح / خطأ':(Array.isArray(q.options)?q.options:[]).map(esc).join(' · ')}</p><small>الإجابة الصحيحة: ${esc(q.correct_answer)}</small>${editable?`<div class="card-actions"><button class="mini-button" type="button" data-edit-question="${n(q.id)}">تعديل السؤال</button><button class="mini-button" type="button" data-delete-question="${n(q.id)}">حذف السؤال</button></div>`:''}</div></article>`).join(''):empty('لم تُضف أسئلة بعد.')}</div>
         ${cancelled?`<p class="form-hint">سبب الإلغاء: ${esc(e.cancellation_reason||'لم يُذكر سبب.')}</p>`:`<form id="cancelExamForm" class="form-stack"><label><span class="field-label">سبب الإلغاء (اختياري)</span><input name="reason" class="text-control" maxlength="500"></label><button class="secondary-button" type="submit">🚫 إلغاء الامتحان وإشعار الطلبة</button></form>`}
@@ -292,7 +324,8 @@
       if(editable){
         $('#addTfQuestion').addEventListener('click',()=>showTfQuestionForm(examId,sub));
         $('#addMcqQuestion').addEventListener('click',()=>showMcqQuestionForm(examId,sub));
-        $('#editExamForm').addEventListener('submit',async event=>{event.preventDefault();try{await api(`/api/teacher/exams/${examId}/update`,{method:'POST',body:JSON.stringify({title:$('#editExamTitle').value.trim(),dateIso:$('#editExamDate').value,hours:n($('#editExamHours').value)})});notify('حُفظ تعديل الامتحان.');await openExamEditor(examId,sub);}catch(err){notify(err.message);}});
+        const checkEditDate=attachExamDayCheck($('#editExamDate'),$('#editExamDateFeedback'),sub,examId);
+        $('#editExamForm').addEventListener('submit',async event=>{event.preventDefault();if(!await checkEditDate()){notify('اختر يومًا لا يوجد فيه امتحان آخر لهذه المرحلة.');return;}try{await api(`/api/teacher/exams/${examId}/update`,{method:'POST',body:JSON.stringify({title:$('#editExamTitle').value.trim(),dateIso:$('#editExamDate').value,hours:n($('#editExamHours').value)})});notify('حُفظ تعديل الامتحان.');await openExamEditor(examId,sub);}catch(err){notify(err.message);}});
         $('#deleteExamBtn').addEventListener('click',async()=>{if(!confirm('حذف الامتحان وأسئلته؟'))return;try{await api(`/api/teacher/exams/${examId}/delete`,{method:'POST',body:'{}'});notify('حُذف الامتحان.');await openExams(sub);}catch(err){notify(err.message);}});
         $$('[data-delete-question]',sheetBody).forEach(button=>button.addEventListener('click',async()=>{if(!confirm('حذف هذا السؤال؟'))return;try{await api(`/api/teacher/questions/${n(button.dataset.deleteQuestion)}/delete`,{method:'POST',body:'{}'});await openExamEditor(examId,sub);}catch(err){notify(err.message);}}));
         $$('[data-edit-question]',sheetBody).forEach(button=>button.addEventListener('click',()=>showQuestionEditForm(examId,sub,questions.find(q=>n(q.id)===n(button.dataset.editQuestion)))));
