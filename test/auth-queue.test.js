@@ -24,7 +24,7 @@ test('admin sessions are opaque, expiring and revocable',()=>{
   const expired=createSessions({ttlMs:-1});assert.equal(expired.get(expired.issue({id:10})),null);
 });
 test('Telegram queue retries transient errors, stops permanent errors and caps backlog',async()=>{
-  let calls=0;const api={sendMessage:async()=>{calls++;if(calls===1)throw Object.assign(Error('temporary'),{code:'ECONNRESET'});return 'sent';},sendPhoto:async()=>{},sendDocument:async()=>{throw {response:{error_code:403}};}};
+  let calls=0;const api={sendMessage:async()=>{calls++;if(calls===1)throw Object.assign(Error('temporary'),{code:'ECONNRESET'});return 'sent';},sendPhoto:async()=>{},sendVideo:async()=>{},sendDocument:async()=>{throw {response:{error_code:403}};}};
   const queue=createTelegramQueue(api,{sleep:async()=>{}});assert.equal(await queue.sendMessage(1,'x'),'sent');assert.equal(calls,2);
   await assert.rejects(()=>queue.sendDocument(1,'file'));queue.stop();await assert.rejects(()=>queue.sendMessage(1,'x'),{code:'QUEUE_STOPPED'});
   let resolve;const blocked=new Promise(r=>resolve=r);const q=createTelegramQueue({...api,sendMessage:()=>blocked},{maxPending:1,sleep:async()=>{}});
@@ -33,7 +33,7 @@ test('Telegram queue retries transient errors, stops permanent errors and caps b
 });
 test('long Telegram 429 waits return to durable worker instead of hanging the queue',async()=>{
   const fail=async()=>{throw {response:{error_code:429,parameters:{retry_after:120}}};};
-  const q=createTelegramQueue({sendMessage:fail,sendDocument:fail,sendPhoto:fail},{sleep:async()=>{}});
+  const q=createTelegramQueue({sendMessage:fail,sendDocument:fail,sendPhoto:fail,sendVideo:fail},{sleep:async()=>{}});
   await assert.rejects(()=>q.sendMessage(1,'x'));q.stop();
 });
 test('update gate serializes one user and permits independent users, including after failure',async()=>{

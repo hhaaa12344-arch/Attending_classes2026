@@ -112,14 +112,8 @@ test('two anonymous files cannot compete for one subject on their original publi
     for(const messageId of [95,96])await db.queuePendingChannelLessonPost({chatId:f.chat,messageId,stageId:f.stage.id,stageSeasonId:f.ss,lessonDate:date,receivedAt:at,autoMatch:true,contentKind:'audio'});
     await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,f.a.id,date]);
     await app.recoverPendingChannelLessonsForDate(today);
-    if(daysAgo===0){
-      // اليوم نفسه: أول ملف بلا اسم يأخذ المادة المجدولة الوحيدة، والثاني ينتظر مادته.
-      assert.equal((await db.getLessonBySource(f.chat,95)).subject_id,f.a.id);
-      assert.equal(await db.getLessonBySource(f.chat,96),undefined);
-    }else{
-      assert.equal(await db.getLessonBySource(f.chat,95),undefined);
-      assert.equal(await db.getLessonBySource(f.chat,96),undefined);
-    }
+    assert.equal(await db.getLessonBySource(f.chat,95),undefined);
+    assert.equal(await db.getLessonBySource(f.chat,96),undefined);
   }
 });
 
@@ -128,14 +122,14 @@ test('unnamed audio does not become a different subject after a later schedule e
   await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,f.a.id,today]);
   const send=id=>app.bot.handleUpdate({update_id:++seq,channel_post:{message_id:id,date:Math.floor(Date.now()/1000),chat:{id:f.chat,type:'channel',title:'قناة المرحلة'},audio:{file_id:'offline',file_unique_id:'order'+id,duration:60}}});
   await send(200);await send(201);
-  assert.equal((await db.getLessonBySource(f.chat,200)).subject_id,f.a.id);
+  assert.equal(await db.getLessonBySource(f.chat,200),undefined);
   assert.equal(await db.getLessonBySource(f.chat,201),undefined);
   assert.equal((await db.getPendingChannelLessonPosts(f.ss,today)).filter(p=>Number(p.source_message_id)===201).length,1);
   await db.pool.query("INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date,created_at) VALUES($1,$2,$3,now()-interval '3 minutes')",[f.ss,f.b.id,today]);
   assert.equal((await app.recoverPendingChannelLessonsForDate(today)).recovered,0);
   assert.equal(await db.getLessonBySource(f.chat,201),undefined);
   assert.ok((await db.getPendingChannelLessonPosts(f.ss,today)).some(p=>Number(p.source_message_id)===201));
-  assert.equal((await db.getLessonBySource(f.chat,200)).subject_id,f.a.id);
+  assert.equal(await db.getLessonBySource(f.chat,200),undefined);
   assert.equal((await app.recoverPendingChannelLessonsForDate(today)).recovered,0);
 });
 
@@ -175,7 +169,7 @@ test('selected discussion marking adds only missing phases and never writes less
 });
 
 test('absence monitoring uses recovery availability day while lesson numbering retains publication day',async()=>{
-  const f=await fixture(),p=await pending(f,30,3),r=await recovery.restore(p.id,f.a.id);
+  const f=await fixture(),p=await pending(f,30,3),r=await recovery.restore(p.id,f.a.id,{actorId:42});
   // Simulate completion of the new attendance window without changing original publication.
   await db.pool.query("UPDATE enrollments SET started_at=now()-interval '5 days' WHERE student_id=$1",[f.student.id]);
   await db.pool.query("UPDATE absence_monitoring_config SET started_at=now()-interval '10 days' WHERE id=1");

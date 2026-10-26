@@ -38,10 +38,10 @@ test('one button inserts the whole batch and assignment atomically, then disappe
       VALUES($1,$2,$3,$4,1,19,0)`,[groups[0].id,subject.id,season,teacher.id]);
     assert.equal((await batch.status()).available,false);
     await assert.rejects(batch.execute(42),{code:'SCHEDULE_CONFLICT'});
-    assert.equal((await db.pool.query('SELECT COUNT(*) AS n FROM teaching_assignments WHERE subject_id=$1',[subject.id])).rows[0].n,0);
+    assert.equal((await db.pool.query('SELECT COUNT(*)::int AS n FROM teaching_assignments WHERE subject_id=$1',[subject.id])).rows[0].n,0);
     await db.pool.query('DELETE FROM schedule_slots WHERE group_id=$1',[groups[0].id]);
     const result=await batch.execute(42);assert.deepEqual(result,{appointments:4,groups:2,addedAssignments:1});
-    assert.equal((await db.pool.query('SELECT COUNT(*) AS n FROM schedule_slots WHERE stage_season_id=$1',[season])).rows[0].n,4);
+    assert.equal((await db.pool.query('SELECT COUNT(*)::int AS n FROM schedule_slots WHERE stage_season_id=$1',[season])).rows[0].n,4);
     assert.equal((await batch.status()).completed,true);
     await assert.rejects(batch.execute(42),{code:'CONFLICT'});
   }finally{await db.pool.end();}

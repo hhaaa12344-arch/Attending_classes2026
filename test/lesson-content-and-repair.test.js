@@ -80,7 +80,7 @@ test('audio file name or title identifies the subject when there is no caption',
   assert.equal(next.created,false);assert.ok(next.pending);
 });
 
-test('authenticated HTTP preview and apply repair nine lessons into seven, preserve attendance and discussions, and wake notifications',async()=>{
+test('legacy HTTP repair is review-only and never copies attendance',async()=>{
   const f=await fixture(-1003488013652),[a,b,c,d,e]=f.subjects;
   const beforeDefinitions=[[22,a],[23,b],[25,a],[26,a],[27,a],[28,c],[30,d],[36,d],[37,e]];
   const ids={};
@@ -102,18 +102,9 @@ test('authenticated HTTP preview and apply repair nine lessons into seven, prese
   assert.equal((await api('/lesson-publication-repair',body,null)).status,401);
   assert.equal((await api('/lesson-publication-repair',{...body,token:'invalid'})).status,409);
   assert.equal((await api('/lesson-management?stageId='+f.stage.id)).data.total,9);assert.equal(wakeCount,0);
-  const applied=await api('/lesson-publication-repair',body);assert.equal(applied.status,200);assert.equal(applied.data.lessons,7);assert.equal(wakeCount,1);
-  const screenResponse=await api('/lesson-management?stageId='+f.stage.id);assert.equal(screenResponse.status,200);
-  const screen=screenResponse.data;assert.equal(screen.total,7);
-  assert.equal(screen.repairApplied,true);
-  const totals=new Map(screen.subjects.map(s=>[s.id,s.total]));assert.deepEqual(f.subjects.map(s=>totals.get(s.id)),[2,1,1,2,1]);
-  assert.deepEqual((await db.pool.query('SELECT * FROM attendance WHERE id=ANY($1::int[]) ORDER BY id',[original.map(a=>a.id)])).rows,original);
-  assert.ok((await db.pool.query('SELECT 1 FROM attendance WHERE student_id=$1 AND lesson_id=$2',[second.id,ids[27]])).rows.length);
-  assert.equal((await db.getLessonById(ids[26])).id,ids[27]);assert.equal(await db.getLessonById(ids[22]),undefined);
-  assert.equal(await db.markAttendance(f.student.id,ids[22]),undefined);
+  const applied=await api('/lesson-publication-repair',body);assert.equal(applied.status,409);assert.equal(wakeCount,0);
+  assert.equal((await api('/lesson-management?stageId='+f.stage.id)).data.total,9);
+  assert.deepEqual((await db.pool.query('SELECT * FROM attendance WHERE lesson_id=ANY($1::int[]) ORDER BY id',[Object.values(ids)])).rows,original);
+  assert.equal((await db.pool.query('SELECT 1 FROM attendance WHERE student_id=$1 AND lesson_id=$2',[second.id,ids[27]])).rows.length,0);
   assert.deepEqual((await db.pool.query('SELECT * FROM mubahatha_attendance ORDER BY id')).rows,discussions);
-  assert.equal((await api('/lesson-publication-repair',body)).data.alreadyApplied,true);
-  assert.equal(wakeCount,1);
-  assert.equal((await db.pool.query("SELECT COUNT(*)::int AS n FROM notification_outbox WHERE dedupe_key LIKE 'channel-3488013652-20260926-27-v1:%'")).rows[0].n,2);
-  await db.initSchema();assert.equal((await admin.managedItems('lessons',{stageId:f.stage.id})).total,7);
 });

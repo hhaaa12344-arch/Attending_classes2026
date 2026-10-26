@@ -1,9 +1,6 @@
 'use strict';
-// التفعيل الاحتياطي من الجدول.
-// إذا تعرّف البوت على درس واحد على الأقل من القناة في يوم مجدول، ولم يستطع مطابقة منشورات بقية
-// مواد ذلك اليوم، فلا تبقى «بانتظار تحديد المنشور»: تُفتح تلقائيًا لمدة 24 ساعة بعد مهلة قصيرة
-// (الملفات المتتابعة تصل عادةً معًا). وأي منشور يصل بعدها يُربط بالدرس المفتوح ولا ينشئ درسًا مكررًا
-// (db.activateLesson يتولى الربط)، فيظهر رابط الدرس للطلبة تلقائيًا.
+// The timetable is a publication plan, not evidence that a lecture was posted.
+// Automatic sweeps stay read-only; an identified post or explicit admin action is required.
 const { positiveInt, appError } = require('./integrity');
 
 const SOURCE_TYPE = 'schedule_fallback';
@@ -14,9 +11,9 @@ const baghdadDay = (date) => new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Baghdad', year: 'numeric', month: '2-digit', day: '2-digit',
 }).format(date);
 
-// SCHEDULE_FALLBACK_GRACE_MINUTES: عدد الدقائق بعد أول درس معروف قبل فتح بقية المواد (0 = فورًا، off = تعطيل)
+// Legacy setting remains parseable; no value enables unverified automatic lessons.
 function graceFromEnv(value = process.env.SCHEDULE_FALLBACK_GRACE_MINUTES) {
-  if (value === undefined || value === '') return 30;
+  if (value === undefined || value === '') return null;
   if (String(value).toLowerCase() === 'off') return null;
   const minutes = Number(value);
   if (!Number.isInteger(minutes) || minutes < 0 || minutes > 720) {
@@ -48,60 +45,14 @@ function createScheduledFallback(db, { graceMinutes = graceFromEnv() } = {}) {
       WHERE ss.id=$1 AND ss.is_active=true AND st.is_active=true`, [stageSeasonId])).rows[0];
   }
 
-  // الفتح التلقائي ليوم واحد. لا يعمل إلا بعد وجود درس معروف من القناة في اليوم نفسه ومرور المهلة.
-  async function sweepDate(stageSeasonId, day, { grace = graceMinutes } = {}) {
-    if (grace === null || !DATE_RE.test(String(day || '')) || await db.isStageCalendarBlocked(stageSeasonId,day,'lesson')) return { created: [] };
-    const c = await db.pool.connect();
-    try {
-      await c.query('BEGIN');
-      await c.query('SELECT pg_advisory_xact_lock($1,$2)', [LOCK_NAMESPACE, stageSeasonId]);
-      if (!(await openSeason(c, stageSeasonId))) { await c.query('COMMIT'); return { created: [] }; }
-      const anchor = (await c.query(`
-        SELECT MIN(COALESCE(l.attendance_opened_at,l.activated_at)) AS at
-        FROM effective_lessons l
-        WHERE l.stage_season_id=$1 AND l.source_type = ANY($2::text[]) AND ${dayExpr}=$3::date`,
-      [stageSeasonId, CHANNEL_SOURCES, day])).rows[0];
-      const ready = anchor && anchor.at && (await c.query(
-        "SELECT ($1::timestamp + ($2 || ' minutes')::interval) <= now() AS ok", [anchor.at, String(grace)])).rows[0].ok;
-      if (!ready) { await c.query('COMMIT'); return { created: [] }; }
-      // An unidentified queued recording cannot be safely paired with a subject.
-      // Do not create a fictitious lesson while an ambiguous audio post awaits review.
-      const unresolved=(await c.query(`SELECT p.content_text FROM pending_channel_lesson_posts p
-        WHERE p.stage_season_id=$1 AND p.lesson_date=$2::date AND p.status='pending'
-          AND p.auto_match=true AND p.content_kind<>'lesson_title'`,[stageSeasonId,day])).rows;
-      if(unresolved.length){
-        const allSubjects=(await c.query(`SELECT sub.id,sub.name,sub.hashtag FROM subjects sub
-          JOIN stage_seasons ss ON ss.stage_id=sub.stage_id WHERE ss.id=$1`,[stageSeasonId])).rows;
-        const {namedSubjects}=require('./lessonContent');
-        if(unresolved.some(p=>namedSubjects(allSubjects,p.content_text).length!==1)){
-          await c.query('COMMIT');return {created:[],awaitingReview:true};
-        }
-      }
-      const created = [];
-      for (const subject of await missingSubjects(c, stageSeasonId, day)) {
-        const lesson = await db.activateLesson(subject.id, 24, SOURCE_TYPE, null, null, null, null, { client: c, scheduleDate: day });
-        if (lesson) created.push({ lesson, subject });
-      }
-      await c.query('COMMIT');
-      return { created };
-    } catch (err) { await c.query('ROLLBACK'); throw err; } finally { c.release(); }
-  }
-
-  // يوم اليوم بتوقيت بغداد لكل المراحل التي لها جدول فيه.
-  async function sweepToday(now = new Date()) {
-    if (graceMinutes === null) return { created: 0 };
-    const day = baghdadDay(now);
-    const seasons = (await db.pool.query(`SELECT DISTINCT e.stage_season_id FROM lesson_schedule_entries e
-      JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
-      JOIN stages st ON st.id=ss.stage_id AND st.is_active=true WHERE e.lesson_date=$1::date`, [day])).rows;
-    let total = 0;
-    for (const { stage_season_id: id } of seasons) total += (await sweepDate(id, day)).created.length;
-    return { created: total };
-  }
+  // Timetable gaps are review candidates, never evidence that a lecture exists.
+  // Keep the old timer interface for compatibility, without automatic writes.
+  async function sweepDate() { return { created: [], awaitingReview: true }; }
+  async function sweepToday() { return { created: 0 }; }
 
   // تفعيل يدوي من الأدمن لمادة مجدولة بلا منشور (يصلح للأيام السابقة أيضًا).
   async function activateManually({ stageSeasonId, subjectId, scheduleDate, actorId, notice = null }) {
-    stageSeasonId = positiveInt(stageSeasonId); subjectId = positiveInt(subjectId);
+    stageSeasonId = positiveInt(stageSeasonId); subjectId = positiveInt(subjectId); actorId = positiveInt(actorId);
     if (!DATE_RE.test(String(scheduleDate || ''))) throw appError('تاريخ الجدول غير صالح.');
     if (scheduleDate > baghdadDay(new Date())) throw appError('موعد هذا الدرس لم يحن بعد.');
     if(await db.isStageCalendarBlocked(stageSeasonId,scheduleDate,'lesson'))throw appError('هذا التاريخ عطلة؛ لا يُفعّل درس مجدول خلال العطلة.');

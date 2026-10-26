@@ -88,7 +88,8 @@ test('a subject opened by the schedule fallback without a post still counts as m
   const f = createPublicationFollowup(db, { adminIds: [42], minutes: 60 });
   for (let i = 0; i < 3; i++) await post(subjects[i], 730 + i, 90);
   const fb = createScheduledFallback(db, { graceMinutes: 30 });
-  assert.equal((await fb.sweepDate(ss, today)).created.length, 1, 'fallback opened the fourth subject');
+  const opened=await fb.activateManually({stageSeasonId:ss,subjectId:subjects[3].id,scheduleDate:today,actorId:42});
+  assert.ok(opened.created, 'administrator explicitly opened the fourth subject');
   const r = await f.sweepDate(ss, today);
   assert.equal(r.alerted, true);
   assert.deepEqual(r.missing, [subjects[3].id]);

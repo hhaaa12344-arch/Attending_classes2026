@@ -10,7 +10,8 @@ async function testDatabase() {
     await setup.query(`CREATE SCHEMA ${schema}`);await setup.end();
     const native=new Pool({connectionString:url.toString(),max:5,options:`-c timezone=UTC -c search_path=${schema},public`,connectionTimeoutMillis:10000});
     await db.pool.end();db.pool.query=native.query.bind(native);db.pool.connect=native.connect.bind(native);
-    db.pool.end=async()=>{await native.query(`DROP SCHEMA ${schema} CASCADE`);await native.end();};
+    let closed=false;
+    db.pool.end=async()=>{if(closed)return;closed=true;try{await native.query(`DROP SCHEMA ${schema} CASCADE`);}finally{await native.end();}};
     const studies=require('../studies');await db.initSchema();await studies.initStudiesSchema();await require('../integrity').initIntegritySchema(db.pool);
     return {db,studies,engine:null};
   }

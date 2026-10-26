@@ -19,6 +19,37 @@ async function fixture(){
 }
 function post(f,id,extra={}){return {channel:f.channel,sourceUrl:`https://t.me/c/1/${id}`,contentKind:'audio',message:{audio:{file_id:'offline',duration:60},chat:{id:f.chat},message_id:id,date:Math.floor(Date.now()/1000),...extra}};}
 
+test('one timetable subject is insufficient evidence for anonymous media, including direct scheduled recovery',async()=>{
+  const f=await fixture();await db.pool.query('DELETE FROM lesson_schedule_entries WHERE stage_season_id=$1 AND subject_id=$2',[f.ss,f.b.id]);
+  const r=await publisher.publish(post(f,400));assert.equal(r.created,false);
+  await assert.rejects(recovery.restore(r.pending.id,f.a.id,{scheduleDate:f.day}),{code:'REVIEW_REQUIRED'});
+  assert.equal((await db.pool.query('SELECT 1 FROM lessons WHERE stage_season_id=$1',[f.ss])).rows.length,0);
+});
+test('an existing timetable fallback sends the new named post to review instead of merging marks or creating another lesson',async()=>{
+  const f=await fixture(),l=await db.activateLesson(f.a.id,24,'schedule_fallback',null,null,null,null,{scheduleDate:f.day});
+  await db.markAttendance(f.student.id,l.id);const before=(await db.pool.query('SELECT * FROM attendance WHERE lesson_id=$1',[l.id])).rows;
+  const r=await publisher.publish(post(f,405,{caption:f.a.name}));assert.equal(r.created,false);assert.equal(r.fallbackLessonId,l.id);
+  await assert.rejects(recovery.restore(r.pending.id,f.a.id,{actorId:42}),{code:'REVIEW_REQUIRED'});
+  assert.equal((await db.pool.query('SELECT COUNT(*)::int AS n FROM lessons WHERE stage_season_id=$1',[f.ss])).rows[0].n,1);
+  assert.deepEqual((await db.pool.query('SELECT * FROM attendance WHERE lesson_id=$1',[l.id])).rows,before);
+});
+test('conflicting filename and explicit hashtag cannot assign a lesson to either subject automatically',async()=>{
+  const f=await fixture(),p=post(f,410,{caption:'#'+f.a.hashtag,audio:{file_id:'conflicting',file_name:f.b.name+'.mp3'}});
+  p.explicitSubjectId=f.a.id;const r=await publisher.publish(p);assert.equal(r.created,false);assert.ok(r.pending);
+  await assert.rejects(recovery.restore(r.pending.id,f.a.id,{scheduleDate:f.day}),{code:'REVIEW_REQUIRED'});
+});
+test('reposted Telegram recording keeps its original lesson, attendance and window; cross-stage recordings stay separate',async()=>{
+  const f=await fixture(),audio={file_id:'audio',file_unique_id:'same-recording-123',file_name:f.a.name+'.mp3'};
+  const first=await publisher.publish(post(f,420,{audio}));assert.ok(first.created);
+  await db.markAttendance(f.student.id,first.lesson.id);const marks=(await db.pool.query('SELECT * FROM attendance WHERE lesson_id=$1',[first.lesson.id])).rows;
+  const repeat=await publisher.publish(post(f,421,{audio}));assert.equal(repeat.created,false);assert.equal(repeat.lesson.id,first.lesson.id);
+  assert.deepEqual(repeat.lesson.active_until,first.lesson.active_until);assert.deepEqual((await db.pool.query('SELECT * FROM attendance WHERE lesson_id=$1',[first.lesson.id])).rows,marks);
+  assert.equal((await db.getLessonBySource(f.chat,421)).id,first.lesson.id);
+  const conflict=await publisher.publish(post(f,422,{audio:{...audio,file_name:f.b.name+'.mp3'}}));assert.equal(conflict.created,false);assert.ok(conflict.reviewRequired);
+  const other=await fixture();const elsewhere=await publisher.publish(post(other,420,{audio:{...audio,file_name:other.a.name+'.mp3'}}));
+  assert.ok(elsewhere.created);assert.notEqual(elsewhere.lesson.id,first.lesson.id);
+});
+
 test('backup midnight timestamp consumes September 27 slot in Baghdad instead of repeatedly picking المسائل',async()=>{
   const f=await fixture(),day='2026-09-27';
   await db.pool.query('INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date) VALUES($1,$2,$4),($1,$3,$4) ON CONFLICT DO NOTHING',[f.ss,f.a.id,f.b.id,day]);

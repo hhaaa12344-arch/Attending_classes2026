@@ -236,6 +236,10 @@ async function initSchema() {
     ALTER TABLE pending_channel_lesson_posts ADD COLUMN IF NOT EXISTS auto_match BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE pending_channel_lesson_posts ADD COLUMN IF NOT EXISTS content_text TEXT;
     ALTER TABLE pending_channel_lesson_posts ADD COLUMN IF NOT EXISTS title_message_id BIGINT;
+    ALTER TABLE pending_channel_lesson_posts ADD COLUMN IF NOT EXISTS media_unique_id TEXT;
+    CREATE INDEX IF NOT EXISTS idx_pending_lesson_media_identity
+      ON pending_channel_lesson_posts(stage_season_id,telegram_chat_id,media_unique_id)
+      WHERE media_unique_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_pending_channel_lessons_lookup
       ON pending_channel_lesson_posts(stage_season_id, lesson_date, status, received_at, id);
 
@@ -1826,24 +1830,8 @@ const activateLesson = async (
   activatedAt = null,
   options = {}
 ) => {
-  // درس فُتح احتياطيًا من الجدول بلا منشور (schedule_fallback) ينتظر منشوره: عند وصول منشور
-  // المادة نفسها في اليوم نفسه يُربط به بدل إنشاء درس ثانٍ، فيحتفظ الحضور المسجّل ويظهر رابط الدرس.
-  if (sourceMessageId != null && sourceChatId != null && String(sourceType).startsWith('channel')) {
-    const adopted = (await (options.client || pool).query(
-      `UPDATE lessons SET source_type=$2, source_url=$3, source_chat_id=$4, source_message_id=$5
-       WHERE id=(
-         SELECT l.id FROM lessons l
-         JOIN stage_seasons ss ON ss.id=l.stage_season_id AND ss.is_active=true
-         WHERE l.subject_id=$1 AND l.source_type='schedule_fallback' AND l.source_message_id IS NULL
-           AND l.schedule_date=COALESCE($6::date,(now() AT TIME ZONE 'Asia/Baghdad')::date)
-           AND NOT EXISTS(SELECT 1 FROM lesson_corrections r WHERE r.lesson_id=l.id)
-           AND NOT EXISTS(SELECT 1 FROM lessons x WHERE x.source_chat_id=$4 AND x.source_message_id=$5)
-         ORDER BY l.id LIMIT 1 FOR UPDATE OF l SKIP LOCKED)
-       RETURNING *`,
-      [subjectId, sourceType, sourceUrl, sourceChatId, sourceMessageId, options.scheduleDate || null]
-    )).rows[0];
-    if (adopted) return adopted;
-  }
+  // A timetable fallback may represent a different lecture. Preserve its identity
+  // and attendance; never attach a Telegram post by matching subject/day alone.
   return (options.client || pool)
     .query(
       `INSERT INTO lessons(
@@ -2837,19 +2825,20 @@ async function queuePendingChannelLessonPost({
   autoMatch = false,
   contentText = null,
   titleMessageId = null,
+  mediaUniqueId = null,
 }, queryable=pool) {
   if (!Number.isFinite(Number(chatId)) || !Number.isFinite(Number(messageId))) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lessonDate || ''))) return null;
   return (
     await queryable.query(
       `INSERT INTO pending_channel_lesson_posts(
-         telegram_chat_id,source_message_id,stage_id,stage_season_id,lesson_date,source_url,content_kind,received_at,auto_match,content_text,title_message_id
-       ) VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamp,now()),$9,$10,$11)
+         telegram_chat_id,source_message_id,stage_id,stage_season_id,lesson_date,source_url,content_kind,received_at,auto_match,content_text,title_message_id,media_unique_id
+       ) VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamp,now()),$9,$10,$11,$12)
        ON CONFLICT(telegram_chat_id,source_message_id) DO UPDATE SET
          source_url=COALESCE(EXCLUDED.source_url,pending_channel_lesson_posts.source_url),
          content_kind=COALESCE(EXCLUDED.content_kind,pending_channel_lesson_posts.content_kind)
        RETURNING *`,
-      [chatId,messageId,stageId,stageSeasonId,lessonDate,sourceUrl,contentKind,receivedAt,autoMatch,String(contentText||'').slice(0,4096),titleMessageId]
+      [chatId,messageId,stageId,stageSeasonId,lessonDate,sourceUrl,contentKind,receivedAt,autoMatch,String(contentText||'').slice(0,4096),titleMessageId,mediaUniqueId?String(mediaUniqueId).slice(0,512):null]
     )
   ).rows[0] || null;
 }
@@ -3047,7 +3036,13 @@ async function getLessonScheduleAudit(stageSeasonId) {
     (SELECT COUNT(*)::int FROM lesson_schedule_entries e
      WHERE e.stage_season_id=$1 AND e.subject_id=sub.id) AS planned_count,
     (SELECT COUNT(*)::int FROM effective_lessons l
-     WHERE l.stage_season_id=$1 AND l.subject_id=sub.id) AS activated_count
+     WHERE l.stage_season_id=$1 AND l.subject_id=sub.id) AS activated_count,
+    (SELECT COUNT(*)::int FROM effective_lessons l WHERE l.stage_season_id=$1 AND l.subject_id=sub.id
+      AND (l.activated_at+interval '3 hours')::date=(now() AT TIME ZONE 'Asia/Baghdad')::date) AS today_count,
+    (SELECT COUNT(*)::int FROM effective_lessons l WHERE l.stage_season_id=$1 AND l.subject_id=sub.id
+      AND l.activated_at<=now() AND l.active_until>now()) AS open_count,
+    (SELECT COUNT(*)::int FROM effective_lessons l WHERE l.stage_season_id=$1 AND l.subject_id=sub.id
+      AND l.republished_at IS NOT NULL) AS reopened_count
     FROM subjects sub WHERE sub.stage_id=$2 ORDER BY sub.id`,[stageSeasonId,season.stage_id])).rows;
   const lessons=(await pool.query(`WITH dated AS (
     SELECT l.id,l.subject_id,l.activated_at,l.source_type,l.source_url,l.schedule_date,

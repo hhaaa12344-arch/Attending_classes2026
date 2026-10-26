@@ -29,7 +29,7 @@ test('administrator searches by name and sends a private reply to the leave with
   assert.equal(Number(saved.chat_id),Number(f.student.telegram_id));assert.equal(saved.status,'pending');
   assert.match(JSON.stringify(saved.payload),/تمت مراجعة إجازتك/);
   assert.equal((await contact.history({actorId:42,role:'admin',studentId:f.student.id})).length,1);
-  assert.equal((await db.pool.query("SELECT count(*) AS n FROM admin_audit_log WHERE action='contact_student_admin' AND entity_id=$1",[f.student.id])).rows[0].n,1);
+  assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM admin_audit_log WHERE action='contact_student_admin' AND entity_id=$1",[f.student.id])).rows[0].n,1);
   await assert.rejects(contact.send({...input,message:'مختلفة'}),{code:'CONFLICT'});
   await assert.rejects(contact.send({...input,requestKey:'wrong-leave:'+serial,studentId:f.outsider.id}),{code:'CONFLICT'});
 });
