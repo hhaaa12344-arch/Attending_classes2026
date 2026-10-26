@@ -680,14 +680,18 @@ function updateLessonCleanupSummary(){
   const lessons=lessonCleanupPreview.groups.flatMap(g=>g.lessons);
   $('#cleanup-counts').innerHTML=table(['المرحلة','المادة','مواعيد حان تاريخها','المفعّل الآن','بعد الاختيار'],lessonCleanupPreview.subjects.filter(s=>lessons.some(l=>Number(l.stage_season_id)===s.stageSeasonId&&Number(l.subject_id)===s.subjectId)).map(s=>[
     esc(s.stage),esc(s.subject),s.scheduledDue,s.before,s.before-lessons.filter(l=>selected.has(l.id)&&Number(l.stage_season_id)===s.stageSeasonId&&Number(l.subject_id)===s.subjectId).length]));
-  $('#cleanup-selected').textContent=`السجلات المحددة للاستبعاد: ${selected.size}`;
+  const lost=lessonCleanupPreview.groups.reduce((n,g)=>{
+    const kept=new Set(g.lessons.filter(l=>!selected.has(l.id)).flatMap(l=>l.student_ids||[]));
+    return n+new Set(g.lessons.filter(l=>selected.has(l.id)).flatMap(l=>l.student_ids||[]).filter(id=>!kept.has(id))).size;
+  },0);
+  $('#cleanup-selected').textContent=`السجلات المحددة للاستبعاد: ${selected.size}`+(lost?` — تنبيه: ${lost} طالبًا مؤشَّر حضوره على سجل مستبعد فقط ولا يقابله تأشير في السجل المُبقى؛ تبقى تأشيرته محفوظة لكنها لن تدخل في الاحتساب.`:'');
 }
-async function openOneTimeLessonCleanup(){
+async function openOneTimeLessonCleanup(keep=null){
   const p=await api('/one-time-lesson-cleanup');
   if(p.completed){$('#one-time-cleanup-button').hidden=true;return notify('نُفذت العملية سابقًا واختفى زرها.');}
   lessonCleanupPreview=p;
   dialog('إزالة الدروس المكررة لمرة واحدة',`<p>يشمل الفحص جميع المراحل والمواد والمواسم. السجلات الاحتياطية التي يقابلها منشور في اليوم نفسه محددة مبدئيًا. راجع بقية الحالات واختر المكرر فقط؛ قد يكون درسان في يوم واحد محاضرتين مختلفتين.</p><p>تُستبعد السجلات المختارة من العدد والتقارير. تبقى تأشيرات حضورها الأصلية محفوظة دون نقلها إلى محاضرة أخرى، وتبقى الدرجات المحفوظة كما هي.</p><form id="one-time-lesson-cleanup"><div id="cleanup-counts"></div><p id="cleanup-selected"></p>${p.groups.map(g=>`<section class="detail-section"><h3>${esc(g.stage)} / ${esc(g.subject)} / ${esc(g.date)}</h3>${table(['استبعاد','السجل','المصدر','النص المحفوظ','الحضور'],g.lessons.map(l=>[
-    `<input type="checkbox" name="lessonId" value="${l.id}" ${l.recommended?'checked':''} aria-label="استبعاد السجل ${l.id}">`,l.id,
+    `<input type="checkbox" name="lessonId" value="${l.id}" ${(keep?keep.has(l.id):l.recommended)?'checked':''} aria-label="استبعاد السجل ${l.id}">`,l.id,
     l.source_message_id?`منشور ${esc(l.source_message_id)}`:l.source_type==='schedule_fallback'?'احتياطي بلا منشور':'يدوي',esc((l.content_text||'لا يوجد عنوان محفوظ').slice(0,240)),l.attendance_count]))}</section>`).join('')}<label><input type="checkbox" name="confirmed" required> تحققت أن السجلات المحددة مكررة وليست محاضرات مختلفة، وأوافق على استبعادها من الاحتساب مع حفظ حضورها الأصلي.</label><div class="form-actions"><button type="submit" class="danger">تنفيذ الإزالة لمرة واحدة وإخفاء الزر</button></div></form>`);
   updateLessonCleanupSummary();
 }
@@ -1069,7 +1073,12 @@ document.addEventListener('submit',async event=>{
       if(!lessonIds.length)throw Error('اختر سجلًا مكررًا واحدًا على الأقل.');
       if(!form.elements.confirmed.checked)throw Error('أكد مراجعة السجلات المختارة.');
       if(!await confirmAction(`استبعاد ${lessonIds.length} سجلًا مكررًا من الاحتساب؟ سيُحفظ الحضور الأصلي، ويختفي الزر بعد نجاح العملية.`))return;
-      const result=await api('/one-time-lesson-cleanup',{token:lessonCleanupPreview.token,lessonIds,confirmed:true},'POST');
+      let result;
+      try{result=await api('/one-time-lesson-cleanup',{token:lessonCleanupPreview.token,lessonIds,confirmed:true},'POST');}
+      catch(e){
+        if(/أعد المعاينة/.test(e.message)){await openOneTimeLessonCleanup(new Set(lessonIds));notify('تغيّرت سجلات الدروس أثناء المراجعة، فحُدّثت المعاينة وأُبقي اختيارك. راجعه ثم أعد التنفيذ.',true);return;}
+        throw e;
+      }
       $('#one-time-cleanup-button').hidden=true;lessonCleanupPreview=null;closeDetail();await refresh();
       notify(`استُبعد ${result.removedFromCounting} سجلًا. حُفظت ${result.preservedAttendance} تأشيرة أصلية دون نقل أو حذف. اختفى الزر.`);
     }
