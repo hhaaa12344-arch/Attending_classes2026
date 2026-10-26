@@ -26,7 +26,7 @@ test('general notice lists each missing procedure and queues one message per eli
   assert.equal(first.queued,3);assert.equal(repeat.queued,0);
   const queued=(await db.pool.query("SELECT chat_id,payload FROM notification_outbox WHERE dedupe_key LIKE 'student-incomplete:test-general-notice:%'")).rows;
   assert.equal(queued.length,3);
-  assert.match(queued.find(x=>Number(x.chat_id)===students[1].telegram_id).payload[0],/📄 إرسال تقرير/);
+  assert.match(queued.find(x=>Number(x.chat_id)===Number(students[1].telegram_id)).payload[0],/📄 إرسال تقرير/);
 });
 
 test('missed discussion alerts the admin once, while an explicitly postponed slot is skipped',async()=>{

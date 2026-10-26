@@ -30,7 +30,7 @@ async function send(id, text, data) {
   return messages;
 }
 const buttons = () => messages.flatMap((m) => m.reply_markup?.inline_keyboard?.flat() || []);
-const toChat = (id) => messages.filter((m) => m.chat_id === id && ['sendMessage', 'editMessageText'].includes(m.method));
+const toChat = (id) => messages.filter((m) => Number(m.chat_id) === Number(id) && ['sendMessage', 'editMessageText'].includes(m.method));
 const modeOf = async (subjectId) => (await studies.listStudentSubjects(student.id)).find((s) => s.subject_id === subjectId)?.mode ?? null;
 
 test.before(async () => {

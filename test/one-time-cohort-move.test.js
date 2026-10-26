@@ -24,12 +24,12 @@ test('the selected thirteen move atomically across subjects and the action canno
   // A legacy mismatch in one selected student must cancel the entire batch.
   await db.pool.query('UPDATE group_memberships SET group_id=$2 WHERE student_id=$1 AND subject_id=$3',[ids[0],groups[1][1].id,subjects[1].id]);
   await assert.rejects(repair.execute(ids,42));
-  assert.equal((await db.pool.query('SELECT COUNT(*) AS n FROM group_memberships WHERE group_id=$1',[groups[0][0].id])).rows[0].n,13);
+  assert.equal((await db.pool.query('SELECT COUNT(*)::int AS n FROM group_memberships WHERE group_id=$1',[groups[0][0].id])).rows[0].n,13);
   await db.pool.query('UPDATE group_memberships SET group_id=$2 WHERE student_id=$1 AND subject_id=$3',[ids[0],groups[1][0].id,subjects[1].id]);
   const result=await repair.execute(ids,42);assert.equal(result.moved,13);
-  assert.equal((await db.pool.query('SELECT COUNT(*) AS n FROM student_group_numbers WHERE stage_season_id=$1 AND group_number=2',[ss])).rows[0].n,13);
-  for(const group of groups)assert.equal((await db.pool.query('SELECT COUNT(*) AS n FROM group_memberships WHERE group_id=$1',[group[1].id])).rows[0].n,13);
-  assert.equal((await db.pool.query('SELECT COUNT(*) AS n FROM group_membership_history WHERE stage_season_id=$1',[ss])).rows[0].n,26);
+  assert.equal((await db.pool.query('SELECT COUNT(*)::int AS n FROM student_group_numbers WHERE stage_season_id=$1 AND group_number=2',[ss])).rows[0].n,13);
+  for(const group of groups)assert.equal((await db.pool.query('SELECT COUNT(*)::int AS n FROM group_memberships WHERE group_id=$1',[group[1].id])).rows[0].n,13);
+  assert.equal((await db.pool.query('SELECT COUNT(*)::int AS n FROM group_membership_history WHERE stage_season_id=$1',[ss])).rows[0].n,26);
   assert.equal((await repair.status()).completed,true);
   await assert.rejects(repair.execute(ids,42),{code:'CONFLICT'});
 });

@@ -1,8 +1,6 @@
 name: Lesson and attendance safety
 on:
   pull_request:
-  push:
-    branches: [fix/verified-lessons-attendance-safety]
 permissions:
   contents: read
 jobs:

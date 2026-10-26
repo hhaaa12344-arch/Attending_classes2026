@@ -38,7 +38,7 @@ test('atomic attendance: first opens after ten minutes, duplicate presses insert
   assert.equal(results.filter(Boolean).length,1);
   await studies.openEndAttendance(session.id);
   assert.ok(await studies.markSessionAttendance(session.id,student.id,'end'));
-  assert.equal((await studies.listGroupSessions(group.id))[0].attended_count,1);
+  assert.equal(Number((await studies.listGroupSessions(group.id))[0].attended_count),1);
 });
 test('wrong group, archived student and expired window cannot insert attendance',async()=>{
   const g2=await studies.createMubahathaGroup(subject.id,ss,{title:'الثانية'});
