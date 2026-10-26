@@ -22,12 +22,18 @@ test('one-time cleanup spans stages, rejects stale/invalid choices and retains e
   await assert.rejects(cleanup.execute({token:preview.token,lessonIds:[fixtures[0].fallback],confirmed:false},42));
   await assert.rejects(cleanup.execute({token:preview.token,lessonIds:[999999],confirmed:true},42));
   await assert.rejects(cleanup.execute({token:preview.token,lessonIds:[fixtures[0].real,fixtures[0].fallback],confirmed:true},42));
-  await db.pool.query('INSERT INTO attendance(student_id,lesson_id) VALUES($1,$2)',[fixtures[0].student,fixtures[0].real]);
+  // تغيّر بنيوي في سجلات التكرار (موعد سجل) يجعل المعاينة قديمة.
+  await db.pool.query("UPDATE lessons SET schedule_date=schedule_date+1 WHERE id=$1",[fixtures[0].real]);
   await assert.rejects(cleanup.execute({token:preview.token,lessonIds:[fixtures[0].fallback],confirmed:true},42),{code:'STALE'});
-  preview=await cleanup.preview();
+  await db.pool.query("UPDATE lessons SET schedule_date=schedule_date-1 WHERE id=$1",[fixtures[0].real]);
+  preview=await cleanup.preview();assert.equal(preview.groups.length,2);
+  // تأشير حضور حيّ أثناء مراجعة الأدمن لا يُفشل التنفيذ ولا يغيّر شيئًا من الحضور.
+  await db.pool.query('INSERT INTO attendance(student_id,lesson_id) VALUES($1,$2)',[fixtures[0].student,fixtures[0].real]);
   const original=(await db.pool.query('SELECT * FROM attendance ORDER BY id')).rows;
   const results=await Promise.allSettled([1,2].map(()=>cleanup.execute({token:preview.token,lessonIds:fixtures.map(f=>f.fallback),confirmed:true},42)));
   assert.equal(results.filter(x=>x.status==='fulfilled').length,1,results.map(x=>x.reason?.message).join('; '));
+  // طالب المجموعة الثانية لا يملك تأشيرًا على السجل المُبقى، فيظهر في العدد التحذيري؛ طالب الأولى مغطّى.
+  assert.equal(results.find(x=>x.status==='fulfilled').value.studentsWithoutKeptMark,1);
   assert.equal(results.filter(x=>x.status==='rejected').length,1);
   assert.deepEqual((await db.pool.query('SELECT * FROM attendance ORDER BY id')).rows,original);
   assert.equal(Number((await db.pool.query('SELECT COUNT(*)::int n FROM lessons')).rows[0].n),4);
