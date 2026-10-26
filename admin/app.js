@@ -19,6 +19,7 @@ const DAY_NAMES=['الأحد','الاثنين','الثلاثاء','الأربع�
 const DAY_ORDER=[6,0,1,2,3,4,5];
 let token='',stages=[],teachers=[],seasons=[],currentSeasonId='',currentStage=null,currentStudent=null,currentExam=null,currentTeacher=null,matrixStageId=null,matrixDay=new Date().getDay(),matrixEligible=[],tab='students',page=0,view='home',sequence=0,dialogSequence=0,busy=false;
 let lessonScheduleStageId=null,lessonScheduleData=null;
+let lessonCleanupPreview=null;
 let adminSelection=null;
 let participationDraft=null;
 actionLabels.update_subject='تعديل اسم المادة';
@@ -108,6 +109,8 @@ function stageHeader(){const s=currentStage;return head(s.name,`الموسم: ${
   `<div class="summary"><div><b>${s.student_count}</b>طالب</div><div><b>${s.subject_count}</b>مادة</div><div><b>${s.discussion_grouping===false?'—':s.group_count}</b>${s.discussion_grouping===false?'مباحثات دون تقسيم':'مجموعة مباحثة'}</div></div>`+
   `<div class="tabs" role="navigation" aria-label="أقسام المرحلة">${Object.entries({students:'الطلبة',attendance:'حضور الدروس',subjects:'المواد والمجموعات',leaves:'الإجازات',...(s.stage_type!=='lessons_only'?{reports:'التقارير',schedule:'المباحثات',exams:'الامتحانات'}:{}),exports:'التصدير'}).map(([key,name])=>button(name,'tab',`data-tab="${key}"`,tab===key?'active':'')).join('')}</div>`;}
 async function home(){view='home';currentStage=null;page=0;setNav('home');const id=++sequence;stages=await api('/stages'+(currentSeasonId?'?seasonId='+currentSeasonId:''));if(id!==sequence)return;
+  const cleanupStatus=await api('/one-time-lesson-cleanup/status');if(id!==sequence)return;
+  $('#one-time-cleanup-button').hidden=cleanupStatus.completed||Boolean(currentSeasonId);
   $('#breadcrumb').textContent='المعهد / المراحل والطلبة';
   const historical=Boolean(currentSeasonId);
   setContent((historical?`<div class="empty" style="border-color:#e2b8b8;background:var(--danger-soft);color:var(--danger);text-align:right;padding:1rem 1.3rem;margin-bottom:1.2rem"><p style="margin:0">تعرض بيانات موسم سابق للاطلاع فقط؛ أزرار الإضافة والتعديل مخفية.</p></div>`:'')+
@@ -671,6 +674,23 @@ async function loadChannels(){
 }
 async function refresh(){if(view==='student-search')return loadStudentSearch();if(view==='student-contact')return loadStudentContact();if(view==='lesson-attendance')return attendanceHome();if(view==='stage'){currentStage=await api('/stages/'+currentStage.id+(currentSeasonId?'?seasonId='+currentSeasonId:''));return renderStage();}if(view==='leaves')return allLeaves();if(view==='teachers')return loadTeachers();if(view==='schedule-matrix')return loadScheduleMatrix();if(view==='lesson-schedule')return loadLessonSchedule();if(view==='lesson-management')return loadLessonManagement();if(view==='channels')return loadChannels();return home();}
 $('#detail').addEventListener('cancel',()=>{dismissedWhileBusy=busy;dialogSequence++;});
+function updateLessonCleanupSummary(){
+  if(!lessonCleanupPreview)return;
+  const selected=new Set([...document.querySelectorAll('#one-time-lesson-cleanup input[name="lessonId"]:checked')].map(el=>Number(el.value)));
+  const lessons=lessonCleanupPreview.groups.flatMap(g=>g.lessons);
+  $('#cleanup-counts').innerHTML=table(['المرحلة','المادة','مواعيد حان تاريخها','المفعّل الآن','بعد الاختيار'],lessonCleanupPreview.subjects.filter(s=>lessons.some(l=>Number(l.stage_season_id)===s.stageSeasonId&&Number(l.subject_id)===s.subjectId)).map(s=>[
+    esc(s.stage),esc(s.subject),s.scheduledDue,s.before,s.before-lessons.filter(l=>selected.has(l.id)&&Number(l.stage_season_id)===s.stageSeasonId&&Number(l.subject_id)===s.subjectId).length]));
+  $('#cleanup-selected').textContent=`السجلات المحددة للاستبعاد: ${selected.size}`;
+}
+async function openOneTimeLessonCleanup(){
+  const p=await api('/one-time-lesson-cleanup');
+  if(p.completed){$('#one-time-cleanup-button').hidden=true;return notify('نُفذت العملية سابقًا واختفى زرها.');}
+  lessonCleanupPreview=p;
+  dialog('إزالة الدروس المكررة لمرة واحدة',`<p>يشمل الفحص جميع المراحل والمواد والمواسم. السجلات الاحتياطية التي يقابلها منشور في اليوم نفسه محددة مبدئيًا. راجع بقية الحالات واختر المكرر فقط؛ قد يكون درسان في يوم واحد محاضرتين مختلفتين.</p><p>تُستبعد السجلات المختارة من العدد والتقارير. تبقى تأشيرات حضورها الأصلية محفوظة دون نقلها إلى محاضرة أخرى، وتبقى الدرجات المحفوظة كما هي.</p><form id="one-time-lesson-cleanup"><div id="cleanup-counts"></div><p id="cleanup-selected"></p>${p.groups.map(g=>`<section class="detail-section"><h3>${esc(g.stage)} / ${esc(g.subject)} / ${esc(g.date)}</h3>${table(['استبعاد','السجل','المصدر','النص المحفوظ','الحضور'],g.lessons.map(l=>[
+    `<input type="checkbox" name="lessonId" value="${l.id}" ${l.recommended?'checked':''} aria-label="استبعاد السجل ${l.id}">`,l.id,
+    l.source_message_id?`منشور ${esc(l.source_message_id)}`:l.source_type==='schedule_fallback'?'احتياطي بلا منشور':'يدوي',esc((l.content_text||'لا يوجد عنوان محفوظ').slice(0,240)),l.attendance_count]))}</section>`).join('')}<label><input type="checkbox" name="confirmed" required> تحققت أن السجلات المحددة مكررة وليست محاضرات مختلفة، وأوافق على استبعادها من الاحتساب مع حفظ حضورها الأصلي.</label><div class="form-actions"><button type="submit" class="danger">تنفيذ الإزالة لمرة واحدة وإخفاء الزر</button></div></form>`);
+  updateLessonCleanupSummary();
+}
 document.addEventListener('click',async event=>{
   const target=event.target.closest('[data-action]');if(!target)return;const a=target.dataset.action;
   if(confirmationPending)abandonConfirm();
@@ -906,6 +926,8 @@ document.addEventListener('click',async event=>{
     }else if(a==='edit-group'){
       const g=currentStage?.groups.find(x=>String(x.id)===target.dataset.id);if(!g)return;
       dialog('تعديل '+g.title,`<p>${currentStage.discussion_grouping===false?`الأعضاء في هذه المادة: ${esc(g.member_count)}`:`الأعضاء في هذه المادة: ${esc(g.member_count)} · المقاعد المحجوزة لرقم المجموعة عبر المواد: ${esc(g.reserved_count)} من ${esc(g.capacity)}`}</p><form id="edit-group" data-id="${g.id}"><div class="form-grid"><label>السعة<input name="capacity" type="number" min="1" max="10000" value="${g.capacity}" required></label><label>رابط المجموعة<input name="inviteLink" type="url" value="${esc(g.invite_link||'')}" placeholder="https://t.me/..."></label></div><div class="form-actions"><button class="primary">حفظ</button>${button(g.is_active?'تعطيل المجموعة':'تفعيل المجموعة','toggle-group',`data-id="${g.id}" data-active="${!g.is_active}"`,g.is_active?'danger':'')}</div></form>`);
+    }else if(a==='one-time-lesson-cleanup'){
+      await openOneTimeLessonCleanup();
     }else if(a==='one-time-cohort-move'){
       const move=await api('/one-time-cohort-move');
       if(!move.available)throw Error(move.completed?'استُخدم زر النقل سابقًا.':'لم تعد شروط النقل متاحة.');
@@ -917,6 +939,7 @@ document.addEventListener('click',async event=>{
   }catch(e){notify(e.message,true);}finally{busy=false;}
 });
 document.addEventListener('change',async event=>{
+  if(event.target.name==='lessonId'&&event.target.closest('#one-time-lesson-cleanup'))updateLessonCleanupSummary();
   if(confirmationPending)return;
   if(event.target.closest('#participation-settings')){
     const changes=participationChanges(event.target.closest('form'));
@@ -1041,6 +1064,15 @@ document.addEventListener('submit',async event=>{
     else if(form.id==='matrix-slot'){await api('/schedule',body,'POST');closeDetail();await renderScheduleMatrix();notify('حُفظ موعد المباحثة.');}
     else if(form.id==='edit-student'){await api('/students/'+currentStudent.id,{...body,expectedName:currentStudent.full_name},'PATCH');closeDetail();await refresh();notify('حُفظ اسم الطالب.');}
     else if(form.id==='move-group'){if(!await confirmAction('توحيد رقم المجموعة المختارة في جميع مواد الطالب لهذا الموسم؟ سيُرفض النقل كله إذا غابت مجموعة مطابقة أو امتلأت. تبقى التقارير السابقة محفوظة.'))return;await api('/students/'+currentStudent.id+'/group',body,'POST');closeDetail();await refresh();notify('وُحّد رقم المجموعة في مواد الطالب.');}
+    else if(form.id==='one-time-lesson-cleanup'){
+      const lessonIds=[...form.querySelectorAll('input[name="lessonId"]:checked')].map(el=>Number(el.value));
+      if(!lessonIds.length)throw Error('اختر سجلًا مكررًا واحدًا على الأقل.');
+      if(!form.elements.confirmed.checked)throw Error('أكد مراجعة السجلات المختارة.');
+      if(!await confirmAction(`استبعاد ${lessonIds.length} سجلًا مكررًا من الاحتساب؟ سيُحفظ الحضور الأصلي، ويختفي الزر بعد نجاح العملية.`))return;
+      const result=await api('/one-time-lesson-cleanup',{token:lessonCleanupPreview.token,lessonIds,confirmed:true},'POST');
+      $('#one-time-cleanup-button').hidden=true;lessonCleanupPreview=null;closeDetail();await refresh();
+      notify(`استُبعد ${result.removedFromCounting} سجلًا. حُفظت ${result.preservedAttendance} تأشيرة أصلية دون نقل أو حذف. اختفى الزر.`);
+    }
     else if(form.id==='one-time-cohort-move'){
       const studentIds=[...form.querySelectorAll('input[name="studentId"]:checked')].map(el=>Number(el.value));
       if(studentIds.length!==13)throw Error('اختر 13 طالبًا بالضبط.');

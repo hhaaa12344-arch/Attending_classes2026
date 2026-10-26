@@ -21,7 +21,7 @@ function createExamNotifications(pool){
         const text=phase==='start'?`🟢 بدأ الآن الامتحان ${label}.\nيمكنك الدخول بواسطة الزر.\nموعد الإغلاق: ${normalEnd} بتوقيت بغداد.`:
           `⏰ بقي أقل من ساعة على انتهاء الامتحان ${label}.\nإذا لم تؤدِّه بعد، اضغط الزر الآن.\nالإغلاق: ${normalEnd} بتوقيت بغداد.`;
         const r=await pool.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
-          SELECT $1||':'||st.id::text,st.telegram_id,$2::jsonb,$3
+          SELECT $1||':'||st.id::text,st.telegram_id,$2::jsonb,($3::timestamp AT TIME ZONE 'UTC')
           FROM enrollments en JOIN students st ON st.id=en.student_id AND st.is_active=true
           WHERE en.stage_season_id=$4 AND en.status='active' AND en.started_at<=now()
             AND (en.ended_at IS NULL OR en.ended_at>now())

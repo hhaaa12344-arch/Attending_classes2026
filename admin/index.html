@@ -9,7 +9,7 @@
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23101b2b'/%3E%3Cpath d='M8 8h16v18H8zM12 13h8M12 18h8' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/admin/styles.css?v=20261002-01">
   <script src="https://telegram.org/js/telegram-web-app.js?63" defer></script>
-  <script src="/admin/app.js?v=20261026-01" defer></script>
+  <script src="/admin/app.js?v=20261026-02" defer></script>
 </head>
 <body>
   <svg class="icon-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
@@ -37,6 +37,7 @@
       <button class="nav" data-action="schedule-matrix"><svg aria-hidden="true"><use href="#i-calendar"></use></svg>جداول المباحثات</button>
       <button class="nav" data-action="lesson-schedule"><svg aria-hidden="true"><use href="#i-book"></use></svg>جدول الدروس</button>
       <button class="nav" data-action="lesson-management"><svg aria-hidden="true"><use href="#i-play"></use></svg>الدروس المفعّلة</button>
+      <button class="nav" id="one-time-cleanup-button" data-action="one-time-lesson-cleanup" hidden><svg aria-hidden="true"><use href="#i-check"></use></svg>إزالة الدروس المكررة لمرة واحدة</button>
       <button class="nav" data-action="channels"><svg aria-hidden="true"><use href="#i-channel"></use></svg>القنوات</button>
       <button class="nav" data-action="stats"><svg aria-hidden="true"><use href="#i-chart"></use></svg>الإحصائيات</button>
       <button class="nav" data-action="watchlist"><svg aria-hidden="true"><use href="#i-bell"></use></svg>التنبيهات والإنذارات</button>

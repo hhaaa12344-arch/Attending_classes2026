@@ -2,7 +2,7 @@
 const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const {JSDOM}=require('jsdom');
 const stage={id:1,name:'المرحلة التمهيدية',is_active:true,stage_type:'full',stage_season_id:1,season_name:'الموسم الأول',student_count:35,subject_count:1,group_count:1,
   subjects:[{id:1,name:'الفقه',hashtag:'فقه',teacher_name:'الأستاذ الأول',teachers:[{id:1,name:'الأستاذ الأول'}]}],groups:[{id:1,title:'الأولى',subject_id:1,subject_name:'الفقه',member_count:35,reserved_count:38,capacity:40}],seasons:[{id:1,name:'الأول',is_active:true}]};
-async function setup({authorized=true,noticeState=null,grouped=true,impact=null,leaves=[]}={}){
+async function setup({authorized=true,noticeState=null,grouped=true,impact=null,leaves=[],cleanup=null}={}){
   const fixture=JSON.parse(JSON.stringify(stage));fixture.discussion_grouping=grouped;
   const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../admin/index.html'),'utf8'),{url:'https://institute.example/admin/',runScripts:'outside-only'});
   const w=dom.window;w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};w.confirm=()=>true;
@@ -14,6 +14,11 @@ async function setup({authorized=true,noticeState=null,grouped=true,impact=null,
     requests.push({url,options});const u=new URL(url,'https://institute.example');let data,status=200;
     if(u.pathname.endsWith('/auth'))data={token:'a'.repeat(64),user:{name:'إدارة الاختبار'}};
     else if(u.pathname.endsWith('/seasons'))data=[{id:1,name:'الموسم الأول',is_current:true}];
+    else if(u.pathname.endsWith('/one-time-lesson-cleanup/status'))data={completed:Boolean(cleanup?.completed)};
+    else if(u.pathname.endsWith('/one-time-lesson-cleanup')){
+      if(options.method==='POST'){cleanup.completed=true;data={completed:true,removedFromCounting:1,preservedAttendance:14};}
+      else data=cleanup;
+    }
     else if(u.pathname.endsWith('/lesson-attendance'))data={season:{season_name:'الموسم الأول',as_of:'2026-09-14T12:00:00Z'},subjects:[{id:1,name:'الفقه'},{id:2,name:'العقائد'}],rows:[{id:1,sequence:1,full_name:'طالب <img src=x> اسم رباعي',attendance:[{attended:40,total:42},{attended:0,total:0}]}],total:1,page:0,size:50};
     else if(u.pathname.endsWith('/lesson-attendance.md'))data='حضور الدروس';
     else if(u.pathname.endsWith('/leaves'))data={rows:leaves,total:leaves.length,page:0,size:25};
@@ -66,6 +71,27 @@ async function setup({authorized=true,noticeState=null,grouped=true,impact=null,
   const click=selector=>{const el=w.document.querySelector(selector);assert.ok(el,selector);el.click();};
   return {dom,w,requests,until,click};
 }
+test('one-time lesson cleanup previews counts, escapes content, submits selected IDs and permanently hides its button',async()=>{
+  const cleanup={available:true,completed:false,token:'reviewed-preview',subjects:[{stageSeasonId:1,subjectId:1,stage:'المرحلة',subject:'المسائل',before:2,scheduledDue:1}],groups:[{stage:'المرحلة',subject:'المسائل',date:'2026-10-26',lessons:[
+    {id:20,stage_season_id:1,subject_id:1,source_message_id:284,content_text:'محاضرة <img src=x>',attendance_count:15,recommended:false},
+    {id:21,stage_season_id:1,subject_id:1,source_type:'schedule_fallback',attendance_count:14,recommended:true}]}]};
+  const {dom,w,requests,until,click}=await setup({cleanup});
+  try{
+    await until(()=>w.document.querySelector('.stage-card'));
+    assert.equal(w.document.querySelector('#one-time-cleanup-button').hidden,false);
+    click('#one-time-cleanup-button');await until(()=>w.document.querySelector('#one-time-lesson-cleanup'));
+    assert.equal(w.document.querySelector('#dialog-body img'),null);
+    assert.equal(w.document.querySelectorAll('input[name="lessonId"]:checked').length,1);
+    assert.match(w.document.querySelector('#cleanup-counts').textContent,/بعد الاختيار/);
+    const form=w.document.querySelector('#one-time-lesson-cleanup');form.elements.confirmed.checked=true;
+    form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+    await until(()=>w.document.querySelector('#notice').textContent.includes('اختفى الزر'));
+    const post=requests.find(r=>r.url.endsWith('/one-time-lesson-cleanup')&&r.options.method==='POST');
+    assert.deepEqual(JSON.parse(post.options.body),{token:'reviewed-preview',lessonIds:[21],confirmed:true});
+    assert.equal(w.document.querySelector('#one-time-cleanup-button').hidden,true);
+    assert.ok(requests.filter(r=>r.url.endsWith('/one-time-lesson-cleanup/status')).length>=2);
+  }finally{dom.window.close();}
+});
 test('admin DOM: Telegram entry, stages, pagination, escaped names and visible modal errors',async()=>{
   const {dom,w,requests,until,click}=await setup();try{
     await until(()=>w.document.querySelector('.stage-card'));click('[data-action="stage"]');await until(()=>w.document.querySelector('#search'));
