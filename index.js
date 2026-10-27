@@ -7,7 +7,7 @@ const instituteLinks = require('./instituteLinks').createInstituteLinks(db.pool)
 const { initIntegritySchema } = require('./integrity');
 const access = require('./access').createAccess(db.pool);
 const lessonRecovery = require('./lessonRecovery').createLessonRecovery(db);
-const scheduledPublication = require('./scheduledPublication').createScheduledPublication(db);
+const scheduledPublication = require('./scheduledPublication').createScheduledPublication(db,{notice:lessonRecovery.notice});
 const stageCorrections = require('./stageCorrections').createStageCorrections(db);
 const adminData = require('./adminData').createAdminData(db, studies);
 const scheduler = require('./scheduler').createScheduler({pool:db.pool,studies});
@@ -6717,7 +6717,13 @@ async function handleChannelLesson(ctx) {
     if (needsReview||hashtags.length===0||subject) {
       const result=await scheduledPublication.publish({channel,message,sourceUrl,
         contentKind:channelPostContentKind(message,standaloneHashtag),edited:!!ctx.editedChannelPost,explicitSubjectId:subject?.id||null});
-      if(result.created){
+      if(result.activatedAll?.length){
+        activityLessonId=result.activatedAll[0].lesson.id;
+        await db.setChannelPostActivityOutcome(chatId,activityMessageId,'activated',
+          `وصل ملف صوتي بلا مادة محددة؛ فُعّلت ${result.activatedAll.length} دروس مجدولة لهذا اليوم: ${result.activatedAll.map(x=>x.subject.name).join('، ')}.`,
+          {stageId:channel.stage_id,stageSeasonId:channel.stage_season_id,lessonId:activityLessonId});
+        Promise.resolve().then(()=>outboxWorker.tick({force:true})).catch(err=>console.warn('Scheduled lessons delivery failed:',err.code||'DELIVERY_ERROR'));
+      }else if(result.created){
         const activated=await activateChannelLesson({channel,subject:result.subject,sourceType:result.lesson.source_type,sourceUrl,
           chatId,messageId:message.message_id,notificationDate:currentDate,activityMessageId,existingActivation:result.lesson});
         activityLessonId=activated.lesson.id;

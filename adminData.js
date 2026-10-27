@@ -234,12 +234,19 @@ function createAdminData(db, studies) {
         WHERE ($2::int IS NULL OR i.item_subject_id=$2) ORDER BY i.published_at DESC,i.id DESC LIMIT $3 OFFSET $4`,
         [season.id,subjectId,p.size,p.offset,season.is_active])).rows;
       const pendingRows=lesson?(await c.query(`SELECT id,source_message_id,source_url,received_at,content_kind,content_text,auto_match FROM pending_channel_lesson_posts WHERE stage_season_id=$1 AND status='pending' ORDER BY received_at,source_message_id,id LIMIT 50`,[season.id])).rows:undefined;
-      const scheduledRows=lesson?(await c.query(`SELECT e.id,e.subject_id,sub.name AS subject_name,e.lesson_date::text AS lesson_date
+      // الموعد يُعدّ مغطّى إن وُجد درس بتاريخ جدوله أو بتاريخ منشوره الأصلي. والدروس القريبة التي لا موعد لها تُعرض مرشّحة للربط.
+      const scheduledRows=lesson?(await c.query(`SELECT e.id,e.subject_id,sub.name AS subject_name,e.lesson_date::text AS lesson_date,
+          COALESCE((SELECT json_agg(json_build_object('id',l.id,'activated_at',l.activated_at,'source_type',l.source_type,'day',d.day::text,
+              'attended',(SELECT COUNT(*)::int FROM attendance a WHERE a.lesson_id=l.id)) ORDER BY l.activated_at,l.id)
+            FROM effective_lessons l,LATERAL (SELECT COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date) AS day) d
+            WHERE l.stage_season_id=e.stage_season_id AND l.subject_id=e.subject_id AND d.day BETWEEN e.lesson_date-3 AND e.lesson_date+3
+              AND NOT EXISTS(SELECT 1 FROM lesson_schedule_entries o WHERE o.stage_season_id=l.stage_season_id AND o.subject_id=l.subject_id AND o.lesson_date=d.day)),'[]'::json) AS candidates
         FROM lesson_schedule_entries e JOIN subjects sub ON sub.id=e.subject_id
         WHERE e.stage_season_id=$1 AND e.lesson_date<=(now() AT TIME ZONE 'Asia/Baghdad')::date
         AND ($2::int IS NULL OR e.subject_id=$2) AND NOT EXISTS(SELECT 1 FROM effective_lessons l
+          LEFT JOIN pending_channel_lesson_posts pp ON pp.telegram_chat_id=l.source_chat_id AND pp.source_message_id=l.source_message_id
           WHERE l.stage_season_id=e.stage_season_id AND l.subject_id=e.subject_id
-          AND COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date)=e.lesson_date)
+          AND (COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date)=e.lesson_date OR pp.lesson_date=e.lesson_date))
         ORDER BY e.lesson_date DESC,sub.id LIMIT 50`,[season.id,subjectId])).rows:undefined;
       const repairAvailable=lesson&&!!(await c.query("SELECT 1 FROM channels WHERE stage_id=$1 AND stage_season_id=$2 AND telegram_chat_id=-1003488013652",[stageId,season.id])).rows.length;
       const repairApplied=repairAvailable&&!!(await c.query("SELECT 1 FROM lesson_repair_batches WHERE key='channel-3488013652-20260926-27-v1'")).rows.length;

@@ -348,6 +348,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           result=await lessonRecovery.restore(positiveInt(m[1]),positiveInt(body.subjectId),{actorId:actor.id,originalPublishedAt:body.originalPublishedAt,targetScheduleDate:body.scheduleDate});
           if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Lesson recovery delivery failed:',err.code||'DELIVERY_ERROR'));
         }
+        else if(route==='/scheduled-lessons/link'&&req.method==='POST')result=await scheduledFallback.linkExisting({stageSeasonId:body.stageSeasonId,subjectId:body.subjectId,scheduleDate:body.scheduleDate,lessonId:body.lessonId,actorId:actor.id});
         else if(route==='/scheduled-lessons/activate'&&req.method==='POST'){
           result=await scheduledFallback.activateManually({stageSeasonId:body.stageSeasonId,subjectId:body.subjectId,scheduleDate:body.scheduleDate,actorId:actor.id,notice:lessonRecovery.notice});
           if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Scheduled lesson delivery failed:',err.code||'DELIVERY_ERROR'));

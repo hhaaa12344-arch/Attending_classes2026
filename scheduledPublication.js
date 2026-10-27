@@ -12,7 +12,10 @@ function chooseSubject(subjects,text,allSubjects=subjects){
   if(matches.length)return matches.length===1?subjects.find(s=>Number(s.id)===Number(matches[0].id))||null:null;
   return null;
 }
-function createScheduledPublication(db){
+// ملف صوتي بلا مادة معروفة يعني أن محاضرات اليوم نُشرت: نفتح كل مادة مجدولة لهذا اليوم ولا يوجد لها درس،
+// دون ربط الملف بمادة بعينها. يعمل فقط عند تمرير دالة الإشعار (index.js).
+const ANONYMOUS_AUDIO=['voice','audio','audio_document'];
+function createScheduledPublication(db,{notice=null}={}){
   async function publish({channel,message,sourceUrl,contentKind,edited=false,explicitSubjectId=null}){
     const c=await db.pool.connect();
     try{
@@ -82,6 +85,26 @@ function createScheduledPublication(db){
       const subject=explicitSubjectId
         ? identified.length===1&&Number(identified[0].id)===Number(explicitSubjectId)?identified[0]:null
         : chooseSubject(subjects,contentText,allSubjects);
+      if(!subject&&notice&&!explicitSubjectId&&!inherited&&!identified.length&&classification.kind==='media'&&ANONYMOUS_AUDIO.includes(contentKind)){
+        const missing=(await c.query(`SELECT sub.id,sub.name,sub.stage_id FROM lesson_schedule_entries e
+          JOIN subjects sub ON sub.id=e.subject_id JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.stage_id=sub.stage_id
+          WHERE e.stage_season_id=$1 AND e.lesson_date=$2::date
+            AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=e.stage_season_id AND b.kind='holiday' AND e.lesson_date BETWEEN b.start_date AND b.end_date)
+            AND NOT EXISTS(SELECT 1 FROM effective_lessons l WHERE l.stage_season_id=e.stage_season_id AND l.subject_id=sub.id
+              AND COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date)=e.lesson_date)
+          ORDER BY sub.id`,[channel.stage_season_id,day])).rows;
+        if(missing.length){
+          const activatedAll=[];
+          for(const sub of missing){
+            const lesson=await db.activateLesson(sub.id,24,'schedule_fallback',null,null,null,null,{client:c,scheduleDate:day,attendanceOpenedAt:now});
+            if(!lesson)throw Error('لم يعد موسم المرحلة متاحًا.');
+            await notice(c,lesson,sub.name,sub.stage_id,'schedule-fallback');
+            activatedAll.push({lesson,subject:sub});
+          }
+          await c.query("UPDATE pending_channel_lesson_posts SET status='activated',lesson_id=NULL,resolved_subject_id=NULL,auto_match=false,resolved_at=now() WHERE id=$1",[p.id]);
+          await c.query('COMMIT');return {created:false,activatedAll,pending:p};
+        }
+      }
       if(!subject){await c.query('COMMIT');return {created:false,pending:p};}
       const fallback=(await c.query(`SELECT id FROM effective_lessons WHERE subject_id=$1 AND stage_season_id=$2
         AND source_type='schedule_fallback' AND source_message_id IS NULL AND schedule_date=$3::date LIMIT 1`,[subject.id,channel.stage_season_id,day])).rows[0];
