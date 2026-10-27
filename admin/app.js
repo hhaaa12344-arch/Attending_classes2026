@@ -529,8 +529,13 @@ async function publishScheduledLessonDialog(subjectId,date){
   const n=++dialogSequence,data=await api('/lesson-management?'+new URLSearchParams({stageId:mgtStageId}));
   if(n!==dialogSequence)return;
   const subject=data.subjects.find(s=>String(s.id)===String(subjectId));if(!subject)throw Error('المادة غير موجودة.');
+  const cands=((data.scheduledRows||[]).find(x=>String(x.subject_id)===String(subjectId)&&x.lesson_date===date)?.candidates)||[];
+  const linkForm=cands.length?`<form class="link-existing-lesson"><input type="hidden" name="stageSeasonId" value="${esc(data.season.id)}"><input type="hidden" name="subjectId" value="${subject.id}"><input type="hidden" name="scheduleDate" value="${esc(date)}">
+    <p><strong>هل هذا الدرس موجود أصلًا؟</strong> هذه دروس قريبة من الموعد ليس لها موعد في الجدول، وقد يكون أحدها درس هذا اليوم نُشر بتاريخ مختلف. الربط يغيّر تاريخ جدوله فقط، ويبقى حضور الطلبة وترقيمه كما هما.</p>
+    ${table(['اختيار','الدرس'],cands.map(x=>[`<input type="radio" name="lessonId" value="${x.id}" required aria-label="الدرس ${x.id}">`,`#${esc(x.id)} · ${stamp(x.activated_at)} · يوم ${esc(x.day)} · حضور مسجّل: ${esc(x.attended)}`]))}
+    <button type="submit">ربط بالدرس المختار دون تفعيل جديد</button></form>`:'';
   dialog('نشر درس من الجدول',`<p>${esc(subject.name)} · موعد الجدول ${esc(date)}</p>
-    <p>اختر منشور هذا الدرس بعد فتحه والتأكد من محتواه. لن يتغير أي درس آخر أو حضور سابق.</p>
+    <p>اختر منشور هذا الدرس بعد فتحه والتأكد من محتواه. لن يتغير أي درس آخر أو حضور سابق.</p>${linkForm}
     <form class="activate-scheduled-lesson"><input type="hidden" name="stageSeasonId" value="${esc(data.season.id)}"><input type="hidden" name="subjectId" value="${subject.id}"><input type="hidden" name="scheduleDate" value="${esc(date)}">
     <button type="submit">تفعيل بدون منشور لمدة 24 ساعة</button><p class="subtle">للمادة التي لم يُعرف منشورها؛ يُربط أي منشور يصل لاحقًا بالدرس تلقائيًا.</p></form>
         ${data.pendingRows?.length?`<form class="restore-pending-lesson"><input type="hidden" name="subjectId" value="${subject.id}"><input type="hidden" name="scheduleDate" value="${esc(date)}">
@@ -1007,6 +1012,11 @@ document.addEventListener('submit',async event=>{
     else if(form.id==='correct-lesson'){
       if(!await confirmAction('حفظ المادة الصحيحة مع الاحتفاظ بكل حضور الدرس؟'))return;
       await api('/lessons/'+form.dataset.id+'/subject',body,'PATCH');closeDetail();await loadLessonManagement();notify('حُفظت المادة وبقيت كل سجلات الحضور.');
+    }else if(form.classList.contains('link-existing-lesson')){
+      if(!body.lessonId)throw Error('اختر الدرس الموجود.');
+      if(!await confirmAction('ربط هذا الدرس الموجود بموعد الجدول؟ لن يُفعَّل درس جديد ولن يتغير أي حضور.'))return;
+      await api('/scheduled-lessons/link',{stageSeasonId:body.stageSeasonId,subjectId:body.subjectId,scheduleDate:body.scheduleDate,lessonId:body.lessonId},'POST');
+      closeDetail();await loadLessonManagement();notify('رُبط الدرس الموجود بموعده، وزال الموعد من قائمة غير المفعّل. الحضور لم يتغير.');
     }else if(form.classList.contains('activate-scheduled-lesson')){
       if(!await confirmAction('تفعيل هذه المادة من الجدول بدون منشور؟ يُتاح الحضور 24 ساعة من الآن ويُبلَّغ الطلبة.'))return;
       const r=await api('/scheduled-lessons/activate',{stageSeasonId:body.stageSeasonId,subjectId:body.subjectId,scheduleDate:body.scheduleDate},'POST');
