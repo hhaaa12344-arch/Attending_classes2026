@@ -1080,7 +1080,7 @@ async function correctExamQuestion(questionId, { action, correct }, actorId) {
         score=CASE WHEN a.submitted_at IS NULL THEN a.score ELSE
           ROUND((SELECT COUNT(*) FROM exam_answers ans JOIN exam_questions qq ON qq.id=ans.question_id AND qq.exam_id=$1
             WHERE ans.attempt_id=a.id AND ans.is_correct=true)::numeric
-            / NULLIF((SELECT COUNT(*) FROM exam_questions WHERE exam_id=$1),0) * $2::numeric) END
+            / NULLIF((SELECT COUNT(*) FROM exam_questions WHERE exam_id=$1),0) * $2::numeric, 1) END
       WHERE a.exam_id=$1`, [exam.id, exam.max_score]);
     const after = (await c.query('SELECT id,student_id,score FROM exam_attempts WHERE exam_id=$1 AND submitted_at IS NOT NULL', [exam.id])).rows;
     const was = new Map(before.map((b) => [b.id, b.score === null ? null : Number(b.score)]));

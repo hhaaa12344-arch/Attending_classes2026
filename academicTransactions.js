@@ -68,7 +68,7 @@ function createAcademicTransactions(pool) {
       const stats=(await c.query(`SELECT (SELECT COUNT(*) FROM exam_questions WHERE exam_id=e.id)::int AS total,
         (SELECT COUNT(*) FROM exam_answers ans JOIN exam_questions q ON q.id=ans.question_id AND q.exam_id=e.id
           WHERE ans.attempt_id=$1 AND ans.is_correct=true)::int AS correct,e.max_score FROM exams e WHERE id=$2`,[attemptId,a.exam_id])).rows[0];
-      const score=stats.total?Math.round(stats.correct/stats.total*Number(stats.max_score)):0;
+      const score=stats.total?Math.round(stats.correct/stats.total*Number(stats.max_score)*10)/10:0;
       return (await c.query(`UPDATE exam_attempts SET submitted_at=now(),score=$2,correct_count=$3,total_questions=$4
         WHERE id=$1 RETURNING *`,[attemptId,score,stats.correct,stats.total])).rows[0];
     });
