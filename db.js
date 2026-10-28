@@ -186,6 +186,15 @@ async function initSchema() {
       UNIQUE(stage_id, season_id)
     );
 
+    CREATE TABLE IF NOT EXISTS channel_audio_day_signals (
+      stage_season_id INTEGER NOT NULL REFERENCES stage_seasons(id) ON DELETE CASCADE,
+      publication_date DATE NOT NULL,
+      telegram_chat_id BIGINT NOT NULL,
+      source_message_id BIGINT NOT NULL,
+      source_timestamp BIGINT NOT NULL,
+      PRIMARY KEY(stage_season_id, publication_date)
+    );
+
     -- يُنشأ بعد stage_seasons الذي يعتمد عليه، بما يشمل التشغيل لأول مرة.
     CREATE TABLE IF NOT EXISTS lesson_schedule_entries (
       id SERIAL PRIMARY KEY,

@@ -47,7 +47,8 @@ test('old backlog never consumes today schedule; every stage retains explicit ma
     assert.equal((await db.getLessonBySource(f.chat,11)).subject_id,f.a.id);
     assert.equal(await db.getLessonBySource(f.chat,10),undefined);
     await assert.rejects(recovery.restore(old.id,f.b.id,{scheduleDate:today}),{code:'REVIEW_REQUIRED'});
-    const r=await recovery.restore(old.id,f.b.id,{actorId:42,targetScheduleDate:today});
+    await assert.rejects(recovery.restore(old.id,f.b.id,{actorId:42,targetScheduleDate:today}),{code:'REVIEW_REQUIRED'});
+    const r=await recovery.restore(old.id,f.b.id,{actorId:42});
     assert.equal(r.lesson.subject_id,f.b.id);assert.equal(r.lesson.active_until-r.lesson.attendance_opened_at,86400000);
   }
   assert.equal((await app.recoverPendingChannelLessonsForDate(today)).recovered,0);
@@ -179,4 +180,15 @@ test('absence monitoring uses recovery availability day while lesson numbering r
   const days=(await db.pool.query("SELECT to_char(attendance_date,'YYYY-MM-DD') AS day,lesson_count,attended_on_time_count FROM student_attendance_days WHERE student_id=$1",[f.student.id])).rows;
   const lesson=(await db.pool.query("SELECT to_char(attendance_opened_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad','YYYY-MM-DD') AS available,to_char(activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad','YYYY-MM-DD') AS published FROM lessons WHERE id=$1",[r.lesson.id])).rows[0];
   assert.notEqual(lesson.available,lesson.published);assert.deepEqual(days,[{day:lesson.available,lesson_count:1,attended_on_time_count:1}]);
+});
+
+test('named voice and unknown-hashtag audio activate the whole scheduled day',async()=>{
+  for(const kind of ['voice','audio','document']){
+    const f=await fixture(),today=app.currentDateInTimeZone('Asia/Baghdad');
+    await db.pool.query('INSERT INTO lesson_schedule_entries(stage_season_id,subject_id,lesson_date) VALUES($1,$2,$4),($1,$3,$4)',[f.ss,f.a.id,f.b.id,today]);
+    const media={file_id:'offline',file_unique_id:'all'+seq,duration:60};
+    if(kind==='document')Object.assign(media,{mime_type:'audio/mpeg',file_name:'lesson.mp3'});
+    await app.bot.handleUpdate({update_id:++seq,channel_post:{message_id:300,date:Math.floor(Date.now()/1000),chat:{id:f.chat,type:'channel'},caption:kind==='voice'?f.a.name:'#unknown',[kind]:media}});
+    assert.equal((await db.pool.query('SELECT COUNT(*)::int n FROM effective_lessons WHERE stage_season_id=$1',[f.ss])).rows[0].n,2);
+  }
 });

@@ -8,7 +8,7 @@ async function setup(){
   const requests=[];let windows=[],contactHistory=[],pending=true;
   const stage={id:1,name:'المرحلة',stage_season_id:1,season_name:'الموسم',subjects:[{id:1,name:'العقائد'},{id:2,name:'الفقه'}],groups:[],teachers:[]};
   const item={id:71,subject_id:1,subject_name:'العقائد',stage_season_id:1,source_type:'channel_schedule',activated_at:'2026-01-01T12:00:00Z',active_until:'2026-01-02T12:00:00Z'};
-  const exam={id:81,subject_id:1,subject_name:'العقائد',exam_number:1,opens_at:'2026-01-01T12:00:00Z',closes_at:'2026-01-02T12:00:00Z',status:'published',questions:[]};
+  const exam={id:81,subject_id:1,subject_name:'العقائد',exam_number:1,opens_at:'2026-01-01T12:00:00Z',closes_at:'2026-01-02T12:00:00Z',status:'published',questions:[],max_score:'5.0000000000000',results:[{full_name:'طالب كامل',submitted_at:'2026-01-01T13:00:00Z',score:'5.0000000000000',correct_count:10,total_questions:10},{full_name:'طالب آخر',submitted_at:'2026-01-01T13:00:00Z',score:'3.9000000000000',correct_count:8,total_questions:10}]};
   w.fetch=async(url,options={})=>{
     requests.push({url,options});const u=new URL(url,'https://test.example');let data;
     if(u.pathname.endsWith('/auth'))data={token:'a'.repeat(64),user:{name:'admin'}};
@@ -161,4 +161,13 @@ test('UI historical repair previews source links and requires review before its 
   const r=h.requests.find(r=>r.url.includes('/lesson-publication-repair')&&r.options.method==='POST');assert.deepEqual(JSON.parse(r.options.body),{stageId:1,token:'preview-token'});
   await h.until(()=>h.el('#notice').textContent.includes('صُححت الدروس'));
  }finally{h.dom.window.close();}
+});
+
+test('UI displays scores without trailing zeroes while keeping tenths',async()=>{
+  const h=await setup();try{
+    h.click('[data-action="stage"]');await h.until(()=>h.w.document.querySelector('[data-tab="exams"]'));
+    h.click('[data-tab="exams"]');await h.until(()=>h.w.document.querySelector('[data-action="exam"]'));
+    h.click('[data-action="exam"]');await h.until(()=>h.w.document.querySelector('[data-action="exam-student-window"]'));
+    const text=h.el('#dialog-body').textContent;assert.match(text,/5 \/ 5/);assert.match(text,/3\.9 \/ 5/);assert.doesNotMatch(text,/5\.000/);
+  }finally{h.dom.window.close();}
 });

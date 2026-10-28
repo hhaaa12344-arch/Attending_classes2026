@@ -6676,6 +6676,8 @@ async function handleChannelLesson(ctx) {
   let activityStageId = null;
   let activityStageSeasonId = null;
   let activityLessonId = null;
+  let audioDayRequest = null;
+  let channelProcessingFailed = false;
   try {
     const message = ctx.channelPost || ctx.editedChannelPost;
     if (!message) return;
@@ -6741,6 +6743,8 @@ async function handleChannelLesson(ctx) {
         {stageId:channel.stage_id,stageSeasonId:channel.stage_season_id});
       return;
     }
+    audioDayRequest={channel,message,contentKind:channelPostContentKind(message,standaloneHashtag),edited:!!ctx.editedChannelPost};
+
     const postLink = telegramMessageLink(message);
     const externalUrl = extractFirstUrl(message);
     // وجهة الطالب هي منشور الدرس نفسه داخل قناة مرحلته، حتى إن احتوى المنشور رابطًا خارجيًا.
@@ -6821,6 +6825,7 @@ async function handleChannelLesson(ctx) {
     }
 
   } catch (err) {
+    channelProcessingFailed = true;
     if (activityChatId != null) {
       try {
         await db.setChannelPostActivityOutcome(
@@ -6836,6 +6841,18 @@ async function handleChannelLesson(ctx) {
     }
     console.error('خطأ أثناء معالجة منشور القناة:', err);
     // الخطأ مسجل في تشخيص القنوات داخل اللوحة التفاعلية؛ لا نرسله للأدمن على تليجرام.
+  } finally {
+    if(audioDayRequest){
+      try{
+        const result=await scheduledPublication.activateAudioDay(audioDayRequest);
+        if(result.activatedAll.length){
+          if(!channelProcessingFailed) await db.setChannelPostActivityOutcome(activityChatId,activityMessageId,'activated',
+            `وصل صوت؛ فُعّلت ${result.activatedAll.length} مواد إضافية من جدول اليوم: ${result.activatedAll.map(x=>x.subject.name).join('، ')}.`,
+            {stageId:activityStageId,stageSeasonId:activityStageSeasonId,lessonId:result.activatedAll[0].lesson.id});
+          Promise.resolve().then(()=>outboxWorker.tick({force:true})).catch(err=>console.warn('Scheduled lessons delivery failed:',err.code||'DELIVERY_ERROR'));
+        }
+      }catch(err){console.error('تعذر تفعيل مواد اليوم بعد استقبال الصوت:',err);}
+    }
   }
 }
 
@@ -6956,6 +6973,7 @@ async function main() {
   timers.push(setInterval(()=>runScheduleTick().catch(err=>console.error('Schedule failed:',err.message)), 30 * 1000));
   // إعادة فحص الملفات التي وصلت قبل إدخال جدول اليوم.
   timers.push(setInterval(()=>recoverPendingChannelLessonsToday(), 15 * 1000));
+  timers.push(setInterval(()=>scheduledPublication.recoverAudioDaysToday().catch(err=>console.error('Audio day recovery failed:',err.message)), 15 * 1000));
   // مواد اليوم المجدولة التي لم يُعرف منشورها تُفتح تلقائيًا بعد مهلة قصيرة من أول درس معروف.
   const scheduledFallback = require('./scheduledFallback').createScheduledFallback(db);
   if (scheduledFallback.graceMinutes !== null) {
@@ -6975,6 +6993,7 @@ async function main() {
   checkReminders();
   checkConsecutiveAbsence();
   recoverPendingChannelLessonsToday();
+  scheduledPublication.recoverAudioDaysToday().catch(err=>console.error('Audio day recovery failed:',err.message));
   await launchBotWithRetry();
 }
 

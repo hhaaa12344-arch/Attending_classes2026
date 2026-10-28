@@ -121,6 +121,63 @@ function createScheduledPublication(db,{notice=null}={}){
       await c.query('COMMIT');return {lesson,subject,created:true};
     }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
   }
-  return {publish};
+  // An audio post is a signal for the day's scheduled lessons, independent of
+  // whether the regular post matcher identified its subject.
+  async function activateAudioDay({channel,message,contentKind,edited=false}){
+    if(!notice || !ANONYMOUS_AUDIO.includes(contentKind) || edited || !message.date) return {activatedAll:[]};
+    const c=await db.pool.connect();
+    try{
+      await c.query('BEGIN');
+      await c.query('SELECT pg_advisory_xact_lock(734225,$1)',[channel.stage_season_id]);
+      const now=(await c.query('SELECT now() AS at')).rows[0].at, published=new Date(message.date*1000);
+      const day=baghdadDay(published);
+      if(published>now||day!==baghdadDay(now)){await c.query('COMMIT');return {activatedAll:[]};}
+      const linked=(await c.query(`SELECT ch.id FROM channels ch JOIN stage_seasons ss ON ss.id=ch.stage_season_id
+        JOIN stages st ON st.id=ch.stage_id WHERE ch.telegram_chat_id=$1 AND ch.stage_id=$2 AND ch.stage_season_id=$3
+        AND ss.is_active=true AND st.is_active=true FOR SHARE OF ch,ss,st`,[message.chat.id,channel.stage_id,channel.stage_season_id])).rows[0];
+      if(!linked){await c.query('COMMIT');return {activatedAll:[]};}
+      await c.query(`INSERT INTO channel_audio_day_signals(stage_season_id,publication_date,telegram_chat_id,source_message_id,source_timestamp)
+        VALUES($1,$2::date,$3,$4,$5) ON CONFLICT(stage_season_id,publication_date) DO NOTHING`,
+        [channel.stage_season_id,day,message.chat.id,message.message_id,message.date]);
+      // Save the signal independently so a temporary failure during activation
+      // can be retried even after the bot restarts.
+      await c.query('COMMIT');
+      await c.query('BEGIN');
+      await c.query('SELECT pg_advisory_xact_lock(734225,$1)',[channel.stage_season_id]);
+      const stillLinked=(await c.query(`SELECT ch.id FROM channels ch JOIN stage_seasons ss ON ss.id=ch.stage_season_id
+        JOIN stages st ON st.id=ch.stage_id WHERE ch.telegram_chat_id=$1 AND ch.stage_id=$2 AND ch.stage_season_id=$3
+        AND ss.is_active=true AND st.is_active=true FOR SHARE OF ch,ss,st`,[message.chat.id,channel.stage_id,channel.stage_season_id])).rows[0];
+      if(!stillLinked){await c.query('COMMIT');return {activatedAll:[]};}
+      const missing=(await c.query(`SELECT DISTINCT sub.id,sub.name,sub.stage_id FROM lesson_schedule_entries e
+        JOIN subjects sub ON sub.id=e.subject_id JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.stage_id=sub.stage_id
+        WHERE e.stage_season_id=$1 AND e.lesson_date=$2::date
+          AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=e.stage_season_id AND b.kind='holiday' AND e.lesson_date BETWEEN b.start_date AND b.end_date)
+          AND NOT EXISTS(SELECT 1 FROM effective_lessons l WHERE l.stage_season_id=e.stage_season_id AND l.subject_id=sub.id
+            AND COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date)=e.lesson_date)
+        ORDER BY sub.id`,[channel.stage_season_id,day])).rows;
+      const activatedAll=[];
+      for(const sub of missing){
+        const lesson=await db.activateLesson(sub.id,24,'schedule_fallback',null,null,null,null,{client:c,scheduleDate:day,attendanceOpenedAt:now});
+        if(!lesson)throw Error('لم يعد موسم المرحلة متاحًا.');
+        await notice(c,lesson,sub.name,sub.stage_id,'schedule-fallback');
+        activatedAll.push({lesson,subject:sub});
+      }
+      await c.query('COMMIT');return {activatedAll};
+    }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+  }
+  async function recoverAudioDaysToday(){
+    if(!notice)return;
+    const now=(await db.pool.query('SELECT now() AS at')).rows[0].at;
+    const signals=(await db.pool.query(`SELECT s.telegram_chat_id,s.source_message_id,s.source_timestamp,
+      ch.stage_id,ch.stage_season_id FROM channel_audio_day_signals s
+      JOIN channels ch ON ch.telegram_chat_id=s.telegram_chat_id AND ch.stage_season_id=s.stage_season_id
+      WHERE s.publication_date=$1::date`,[baghdadDay(now)])).rows;
+    for(const s of signals){
+      try{
+        await activateAudioDay({channel:s,message:{chat:{id:s.telegram_chat_id},message_id:s.source_message_id,date:Number(s.source_timestamp)},contentKind:'audio'});
+      }catch(err){console.error('Audio day recovery failed for season',s.stage_season_id,err.message);}
+    }
+  }
+  return {publish,activateAudioDay,recoverAudioDaysToday};
 }
 module.exports={createScheduledPublication,chooseSubject,baghdadDay};
