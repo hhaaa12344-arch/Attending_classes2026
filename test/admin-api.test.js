@@ -200,14 +200,14 @@ test('teacher HTTP: reports submitted before assignment become readable and grad
  const visible=await teacherRequest(route,null,key);assert.equal(visible.status,200);assert.ok((await visible.json()).some(r=>r.id===report.id));
  const students=await teacherRequest(`/reports/students?subjectId=${sub.id}&seasonId=${ss}`,null,key);
  assert.ok((await students.json()).some(r=>r.student_id===student.id&&Number(r.report_count)===1));
- assert.equal((await teacherRequest('/reports/'+report.id+'/score',{score:12},key)).status,200);
+ assert.equal((await teacherRequest('/reports/'+report.id+'/score',{rating:'good'},key)).status,200);
   const pendingReport=await studies.submitReport(student.id,sub.id,ss,{kind:'text',note:'تقرير جديد بانتظار التقييم'});
   assert.equal((await teacherRequest('/reports/average',{studentId:student.id,subjectId:sub.id,seasonId:ss},key)).status,409);
-  assert.equal((await teacherRequest('/reports/'+pendingReport.id+'/score',{score:12},key)).status,200);
+  assert.equal((await teacherRequest('/reports/'+pendingReport.id+'/score',{rating:'acceptable'},key)).status,200);
   const summary=await teacherRequest(`/reports/summary?studentId=${student.id}&subjectId=${sub.id}&seasonId=${ss}`,null,key);
-  assert.equal(summary.status,200);assert.equal(Number((await summary.json()).average),12);
+  assert.equal(summary.status,200);const summaryJson=await summary.json();assert.equal(Number(summaryJson.good),1);assert.equal(Number(summaryJson.acceptable),1);
   const average=await teacherRequest('/reports/average',{studentId:student.id,subjectId:sub.id,seasonId:ss},key);
-  assert.equal(average.status,200);assert.equal(Number((await average.json()).average),12);
+  assert.equal(average.status,200);assert.equal(Number((await average.json()).average),15);
   const attendance=await teacherRequest(`/attendance?subjectId=${sub.id}&seasonId=${ss}`,null,key);
   assert.equal(attendance.status,200);assert.ok((await attendance.json()).some(r=>r.student_id===student.id&&r.group_id));
   const examResponse=await teacherRequest('/exams',{subjectId:sub.id,seasonId:ss,examNumber:1,title:'اختبار التقارير',dateIso:'2030-01-01',hours:24},key);
