@@ -143,6 +143,20 @@ test('admin HTTP: participation changes require a reviewed snapshot and reject s
   const current=await (await request('/stages/'+sg.id)).json();assert.equal(current.discussion_grouping,true);assert.equal(current.subjects[0].participation_enabled,false);assert.equal(current.groups.length,0);
   assert.equal((await request(route,{grouped:false,enabledSubjectIds:[sub.id],expectedSettings:{grouped:true,enabledSubjectIds:[]},confirmGroupingChange:true},'PATCH')).status,200);
 });
+test('admin correction requires authentication and an active season',async()=>{
+  const sg=await db.addStage('مرحلة اختبار تصحيح الأسئلة'), seasonId=(await db.listStageSeasons(sg.id))[0].id;
+  const sub=await db.addSubject(sg.id,'مادة التصحيح','مادة_التصحيح');
+  const exam=await studies.createExam(sub.id,seasonId,null,{examNumber:1,title:'اختبار التصحيح',dateIso:'2031-01-01',hours:2});
+  const q=await studies.addExamQuestion(exam.id,{type:'tf',prompt:'سؤال التصحيح',correct:'صح'});
+  await studies.publishExam(exam.id);
+  const route='/questions/'+q.id+'/correct',body={action:'change_answer',correct:'خطأ'};
+  assert.equal((await request(route,body,'POST',null)).status,401);
+  const result=await request(route,body);assert.equal(result.status,200);
+  assert.equal((await studies.getQuestionById(q.id)).correct_answer,'خطأ');
+  await db.pool.query('UPDATE stage_seasons SET is_active=false WHERE id=$1',[seasonId]);
+  assert.equal((await request(route,{action:'change_answer',correct:'صح'})).status,400);
+  assert.equal((await studies.getQuestionById(q.id)).correct_answer,'خطأ');
+});
 test('admin HTTP: exam editor, edits before attempts, postponement and logout',async()=>{
   const dateIso=new Date(Date.now()+86400000).toISOString().slice(0,10);
   const created=await request('/exams',{subjectId:subject.id,seasonId:ss,teacherId:teacher.id,examNumber:1,title:'امتحان تجريبي',dateIso,hours:24});

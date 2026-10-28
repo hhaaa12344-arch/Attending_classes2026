@@ -279,6 +279,14 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           result=m[2]==='update'?await studies.updateExam(id,body):await studies.deleteExam(id);
           await audit(actor.id,m[2]+'_exam','exam',id,before,result);
         }
+        else if((m=/^\/questions\/(\d+)\/correct$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]),question=await studies.getQuestionById(id);
+          if(!question)throw appError('السؤال غير موجود.','NOT_FOUND',404);
+          const exam=await studies.getExamById(question.exam_id);
+          if(!exam||(await db.pool.query('SELECT 1 FROM stage_seasons WHERE id=$1 AND is_active=true',[exam.stage_season_id])).rowCount!==1)
+            throw appError('الامتحان غير موجود أو موسمه مؤرشف.');
+          result=await studies.correctExamQuestion(id,{action:body.action,correct:body.correct},actor.id);
+        }
         else if((m=/^\/questions\/(\d+)\/update$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]),before=await studies.getQuestionById(id);
           result=await studies.updateExamQuestion(id,body);
