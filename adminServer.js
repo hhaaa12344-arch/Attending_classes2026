@@ -271,8 +271,8 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           await audit(actor.id,'exam_'+m[2],'exam',id,{status:before.status},m[2]==='question'?{question_id:result.id}:result);
         }
         else if((m=/^\/questions\/(\d+)\/remove$/.exec(route))&&req.method==='POST'){
-          const id=positiveInt(m[1]);result={removed:await studies.deleteExamQuestion(id)};
-          if(result.removed)await audit(actor.id,'remove_question','question',id,null,result);
+          const id=positiveInt(m[1]);const removedQuestion=await studies.getQuestionById(id);result={removed:await studies.deleteExamQuestion(id)};
+          if(result.removed)await audit(actor.id,'remove_question','question',id,removedQuestion,result);
         }
         else if((m=/^\/exams\/(\d+)\/(update|delete)$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]),before=await studies.getExamById(id);

@@ -4513,7 +4513,7 @@ async function renderExam(ctx, examId, edit = false) {
   const questions = await studies.listExamQuestions(examId);
   const lines = questions.length
     ? questions
-        .map((q) => `${q.position}) [${q.question_type === 'tf' ? 'صح/خطأ' : 'خيارات'}] ${q.prompt}`)
+        .map((q) => `${q.display_no}) [${q.question_type === 'tf' ? 'صح/خطأ' : 'خيارات'}] ${q.prompt}`)
         .join('\n')
     : 'لا أسئلة بعد.';
   const rows = [];
@@ -4598,7 +4598,7 @@ for(const action of ['edit','delete'])bot.action(new RegExp(`^ex_${action}_quest
   const exam=await editableExamForAction(ctx,Number(ctx.match[1]));if(!exam)return ctx.answerCbQuery('لا يمكن تعديل الأسئلة.');
   const questions=await studies.listExamQuestions(exam.id);await ctx.answerCbQuery();
   if(!questions.length)return ctx.reply('لا توجد أسئلة.');
-  return ctx.reply(action==='edit'?'اختر السؤال لتعديله:':'اختر السؤال لحذفه:',Markup.inlineKeyboard(questions.map(q=>[callbackButton(limitButtonText(`${q.position}. ${q.prompt}`,48),`ex_${action}_question_pick:${q.id}`)])));
+  return ctx.reply(action==='edit'?'اختر السؤال لتعديله:':'اختر السؤال لحذفه:',Markup.inlineKeyboard(questions.map(q=>[callbackButton(limitButtonText(`${q.display_no}. ${q.prompt}`,48),`ex_${action}_question_pick:${q.id}`)])));
 });
 bot.action(/^ex_edit_question_pick:(\d+)$/,async ctx=>{
   const q=await studies.getQuestionById(Number(ctx.match[1]));const exam=q&&await editableExamForAction(ctx,q.exam_id);
@@ -4961,7 +4961,7 @@ bot.action(/^stex_review:(\d+)$/,async ctx=>{
   if(!result)return ctx.answerCbQuery('هذه الإجابات غير متاحة لك.',{show_alert:true});
   await ctx.answerCbQuery();
   const heading=`📝 ${result.subject_name} — الشهري ${result.exam_number}\n📊 الدرجة: ${Number(result.score)} من ${Number(result.max_score)}`;
-  const lines=result.answers.map(q=>`\nالسؤال ${q.position}: ${q.prompt}\nإجابتك: ${q.answer??'لم تُجب'}\n${q.is_correct===true?'✅ إجابة صحيحة':'❌ إجابة خاطئة أو غير مجابة'}${q.is_correct===true?'':`\nالإجابة الصحيحة: ${q.correct_answer}`}`);
+  const lines=result.answers.map(q=>`\nالسؤال ${q.display_no}: ${q.prompt}\nإجابتك: ${q.answer??'لم تُجب'}\n${q.is_correct===true?'✅ إجابة صحيحة':'❌ إجابة خاطئة أو غير مجابة'}${q.is_correct===true?'':`\nالإجابة الصحيحة: ${q.correct_answer}`}`);
   let buffer=heading;
   for(const line of lines){
     if((buffer+'\n'+line).length>3700){await ctx.reply(buffer);buffer=heading+' (تابع)';}
@@ -4996,7 +4996,7 @@ async function sendNextExamQuestion(ctx, attemptId, examId) {
     Markup.button.callback(limitButtonText(o, 50), `stex_ans:${attemptId}:${q.id}:${i}`),
   ]);
   return ctx.reply(
-    `السؤال ${q.position} من ${Number(q.total)}:\n\n${q.prompt}`,
+    `السؤال ${q.display_no} من ${Number(q.total)}:\n\n${q.prompt}`,
     Markup.inlineKeyboard(rows)
   );
 }
@@ -5046,7 +5046,13 @@ bot.action(/stex_ans:(\d+):(\d+):(\d+)/, async (ctx) => {
   }
 
   const question = await studies.getQuestionById(questionId);
-  if (!question || question.exam_id !== attempt.exam_id) return ctx.answerCbQuery('سؤال غير صالح.');
+  if (!question) {
+    // سؤال استُبعد بعد أن أُرسل للطالب: نُبطل الرسالة القديمة وننقله للسؤال التالي.
+    await ctx.answerCbQuery('استُبعد هذا السؤال من الامتحان ولا يُحتسب.', { show_alert: true });
+    try { await ctx.editMessageText('🚫 استُبعد هذا السؤال من الامتحان ولا يُحتسب.'); } catch (_) {}
+    return sendNextExamQuestion(ctx, attemptId, attempt.exam_id);
+  }
+  if (question.exam_id !== attempt.exam_id) return ctx.answerCbQuery('سؤال غير صالح.');
 
   const options =
     question.question_type === 'tf'
@@ -5060,7 +5066,7 @@ bot.action(/stex_ans:(\d+):(\d+):(\d+)/, async (ctx) => {
   try {await studies.submitAnswer(attemptId, questionId, answer);}
   catch(err){return ctx.answerCbQuery(err.message,{show_alert:true});}
   await ctx.answerCbQuery('سُجّلت إجابتك');
-  await ctx.editMessageText(`السؤال ${question.position}: ${question.prompt}\n\nإجابتك: ${answer} (تم الحفظ)`);
+  await ctx.editMessageText(`السؤال ${question.display_no}: ${question.prompt}\n\nإجابتك: ${answer} (تم الحفظ)`);
   return sendNextExamQuestion(ctx, attemptId, attempt.exam_id);
 });
 

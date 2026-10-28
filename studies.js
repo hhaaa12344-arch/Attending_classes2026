@@ -1007,7 +1007,8 @@ async function addExamQuestion(examId, { type, prompt, options, correct }) {
 
 const listExamQuestions = (examId) =>
   pool
-    .query('SELECT * FROM exam_questions WHERE exam_id=$1 ORDER BY position', [examId])
+    .query(`SELECT q.*, ROW_NUMBER() OVER (ORDER BY q.position)::int AS display_no
+            FROM exam_questions q WHERE q.exam_id=$1 ORDER BY q.position`, [examId])
     .then((r) => r.rows);
 
 async function deleteExamQuestion(questionId) {
@@ -1070,6 +1071,13 @@ async function correctExamQuestion(questionId, { action, correct }, actorId) {
       if (Number((await c.query('SELECT COUNT(*) AS n FROM exam_questions WHERE exam_id=$1', [exam.id])).rows[0].n) <= 1)
         throw appError('لا يمكن حذف آخر سؤال في الامتحان.', 'LAST_QUESTION', 409);
       await c.query('DELETE FROM exam_questions WHERE id=$1', [questionId]);
+      // من لم يسلّم بعد قد يبقى السؤال المحذوف ظاهرًا في محادثته؛ نبلغه بأنه استُبعد وأن الترقيم تغيّر.
+      await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
+        SELECT $1||':'||st.id::text,st.telegram_id,$2::jsonb,GREATEST($3::timestamptz,now()+interval '1 day')
+        FROM exam_attempts a JOIN students st ON st.id=a.student_id AND st.is_active=true
+        WHERE a.exam_id=$4 AND a.submitted_at IS NULL ON CONFLICT DO NOTHING`,
+      [`exam-remove:${questionId}`, JSON.stringify([`🚫 استُبعد أحد أسئلة امتحان «${exam.subject_name}» (الامتحان ${exam.exam_number}).\nإن كان ظاهرًا لديك في المحادثة فتجاهله ولا يُحتسب، وتغيّرت أرقام الأسئلة التالية. تابع الإجابة عن الأسئلة المتبقية.`, {}]),
+        exam.closes_at, exam.id]);
     }
     // إعادة حساب كل المحاولات بعدد الأسئلة الحالي. غير المسلَّمة تُحسب عند تسليمها.
     await c.query(`UPDATE exam_attempts a SET
@@ -1275,6 +1283,7 @@ const getNextUnansweredQuestion = (attemptId) =>
   pool
     .query(
       `SELECT q.*, (SELECT COUNT(*) FROM exam_questions qq WHERE qq.exam_id=q.exam_id) AS total,
+              (SELECT COUNT(*)::int FROM exam_questions qq WHERE qq.exam_id=q.exam_id AND qq.position<=q.position) AS display_no,
               (SELECT COUNT(*) FROM exam_answers ans WHERE ans.attempt_id=$1) AS answered
        FROM exam_questions q
        JOIN exam_attempts a ON a.id=$1 AND a.exam_id=q.exam_id
@@ -1388,7 +1397,8 @@ const getAttemptById = (attemptId) =>
   pool.query('SELECT * FROM exam_attempts WHERE id=$1', [attemptId]).then((r) => r.rows[0]);
 
 const getQuestionById = (questionId) =>
-  pool.query('SELECT * FROM exam_questions WHERE id=$1', [questionId]).then((r) => r.rows[0]);
+  pool.query(`SELECT q.*, (SELECT COUNT(*)::int FROM exam_questions qq WHERE qq.exam_id=q.exam_id AND qq.position<=q.position) AS display_no
+    FROM exam_questions q WHERE q.id=$1`, [questionId]).then((r) => r.rows[0]);
 
 // درجات الطالب في الامتحانات الشهرية التي سلّمها (تُعرض له بعد كل امتحان وفي شاشته).
 const getStudentExamResults = (studentId) =>
@@ -1413,7 +1423,7 @@ const getStudentExamReview = async (studentId, examId) => {
       WHERE a.student_id=$1 AND e.id=$2 AND a.submitted_at IS NOT NULL`,
     [studentId,examId])).rows[0];
   if(!exam)return null;
-  const answers=(await pool.query(`SELECT q.position,q.prompt,q.correct_answer,ans.answer,ans.is_correct
+  const answers=(await pool.query(`SELECT q.position,ROW_NUMBER() OVER (ORDER BY q.position)::int AS display_no,q.prompt,q.correct_answer,ans.answer,ans.is_correct
     FROM exam_questions q JOIN exam_attempts a ON a.exam_id=q.exam_id AND a.student_id=$1
       AND a.submitted_at IS NOT NULL
     LEFT JOIN exam_answers ans ON ans.question_id=q.id AND ans.attempt_id=a.id
