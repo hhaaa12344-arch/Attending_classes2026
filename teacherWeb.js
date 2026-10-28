@@ -196,7 +196,7 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
           JOIN stage_seasons ss ON ss.id=r.stage_season_id AND ss.is_active=true
           WHERE r.id=$1 AND ta.teacher_id=$2`,[reportId,actor.teacherId])).rows[0];
         if(!report)throw appError('التقرير غير موجود أو ليس ضمن موادك.','FORBIDDEN',403);
-        result=await studies.setReportItemScore(reportId,validScore(body.score,15),actor.id);
+        result=typeof body.rating==='string'?await studies.setReportItemRating(reportId,body.rating,actor.id):await studies.setReportItemScore(reportId,validScore(body.score,15),actor.id);
       }
       else if(route==='/reports/average'){
         const studentId=positiveInt(body.studentId);
@@ -231,6 +231,13 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
       else if((m=/^\/exams\/(\d+)\/(update|delete)$/.exec(route))){
         const exam=await requireOwnedExam(actor,m[1]);
         result=m[2]==='update'?await studies.updateExam(exam.id,body):await studies.deleteExam(exam.id);
+      }
+      else if((m=/^\/questions\/(\d+)\/correct$/.exec(route))){
+        const questionId=positiveInt(m[1]);
+        const question=await studies.getQuestionById(questionId);
+        if(!question)throw appError('السؤال غير موجود.','NOT_FOUND',404);
+        await requireOwnedExam(actor,question.exam_id);
+        result=await studies.correctExamQuestion(questionId,{action:body.action,correct:body.correct},actor.id);
       }
       else if((m=/^\/questions\/(\d+)\/(update|delete)$/.exec(route))){
         const questionId=positiveInt(m[1]);

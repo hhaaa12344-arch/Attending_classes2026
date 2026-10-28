@@ -5,7 +5,7 @@ function reminderText(row) {
   if (!row.official_confirmed_at) tasks.push('أرسل /start إلى البوت، ثم اضغط زر تأكيد التسجيل الرسمي.');
   if (row.missing_modes?.length) tasks.push(`افتح «📖 المباحثات والتقارير»، واختر نوع مشاركتك (مباحثة أو تقرير) في: ${row.missing_modes.join('، ')}.`);
   if (row.missing_groups?.length) tasks.push(`افتح «📖 المباحثات والتقارير» ثم «👥 الدخول إلى المباحثة» للانضمام إلى مجموعة: ${row.missing_groups.join('، ')}.`);
-  if (row.missing_reports?.length) tasks.push(`أرسل تقريرًا في: ${row.missing_reports.join('، ')}. افتح «📄 إرسال تقرير»، واختر المادة ثم أرسل نص التقرير أو ملفه.`);
+  if (row.missing_reports?.length) tasks.push(`أرسل تقريرًا في: ${row.missing_reports.join('، ')}. افتح «📄 إرسال تقرير» أيام الأربعاء والخميس والجمعة، واختر المادة ثم أرسل نص التقرير أو ملفه.`);
   if (row.pending_transition) tasks.push('أرسل /start إلى البوت وحدد حالتك للموسم الجديد: إعادة المرحلة أو الانتقال.');
   return tasks.length ? `📌 تنويه من إدارة المعهد\n\n${tasks.map((task,i)=>`${i+1}. ${task}`).join('\n')}\n\nبعد إكمال الإجراءات لن يصلك هذا التنويه مرة أخرى في الإرسال القادم.` : null;
 }

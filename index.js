@@ -100,7 +100,7 @@ const PREVIEW_BLOCKED_ACTION_PREFIXES = [
   'attend', 'mub_attend', 'mub_end_attend', 'mub_finish',
   'pm_set', 'pm_join', 'pm_switch', 'pm_switchok', 'pc_req', 'pc_cancel', 'pc_approve', 'pc_reject',
   'rep_send', 'stex_start', 'stex_ans',
-  'sr_item', 'sr_apply', 'sr_manual', 'lr_grade', 'gr_edit',
+  'sr_item', 'sr_rate', 'sr_apply', 'sr_manual', 'lr_grade', 'gr_edit',
   'season_choice', 'leave_approve', 'leave_reject', 'leave_cancel', 'leave_open', 'leave_exception', 'leave_exception_approve', 'admin_leave_reduce', 'admin_leave_cancel', 'admin_leave_cancel_ok',
   'noop_activity',
   'slot_yes', 'slot_no', 'confirm_official_student',
@@ -683,7 +683,7 @@ function withStudentName(student, text) {
   return `👤 الطالب: ${student.full_name}\n\n${text}`;
 }
 
-const REPORT_WEEKLY_REMINDER = '🗓️ تذكير: أرسل تقرير كل مادة مرة واحدة أسبوعيًا، وليس يوميًا.';
+const REPORT_WEEKLY_REMINDER = '🗓️ تذكير: أرسل تقرير كل مادة مرة واحدة أسبوعيًا، وليس يوميًا، أيام الأربعاء والخميس والجمعة فقط. أي تقرير مكرر في الأسبوع لا يُحتسب.';
 
 function formatStudentSeasonActivity(activity) {
   if (!activity) return '📋 لا يوجد موسم دراسي نشط في حسابك حاليًا.';
@@ -1367,6 +1367,8 @@ bot.on(['document', 'photo'], async (ctx, next) => {
     ? msg.document.file_id
     : msg.photo[msg.photo.length - 1].file_id; // أعلى دقة متاحة
   const kind = msg.document ? 'document' : 'photo';
+  const blockedUpload = await studies.getReportSubmissionBlock(student.id, state.subjectId, state.ssId);
+  if (blockedUpload) { userState.delete(ctx.from.id); return ctx.reply(blockedUpload.message); }
   const assignment=await studies.assignStudentToGroup(student.id,state.subjectId,state.ssId);
   if(!assignment.group)return ctx.reply(assignment.message+' ثم أعد إرسال التقرير.');
   const report=await studies.submitReport(student.id, state.subjectId, state.ssId, {
@@ -1857,6 +1859,8 @@ bot.on('text', async (ctx, next) => {
     if (text.length < 10) {
       return ctx.reply('التقرير النصي قصير جدًا. أرسل نصًا أوفى أو أرسل ملفًا.');
     }
+    const blockedText = await studies.getReportSubmissionBlock(student.id, state.subjectId, state.ssId);
+    if (blockedText) { userState.delete(ctx.from.id); return ctx.reply(blockedText.message); }
     const assignment=await studies.assignStudentToGroup(student.id,state.subjectId,state.ssId);
     if(!assignment.group)return ctx.reply(assignment.message+' ثم أعد إرسال التقرير.');
     const report=await studies.submitReport(student.id, state.subjectId, state.ssId, {
@@ -4899,6 +4903,7 @@ bot.hears('📝 الامتحانات الشهرية', async (ctx) => {
 
   const open = await studies.getOpenExamsForStudent(student.id);
   const done = await studies.getStudentExamResults(student.id);
+  const upcoming = await studies.getUpcomingExamsForStudent(student.id);
 
   const doneLines = done.length
     ? done
@@ -4919,11 +4924,33 @@ bot.hears('📝 الامتحانات الشهرية', async (ctx) => {
 
   return replyStudentScreen(
     ctx, student,
-    withStudentName(student, `📝 الامتحانات الشهرية\n\nالمتاحة الآن: ${open.length}\n\nدرجاتك السابقة:\n${doneLines}`),
-    (rows.length || done.length) ? Markup.inlineKeyboard([...rows,...done.map(r=>[
+    withStudentName(student, `📝 الامتحانات الشهرية\n\nالمتاحة الآن: ${open.length}\nالقادمة: ${upcoming.length}\n\nدرجاتك السابقة:\n${doneLines}`),
+    Markup.inlineKeyboard([[Markup.button.callback(`🗓️ الامتحانات القادمة (${upcoming.length})`,'stex_upcoming')],...rows,...done.map(r=>[
       Markup.button.callback(limitButtonText(`🔍 عرض الأجوبة · ${r.subject_name} · ${r.exam_number} · ${Number(r.score)}/${Number(r.max_score)}`,60),`stex_review:${r.exam_id}`)
-    ])]) : undefined
+    ])])
   );
+});
+
+// تفاصيل الامتحانات القادمة للطالب: المادة، الموضوع، موعد الفتح والإغلاق، المدة، عدد الأسئلة والدرجة.
+bot.action('stex_upcoming',async ctx=>{
+  const student=await effectiveStudent(ctx);
+  if(!student)return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
+  const upcoming=await studies.getUpcomingExamsForStudent(student.id);
+  await ctx.answerCbQuery();
+  const fmt=d=>new Date(d).toLocaleString('ar-IQ',{timeZone:ATTENDANCE_TIME_ZONE,weekday:'long',year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'});
+  if(!upcoming.length)return ctx.reply('🗓️ لا توجد امتحانات قادمة معلنة حاليًا.');
+  const heading='🗓️ الامتحانات القادمة';
+  let buffer=heading;
+  for(const e of upcoming){
+    const block=`\n\n📝 ${e.subject_name} — الامتحان الشهري ${e.exam_number}`+
+      (e.title?`\nالموضوع: ${e.title}`:'')+
+      `\nيفتح: ${fmt(e.opens_at)}\nيغلق: ${fmt(e.closes_at)} (متاح ${Number(e.available_hours)} ساعة)`+
+      `\nالدرجة: ${Number(e.max_score)}`+(Number(e.question_count)>0?` · عدد الأسئلة: ${Number(e.question_count)}`:'')+
+      (Number(e.postponed_count)>0&&e.original_opens_at?`\n⚠️ أُجّل من موعده الأصلي: ${fmt(e.original_opens_at)}`:'');
+    if((buffer+block).length>3700){await ctx.reply(buffer);buffer=heading+' (تابع)';}
+    buffer+=block;
+  }
+  return ctx.reply(buffer+'\n\nيظهر زر الامتحان هنا عند موعد فتحه.');
 });
 
 // Answers are disclosed only after submission and only to the authenticated student.
@@ -5687,6 +5714,8 @@ bot.action(/rep_send:(\d+):(\d+)/, async (ctx) => {
   if (row.mode !== 'report') {
     return ctx.answerCbQuery('لست في نظام التقارير في هذه المادة.', { show_alert: true });
   }
+  const blocked = await studies.getReportSubmissionBlock(student.id, subjectId, ssId);
+  if (blocked) return ctx.answerCbQuery(blocked.message, { show_alert: true });
   userState.set(ctx.from.id, {
     action: 'student_report_upload',
     subjectId,
@@ -6118,7 +6147,7 @@ bot.action(/^sr_stu:(\d+):(\d+):(\d+)(?::(\d+):(\d+))?$/, async (ctx) => {
       callbackButton(
         `${r.score === null ? '📝' : '✅'} تقييم هذا التقرير — ${new Date(r.submitted_at)
           .toISOString()
-          .slice(0, 10)}${r.score === null ? '' : ` (${Number(r.score)}/${studies.GRADE_WEIGHTS.participationTotal})`}`,
+          .slice(0, 10)}${r.score === null ? '' : r.rating ? ` (${studies.REPORT_RATINGS[r.rating].label})` : ` (${Number(r.score)}/${studies.GRADE_WEIGHTS.participationTotal})`}`,
         `sr_item:${r.id}:${studentId}:${subjectId}:${ssId}`
       ),
     ]);
@@ -6128,7 +6157,7 @@ bot.action(/^sr_stu:(\d+):(\d+):(\d+)(?::(\d+):(\d+))?$/, async (ctx) => {
   if((page+1)*10<Number(reports[0].total_count))nav.push(callbackButton('تقارير تالية',`sr_stu:${studentId}:${subjectId}:${ssId}:${groupId}:${page+1}`));
   if(nav.length)rows.push(nav);
   if(Number(summary.total)>0&&Number(summary.graded)===Number(summary.total))rows.push([
-    callbackButton(`✅ اعتماد درجة التقارير: ${Number(summary.average)}/${studies.GRADE_WEIGHTS.participationTotal}`,
+    callbackButton('✅ اعتماد درجة التقارير حسب المعيار',
       `sr_apply:${studentId}:${subjectId}:${ssId}`),
   ]);
   rows.push([
@@ -6137,9 +6166,9 @@ bot.action(/^sr_stu:(\d+):(\d+):(\d+)(?::(\d+):(\d+))?$/, async (ctx) => {
   return ctx.reply(
     `تقييم تقارير «${student ? student.full_name : ''}»:\n` +
       `التقارير المُقيَّمة: ${Number(summary.graded)} من ${Number(summary.total)}` +
-      `${summary.average === null ? '' : ` | متوسط التقييمات: ${Number(summary.average)} من ${studies.GRADE_WEIGHTS.participationTotal}`}\n\n` +
-      'اضغط «تقييم هذا التقرير» لإعطائه درجة أو تعديل تقييمه السابق.\n' +
-      `بعد تقييم التقارير كلها يظهر زر «اعتماد درجة التقارير». يحسب متوسط درجاتها من ${studies.GRADE_WEIGHTS.participationTotal} ويحفظه درجةً معتمدة لهذه المادة وهذا الموسم.\n` +
+      ` | جيد ${Number(summary.good)} · مقبول ${Number(summary.acceptable)} · ضعيف ${Number(summary.weak)}\n\n` +
+      'اضغط «تقييم هذا التقرير» لاختيار مستواه: جيد أو مقبول أو ضعيف، أو تعديل مستواه السابق.\n' +
+      `بعد تقييم التقارير كلها يظهر زر «اعتماد درجة التقارير». الجيد وزنه كامل والمقبول نصف والضعيف صفر، وتُحسب الدرجة من ${studies.GRADE_WEIGHTS.participationTotal} نسبةً إلى أكثر الطلبة انتظامًا في الأسابيع.\n` +
       'للاستثناءات يمكنك تحديد درجة التقارير يدويًا.',
     Markup.inlineKeyboard(rows)
   );
@@ -6149,10 +6178,26 @@ bot.action(/sr_item:(\d+):(\d+):(\d+):(\d+)/, async (ctx) => {
   const [, reportId, studentId, subjectId, ssId] = ctx.match.map(Number);
   if (!(await teacherOwnsSubject(ctx, subjectId, ssId))) return ctx.answerCbQuery('غير مصرح.');
   if(!await access.reportMatches(reportId,studentId,subjectId,ssId))return ctx.answerCbQuery('التقرير لا يطابق الطالب أو المادة أو الموسم.');
-  userState.set(ctx.from.id, { action: 'report_item_score', reportId, studentId, subjectId, ssId });
   await ctx.answerCbQuery();
+  return ctx.reply('اختر مستوى هذا التقرير:', Markup.inlineKeyboard([[
+    callbackButton('✅ جيد', `sr_rate:${reportId}:${studentId}:${subjectId}:${ssId}:good`),
+    callbackButton('🟡 مقبول', `sr_rate:${reportId}:${studentId}:${subjectId}:${ssId}:acceptable`),
+    callbackButton('🔴 ضعيف', `sr_rate:${reportId}:${studentId}:${subjectId}:${ssId}:weak`),
+  ]]));
+});
+
+bot.action(/^sr_rate:(\d+):(\d+):(\d+):(\d+):(good|acceptable|weak)$/, async (ctx) => {
+  const [, reportId, studentId, subjectId, ssId] = ctx.match.slice(0, 5).map(Number);
+  const rating = ctx.match[5];
+  if (!(await teacherOwnsSubject(ctx, subjectId, ssId))) return ctx.answerCbQuery('غير مصرح.');
+  if(!await access.reportMatches(reportId,studentId,subjectId,ssId))return ctx.answerCbQuery('التقرير لا يطابق الطالب أو المادة أو الموسم.');
+  await studies.setReportItemRating(reportId, rating, ctx.from.id);
+  const summary = await studies.getReportGradingSummary(studentId, subjectId, ssId);
+  await ctx.answerCbQuery('حُفظ التقييم ✅');
   return ctx.reply(
-    `أرسل درجة هذا التقرير (من 0 إلى ${studies.GRADE_WEIGHTS.participationTotal}):`
+    `✅ حُفظ مستوى هذا التقرير: ${studies.REPORT_RATINGS[rating].label}.\n` +
+      `المُقيَّمة: ${Number(summary.graded)} من ${Number(summary.total)} | جيد ${Number(summary.good)} · مقبول ${Number(summary.acceptable)} · ضعيف ${Number(summary.weak)}\n` +
+      'افتح قائمة تقييم تقارير الطالب لاعتماد درجته بعد اكتمال تقييم تقاريره.'
   );
 });
 
@@ -6176,8 +6221,8 @@ bot.action(/sr_apply:(\d+):(\d+):(\d+)/, async (ctx) => {
     }
     return ctx.editMessageText(
       `✅ حُفظت درجة التقارير لهذه المادة وهذا الموسم: ${res.average} من ${studies.GRADE_WEIGHTS.participationTotal}.\n` +
-        `احتُسبت من متوسط ${res.graded} تقريرًا مُقيَّمًا، من أصل ${res.total} تقريرًا.\n` +
-        'إذا قيّمت تقارير إضافية أو عدّلت تقييمًا، اضغط زر حفظ المتوسط مجددًا لتحديث درجة التقارير.'
+        `احتُسبت من ${res.points} نقطة في ${res.weeks} أسبوعًا، نسبةً إلى ${res.benchmark} أسبوعًا لأكثر الطلبة انتظامًا.\n` +
+        'إذا قيّمت تقارير إضافية أو عدّلت تقييمًا، اضغط زر الاعتماد مجددًا لتحديث الدرجة. وتُعاد الحسبة تلقائيًا عند إنهاء الموسم.'
     );
   } catch (err) {
     return ctx.answerCbQuery(err.message, { show_alert: true });

@@ -21,6 +21,26 @@ if (!Number.isInteger(START_ATTENDANCE_DELAY_MINUTES) || START_ATTENDANCE_DELAY_
   throw new Error('START_ATTENDANCE_DELAY_MINUTES must be an integer from 1 to 30');
 }
 
+// مستويات التقرير: الجيد يأخذ وزنًا كاملًا، والمقبول نصفًا، والضعيف صفرًا.
+const REPORT_RATINGS = {
+  good: { weight: 1, label: 'جيد' },
+  acceptable: { weight: 0.5, label: 'مقبول' },
+  weak: { weight: 0, label: 'ضعيف' },
+};
+// أسبوع واحد = أعلى مستوى بين تقارير ذلك الأسبوع، حتى لا يربح الطالب بكثرة التقارير في أسبوع واحد.
+// التقارير القديمة بلا مستوى تُحسب كما كانت: أي درجة أكبر من صفر = أسبوع كامل.
+const REPORT_WEEK_POINTS_SQL = `
+  SELECT student_id, COUNT(*)::int AS weeks, COALESCE(SUM(week_weight),0)::float8 AS points, SUM(cnt)::int AS reports FROM (
+    SELECT r.student_id,
+           date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $3)+interval '1 day') AS wk,
+           MAX(CASE r.rating WHEN 'good' THEN 1 WHEN 'acceptable' THEN 0.5 WHEN 'weak' THEN 0
+                 ELSE CASE WHEN r.score>0 THEN 1 ELSE 0 END END) AS week_weight,
+           COUNT(*) AS cnt
+    FROM student_reports r
+    WHERE r.subject_id=$1 AND r.stage_season_id=$2 AND r.score IS NOT NULL AND (r.rating IS NOT NULL OR r.score>0)
+    GROUP BY r.student_id, wk) w
+  GROUP BY student_id`;
+
 const GRADE_WEIGHTS = {
   examsTotal: 15, // 3 امتحانات شهرية × 5
   examEach: 5,
@@ -225,6 +245,13 @@ async function initStudiesSchema() {
     ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS score NUMERIC;
     ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS graded_at TIMESTAMP;
     ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS graded_by BIGINT;
+    -- مستوى التقرير: جيد / مقبول / ضعيف. تُحسب الدرجة في نهاية الموسم من المستويات لا من درجة كل تقرير.
+    ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS rating TEXT;
+    -- ترحيل لمرة واحدة: كل تقرير قُيّم سابقًا بدرجة فوق الصفر يصبح «جيد»، وتُحفظ درجته القديمة للرجوع إليها.
+    ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS legacy_score NUMERIC;
+    UPDATE student_reports SET legacy_score=score, rating='good', score=1 WHERE rating IS NULL AND score>0;
+    ALTER TABLE student_reports DROP CONSTRAINT IF EXISTS student_reports_rating_check;
+    ALTER TABLE student_reports ADD CONSTRAINT student_reports_rating_check CHECK (rating IS NULL OR rating IN ('good','acceptable','weak'));
 
     -- ---------- درجات نهاية الموسم ----------
     CREATE TABLE IF NOT EXISTS final_grades (
@@ -1020,6 +1047,74 @@ async function updateExamQuestion(questionId,{type,prompt,options,correct}){
   }catch(err){await c.query('ROLLBACK');throw err;}finally{c.release();}
 }
 
+// تصحيح سؤال بعد أن بدأ الطلبة الامتحان: تغيير الإجابة الصحيحة أو حذف السؤال، ثم إعادة حساب كل المحاولات
+// بالتناسب (الدرجة = الصحيح ÷ عدد الأسئلة × الدرجة العظمى). لا يُحذف أي تسليم، ويُحفظ ما كان في سجل التدقيق.
+async function correctExamQuestion(questionId, { action, correct }, actorId) {
+  if (!['change_answer', 'remove'].includes(action)) throw appError('نوع التصحيح غير صالح.');
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const exam = (await c.query(`SELECT e.*,sub.name AS subject_name FROM exams e JOIN exam_questions q ON q.exam_id=e.id
+      JOIN subjects sub ON sub.id=e.subject_id WHERE q.id=$1 FOR UPDATE OF e`, [questionId])).rows[0];
+    if (!exam) throw appError('السؤال غير موجود.', 'NOT_FOUND', 404);
+    if (exam.status !== 'published') throw appError('التصحيح بعد الامتحان خاص بالامتحانات المنشورة.', 'CONFLICT', 409);
+    const q = (await c.query('SELECT * FROM exam_questions WHERE id=$1 FOR UPDATE', [questionId])).rows[0];
+    const before = (await c.query(`SELECT a.id,a.student_id,a.submitted_at,a.score FROM exam_attempts a WHERE a.exam_id=$1 FOR UPDATE`, [exam.id])).rows;
+    if (action === 'change_answer') {
+      const allowed = q.question_type === 'tf' ? ['صح', 'خطأ'] : q.options;
+      if (typeof correct !== 'string' || !Array.isArray(allowed) || !allowed.includes(correct)) throw appError('الإجابة الصحيحة الجديدة ليست من خيارات السؤال.');
+      if (correct === q.correct_answer) throw appError('هذه هي الإجابة الصحيحة الحالية بالفعل.');
+      await c.query('UPDATE exam_questions SET correct_answer=$2 WHERE id=$1', [questionId, correct]);
+      await c.query('UPDATE exam_answers SET is_correct=(answer=$2) WHERE question_id=$1', [questionId, correct]);
+    } else {
+      if (Number((await c.query('SELECT COUNT(*) AS n FROM exam_questions WHERE exam_id=$1', [exam.id])).rows[0].n) <= 1)
+        throw appError('لا يمكن حذف آخر سؤال في الامتحان.', 'LAST_QUESTION', 409);
+      await c.query('DELETE FROM exam_questions WHERE id=$1', [questionId]);
+    }
+    // إعادة حساب كل المحاولات بعدد الأسئلة الحالي. غير المسلَّمة تُحسب عند تسليمها.
+    await c.query(`UPDATE exam_attempts a SET
+        total_questions=(SELECT COUNT(*)::int FROM exam_questions WHERE exam_id=$1),
+        correct_count=CASE WHEN a.submitted_at IS NULL THEN a.correct_count ELSE
+          (SELECT COUNT(*)::int FROM exam_answers ans JOIN exam_questions qq ON qq.id=ans.question_id AND qq.exam_id=$1
+            WHERE ans.attempt_id=a.id AND ans.is_correct=true) END,
+        score=CASE WHEN a.submitted_at IS NULL THEN a.score ELSE
+          ROUND((SELECT COUNT(*) FROM exam_answers ans JOIN exam_questions qq ON qq.id=ans.question_id AND qq.exam_id=$1
+            WHERE ans.attempt_id=a.id AND ans.is_correct=true)::numeric
+            / NULLIF((SELECT COUNT(*) FROM exam_questions WHERE exam_id=$1),0) * $2::numeric * 100) / 100 END
+      WHERE a.exam_id=$1`, [exam.id, exam.max_score]);
+    const after = (await c.query('SELECT id,student_id,score FROM exam_attempts WHERE exam_id=$1 AND submitted_at IS NOT NULL', [exam.id])).rows;
+    const was = new Map(before.map((b) => [b.id, b.score === null ? null : Number(b.score)]));
+    const changed = after.filter((a) => was.get(a.id) !== (a.score === null ? null : Number(a.score)));
+    let manualSkipped = 0;
+    if (changed.length) {
+      const ids = changed.map((a) => a.student_id);
+      await c.query(`UPDATE final_grades fg SET exams_score=t.s,total_score=t.s+fg.participation_score
+        FROM (SELECT a.student_id,LEAST($3::numeric,COALESCE(SUM(a.score),0)) AS s FROM exam_attempts a JOIN exams e ON e.id=a.exam_id
+              WHERE e.subject_id=$1 AND e.stage_season_id=$2 AND a.submitted_at IS NOT NULL GROUP BY a.student_id) t
+        WHERE fg.student_id=t.student_id AND fg.subject_id=$1 AND fg.stage_season_id=$2
+          AND fg.finalized_at IS NOT NULL AND fg.edited_at IS NULL AND fg.student_id=ANY($4::int[])`,
+      [exam.subject_id, exam.stage_season_id, GRADE_WEIGHTS.examsTotal, ids]);
+      manualSkipped = (await c.query(`SELECT COUNT(*)::int AS n FROM final_grades WHERE subject_id=$1 AND stage_season_id=$2
+        AND finalized_at IS NOT NULL AND edited_at IS NOT NULL AND student_id=ANY($3::int[])`, [exam.subject_id, exam.stage_season_id, ids])).rows[0].n;
+      const verb = action === 'remove' ? 'حُذف أحد أسئلته' : 'صُحّحت الإجابة الصحيحة لأحد أسئلته';
+      for (const a of changed) {
+        const old = was.get(a.id);
+        const text = `📝 ${verb}؛ أُعيد حساب درجتك في امتحان «${exam.subject_name}» (الامتحان ${exam.exam_number}).\n` +
+          `درجتك الآن: ${Number(a.score)} من ${Number(exam.max_score)}${old === null ? '' : ` (كانت ${old})`}.`;
+        await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
+          SELECT $1,st.telegram_id,$2::jsonb,now()+interval '7 days' FROM students st WHERE st.id=$3 AND st.is_active=true
+          ON CONFLICT DO NOTHING`, [`exam-fix:${questionId}:${action}:${a.student_id}`, JSON.stringify([text, {}]), a.student_id]);
+      }
+    }
+    await c.query(`INSERT INTO admin_audit_log(actor_id,action,entity_type,entity_id,before_data,after_data)
+      VALUES($1,'exam_question_correction','exam',$2,$3::jsonb,$4::jsonb)`,
+    [actorId, exam.id, JSON.stringify({ question: q, scores: before.map((b) => ({ student: b.student_id, score: b.score })) }),
+      JSON.stringify({ action, correct: correct || null, changedStudents: changed.length, manualGradesSkipped: manualSkipped })]);
+    await c.query('COMMIT');
+    return { action, changedStudents: changed.length, manualGradesSkipped: manualSkipped, questionCount: after.length ? undefined : undefined };
+  } catch (err) { await c.query('ROLLBACK'); throw err; } finally { c.release(); }
+}
+
 async function updateExam(examId,{title,dateIso,hours}){
   if(typeof title!=='string'||title.trim().length<3||title.trim().length>150)throw appError('عنوان الامتحان يجب أن يكون بين 3 و150 حرفًا.');
   const parsedDate=new Date(`${dateIso}T00:00:00Z`);
@@ -1151,6 +1246,24 @@ const getOpenExamsForStudent = (studentId) =>
        WHERE e.status='published' AND ${enrollmentSql} AND ${examWindowSql('e','$1')}
          AND a.submitted_at IS NULL
        ORDER BY e.closes_at`,
+      [studentId]
+    )
+    .then((r) => r.rows);
+
+// الامتحانات القادمة لطالب مسجّل: لم يحن موعد فتحها بعد. المجدولة تبقى مسودة حتى موعدها فتُعرض مع المنشورة، والملغاة لا تُعرض.
+const getUpcomingExamsForStudent = (studentId) =>
+  pool
+    .query(
+      `SELECT e.id, e.exam_number, e.title, e.opens_at, e.closes_at, e.available_hours, e.max_score,
+              e.postponed_count, e.original_opens_at, sub.name AS subject_name,
+              (SELECT COUNT(*) FROM exam_questions q WHERE q.exam_id=e.id)::int AS question_count
+       FROM exams e
+       JOIN subjects sub ON sub.id=e.subject_id
+       JOIN enrollments en ON en.stage_season_id=e.stage_season_id AND en.student_id=$1
+       JOIN stage_seasons ss ON ss.id=e.stage_season_id
+       JOIN students st ON st.id=en.student_id
+       WHERE e.status IN ('draft','published') AND e.opens_at>now() AND ${enrollmentSql}
+       ORDER BY e.opens_at, e.id`,
       [studentId]
     )
     .then((r) => r.rows);
@@ -1622,6 +1735,30 @@ const listStudentReports = (studentId, subjectId, stageSeasonId, { page = 0, siz
     )
     .then((r) => r.rows);
 
+// الإرسال مسموح أيام الأربعاء والخميس والجمعة فقط (بتوقيت المعهد)، وتقرير واحد لكل مادة في الأسبوع.
+// أي تقرير آخر لا يُقبل أصلًا فلا يُحتسب ولا يشغل الأستاذ. الأيام (ISO: الاثنين=1 ... الأحد=7) قابلة للضبط من REPORT_SEND_DAYS.
+const REPORT_SEND_DAYS = (process.env.REPORT_SEND_DAYS || '3,4,5').split(',').map(Number).filter((d) => d >= 1 && d <= 7);
+const REPORT_DAY_NAMES = { 1: 'الاثنين', 2: 'الثلاثاء', 3: 'الأربعاء', 4: 'الخميس', 5: 'الجمعة', 6: 'السبت', 7: 'الأحد' };
+const reportSendDaysLabel = () => REPORT_SEND_DAYS.map((d) => REPORT_DAY_NAMES[d]).join(' والـ');
+async function getReportSubmissionBlock(studentId, subjectId, stageSeasonId, { at = null } = {}) {
+  const r = (await pool.query(
+    `WITH t AS (SELECT COALESCE($5::timestamptz, now()) AS at)
+     SELECT EXTRACT(ISODOW FROM (t.at AT TIME ZONE $1))::int AS dow,
+            EXISTS(SELECT 1 FROM student_reports r
+                   WHERE r.student_id=$2 AND r.subject_id=$3 AND r.stage_season_id=$4
+                     AND EXTRACT(ISODOW FROM ((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $1))::int = ANY($6::int[])
+                     AND date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $1)+interval '1 day')
+                       = date_trunc('week',(t.at AT TIME ZONE $1)+interval '1 day')) AS sent_this_week
+     FROM t`,
+    [SCHEDULE_TZ, studentId, subjectId, stageSeasonId, at, REPORT_SEND_DAYS]
+  )).rows[0];
+  if (!REPORT_SEND_DAYS.includes(r.dow))
+    return { code: 'WRONG_DAY', message: `إرسال التقارير متاح أيام ${reportSendDaysLabel()} فقط. أرسل تقريرك في أحد هذه الأيام.` };
+  if (r.sent_this_week)
+    return { code: 'WEEK_USED', message: 'أرسلت تقرير هذه المادة هذا الأسبوع بالفعل. يُحتسب تقرير واحد فقط في الأسبوع، وأي تكرار لا يُحتسب.' };
+  return null;
+}
+
 // تقييم تقرير واحد بعينه (من 15)، فيمكن للأستاذ تقييمها تباعًا كلما وصلته.
 const setReportItemScore = (reportId, score, gradedBy) =>
   pool
@@ -1632,12 +1769,27 @@ const setReportItemScore = (reportId, score, gradedBy) =>
     )
     .then((r) => r.rows[0]);
 
+// تقييم تقرير بمستوى (جيد/مقبول/ضعيف). يُحفظ الوزن في score ليبقى «بلا تقييم» = score فارغ في كل الشاشات.
+const setReportItemRating = async (reportId, rating, gradedBy) => {
+  if (!Object.prototype.hasOwnProperty.call(REPORT_RATINGS, rating)) throw appError('مستوى التقرير يجب أن يكون جيد أو مقبول أو ضعيف.');
+  return pool
+    .query(
+      `UPDATE student_reports SET rating=$2, score=$3, graded_at=now(), graded_by=$4
+       WHERE id=$1 RETURNING *`,
+      [reportId, rating, REPORT_RATINGS[rating].weight, gradedBy]
+    )
+    .then((r) => r.rows[0]);
+};
+
 // ملخّص تقييم تقارير طالب في مادة: كم قُيّم وكم بقي ومعدّل المُقيَّم.
 const getReportGradingSummary = (studentId, subjectId, stageSeasonId) =>
   pool
     .query(
       `SELECT COUNT(*) AS total,
               COUNT(score) AS graded,
+              COUNT(*) FILTER (WHERE rating='good') AS good,
+              COUNT(*) FILTER (WHERE rating='acceptable') AS acceptable,
+              COUNT(*) FILTER (WHERE rating='weak') AS weak,
               ROUND(AVG(score)::numeric, 2) AS average
        FROM student_reports
        WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3`,
@@ -1645,7 +1797,8 @@ const getReportGradingSummary = (studentId, subjectId, stageSeasonId) =>
     )
     .then((r) => r.rows[0]);
 
-// اعتماد معدّل التقارير المُقيَّمة كدرجة مشاركة نهائية للطالب.
+// اعتماد درجة التقارير للطالب حسب المعيار: نقاط أسابيعه (جيد 1، مقبول 0.5، ضعيف 0) نسبةً إلى أكثر الطلبة
+// انتظامًا في الأسابيع، من 15. تُعاد الحسبة تلقائيًا عند إنهاء الموسم بعد اكتمال تقارير الجميع.
 async function applyReportAverage(studentId, subjectId, stageSeasonId) {
   const summary = await getReportGradingSummary(studentId, subjectId, stageSeasonId);
   if (Number(summary.graded) === 0) {
@@ -1655,9 +1808,11 @@ async function applyReportAverage(studentId, subjectId, stageSeasonId) {
   }
   if(Number(summary.graded)!==Number(summary.total))
     throw appError(`قيّم التقارير المتبقية أولًا (${Number(summary.graded)} من ${Number(summary.total)} مقيّم).`,'REPORTS_PENDING',409);
-  const avg = Number(summary.average);
-  await setReportScore(studentId, subjectId, stageSeasonId, avg);
-  return { average: avg, graded: Number(summary.graded), total: Number(summary.total) };
+  const grade = (await computeSeasonGrades(subjectId, stageSeasonId)).find((g) => Number(g.studentId) === Number(studentId));
+  if (!grade) throw appError('الطالب غير مسجّل في تقارير هذه المادة.', 'NOT_FOUND', 404);
+  await setReportScore(studentId, subjectId, stageSeasonId, grade.reportScore);
+  return { average: grade.reportScore, graded: Number(summary.graded), total: Number(summary.total),
+    weeks: grade.reportWeeks, points: grade.reportPoints, benchmark: grade.reportBenchmark };
 }
 
 const setReportScore = (studentId, subjectId, stageSeasonId, score) =>
@@ -2132,19 +2287,13 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
        WHERE e.subject_id=$1 AND e.stage_season_id=$2 AND a.submitted_at IS NOT NULL
        GROUP BY a.student_id
      ),
-     report_weeks AS (
-       SELECT r.student_id,
-              COUNT(DISTINCT date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $3)+interval '1 day'))::int AS weeks,
-              COUNT(*)::int AS reports
-       FROM student_reports r
-       WHERE r.subject_id=$1 AND r.stage_season_id=$2 AND r.score > 0
-       GROUP BY r.student_id
-     )
+     report_weeks AS (${REPORT_WEEK_POINTS_SQL})
      SELECT st.id AS student_id, st.full_name, pm.mode,
             COALESCE(el.eligible_sessions,0) AS eligible_sessions,
             COALESCE(el.attended_sessions,0) AS attended_sessions,
             COALESCE(et.exams_score,0) AS exams_score,
             COALESCE(rw.weeks,0) AS report_weeks,
+            COALESCE(rw.points,0) AS report_points,
             COALESCE(rw.reports,0) AS report_count,
             (SELECT COALESCE(MAX(weeks),0) FROM report_weeks) AS report_benchmark
      FROM participation_modes pm
@@ -2163,10 +2312,11 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
     const mubahathaScore =
       eligible === 0 ? 0 : Math.round((attended / eligible) * GRADE_WEIGHTS.participationTotal * 100) / 100;
     const reportWeeks = Number(r.report_weeks);
+    const reportPoints = Number(r.report_points);
     const reportBenchmark = Number(r.report_benchmark);
     const reportScore = reportBenchmark === 0
       ? 0
-      : Math.min(GRADE_WEIGHTS.participationTotal, Math.round((reportWeeks / reportBenchmark) * GRADE_WEIGHTS.participationTotal * 100) / 100);
+      : Math.min(GRADE_WEIGHTS.participationTotal, Math.round((reportPoints / reportBenchmark) * GRADE_WEIGHTS.participationTotal * 100) / 100);
     const participation = Math.min(GRADE_WEIGHTS.participationTotal, mubahathaScore + reportScore);
     const examsScore = Math.min(GRADE_WEIGHTS.examsTotal, Number(r.exams_score));
     return {
@@ -2179,6 +2329,7 @@ async function computeSeasonGrades(subjectId, stageSeasonId) {
       reportScore,
       reportCount: Number(r.report_count),
       reportWeeks,
+      reportPoints,
       reportBenchmark,
       participationScore: Math.round(participation * 100) / 100,
       examsScore,
@@ -2297,6 +2448,7 @@ module.exports = {
   getExamById,
   listExamsForSubject,
   getOpenExamsForStudent,
+  getUpcomingExamsForStudent,
   isExamAvailable,
   startOrResumeAttempt,
   getNextUnansweredQuestion,
@@ -2323,6 +2475,12 @@ module.exports = {
   listReportStudentsForGrading,
   listStudentReports,
   setReportScore,
+  setReportItemRating,
+  getReportSubmissionBlock,
+  REPORT_SEND_DAYS,
+  reportSendDaysLabel,
+  REPORT_RATINGS,
+  correctExamQuestion,
   setReportItemScore,
   getReportGradingSummary,
   applyReportAverage,
