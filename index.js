@@ -6925,6 +6925,7 @@ bot.catch(async (err, ctx) => {
 async function main() {
   await db.initSchema();
   await studies.initStudiesSchema();
+  await require('./examScoreRounding').roundExistingExamScores(db.pool);
   await initIntegritySchema(db.pool);
   await stageCorrections.initSchema();
   await instituteLinks.initSchema();

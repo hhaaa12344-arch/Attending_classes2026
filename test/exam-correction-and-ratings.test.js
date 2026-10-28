@@ -33,9 +33,9 @@ test('changing a question\'s correct answer re-scores every attempt, updates unt
   assert.equal(await score(A.a),5);assert.equal(await score(B.a),3.75);
   const r=await studies.correctExamQuestion(f.qs[3].id,{action:'change_answer',correct:'خطأ'},42);
   assert.equal(r.changedStudents,2);assert.equal(r.manualGradesSkipped,1);
-  assert.equal(await score(A.a),3.75);assert.equal(await score(B.a),5);
+  assert.equal(await score(A.a),4);assert.equal(await score(B.a),5);
   const fg=async x=>(await db.pool.query('SELECT exams_score,total_score FROM final_grades WHERE student_id=$1',[x.st.id])).rows[0];
-  assert.deepEqual([Number((await fg(A)).exams_score),Number((await fg(A)).total_score)],[3.75,13.75]);
+  assert.deepEqual([Number((await fg(A)).exams_score),Number((await fg(A)).total_score)],[4,14]);
   assert.equal(Number((await fg(B)).exams_score),3.75,'تعديل الأستاذ اليدوي لا يُمس');
   assert.equal((await db.pool.query("SELECT COUNT(*)::int n FROM notification_outbox WHERE dedupe_key LIKE $1",[`exam-fix:${f.qs[3].id}:%`])).rows[0].n,2);
   assert.equal((await db.pool.query("SELECT COUNT(*)::int n FROM admin_audit_log WHERE action='exam_question_correction'")).rows[0].n>=1,true);
@@ -46,7 +46,7 @@ test('removing a flawed question re-divides the grade proportionally and never d
   const f=await examFixture();
   const A=await f.sit('أ',['صح','صح','صح','خطأ']),B=await f.sit('ب',['صح','خطأ','خطأ','خطأ']);
   await studies.correctExamQuestion(f.qs[3].id,{action:'remove'},42);
-  assert.equal(await score(A.a),5);assert.equal(Math.round(await score(B.a)*100)/100,1.67);
+  assert.equal(await score(A.a),5);assert.equal(await score(B.a),2);
   const row=(await db.pool.query('SELECT correct_count,total_questions FROM exam_attempts WHERE id=$1',[B.a.id])).rows[0];
   assert.deepEqual([row.correct_count,row.total_questions],[1,3]);
   assert.equal((await db.pool.query('SELECT COUNT(*)::int n FROM exam_attempts WHERE exam_id=$1',[f.exam.id])).rows[0].n,2);
@@ -54,6 +54,32 @@ test('removing a flawed question re-divides the grade proportionally and never d
   await assert.rejects(studies.correctExamQuestion(f.qs[0].id,{action:'remove'},42),{code:'LAST_QUESTION'});
   await db.pool.query("UPDATE exams SET status='draft' WHERE id=$1",[f.exam.id]);
   await assert.rejects(studies.correctExamQuestion(f.qs[0].id,{action:'change_answer',correct:'خطأ'},42),{code:'CONFLICT'});
+});
+
+test('migration rounds existing attempts once, backs up records and preserves manual final grades',async()=>{
+  const f=await examFixture();
+  const A=await f.sit('قديم أ',['صح','صح','صح','خطأ']);
+  const B=await f.sit('قديم ب',['صح','صح','صح','خطأ']);
+  for(const [x,manual] of [[A,false],[B,true]]) await db.pool.query(`INSERT INTO final_grades(student_id,subject_id,stage_season_id,exams_score,participation_score,total_score,finalized_at,edited_at)
+    VALUES($1,$2,$3,3.75,10,13.75,now(),$4)`,[x.st.id,f.sub.id,f.ss,manual?new Date():null]);
+  const migrate=require('../examScoreRounding').roundExistingExamScores;
+  const r=await migrate(db.pool);assert.equal(r.applied,true);assert.ok(r.attempts>=2);
+  assert.equal(await score(A.a),4);assert.equal(await score(B.a),4);
+  const rows=(await db.pool.query('SELECT student_id,exams_score,total_score FROM final_grades WHERE subject_id=$1 ORDER BY student_id',[f.sub.id])).rows;
+  assert.deepEqual(rows.map(x=>[Number(x.exams_score),Number(x.total_score)]),[[4,14],[3.75,13.75]]);
+  const backup=(await db.pool.query("SELECT original_data FROM exam_score_rounding_backup WHERE kind='attempt' AND row_id=$1",[A.a.id])).rows[0];
+  assert.equal(Number(backup.original_data.score),3.75);
+  assert.equal((await migrate(db.pool)).applied,false);
+});
+
+test('exam submission rounds to the nearest integer including half points',async()=>{
+  const f=await examFixture();
+  const student=await db.createStudent(++seq,'طالب التقريب',f.stage.id);
+  const attempt=await studies.startOrResumeAttempt(f.exam.id,student.id);
+  await studies.submitAnswer(attempt.id,f.qs[0].id,'صح');
+  await studies.submitAnswer(attempt.id,f.qs[1].id,'صح');
+  const result=await studies.finalizeAttempt(attempt.id);
+  assert.equal(Number(result.score),3); // 2/4 × 5 = 2.5
 });
 
 test('report levels: good=full, acceptable=half, weak=0, one best level per week, scaled to the most regular student out of 15',async()=>{
