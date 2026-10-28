@@ -315,12 +315,22 @@
       sheetBody.innerHTML=`
         <div class="detail-grid"><div class="detail-box"><span>الحالة</span><strong>${cancelled?'ملغى':draft?'مجدول تلقائيًا':'منشور'}</strong></div><div class="detail-box"><span>عدد الأسئلة</span><strong>${questions.length}</strong></div></div>
         <article class="list-card exam-summary"><div class="list-card-head"><div><h4>${esc(e.title||`الامتحان الشهري ${e.exam_number}`)}</h4><p>يفتح: ${esc(dateTime(e.opens_at))}<br>يغلق: ${esc(dateTime(e.closes_at))} · الدرجة: ${esc(e.max_score)}</p></div><span class="badge ${draft?'':'live'}">${cancelled?'ملغى':draft?'مجدول':'منشور'}</span></div></article>
-        ${editable?`<form id="editExamForm" class="form-stack"><label><span class="field-label">موضوع الامتحان</span><input id="editExamTitle" class="text-control" value="${esc(e.title)}" minlength="3" maxlength="150" required></label><label><span class="field-label">تاريخ الامتحان</span><input id="editExamDate" class="text-control" type="date" value="${baghdadIso(e.opens_at)}" required></label><p id="editExamDateFeedback" class="form-hint" role="status"></p><label><span class="field-label">مدة الإتاحة بالساعات</span><input id="editExamHours" class="text-control" type="number" min="1" max="720" value="${n(e.available_hours)}" required></label><button class="primary-button" type="submit">حفظ تعديل الامتحان</button></form><div class="exam-editor-actions"><button class="mini-button" id="addTfQuestion" type="button">➕ صح / خطأ</button><button class="mini-button" id="addMcqQuestion" type="button">➕ اختيار متعدد</button><button class="mini-button" id="deleteExamBtn" type="button">حذف الامتحان</button></div>`:'<p class="form-hint">بدأ أحد الطلبة الامتحان؛ حُفظت أسئلته ودرجاته ولا يمكن تعديلها أو حذفه.</p>'}
+        ${editable?`<form id="editExamForm" class="form-stack"><label><span class="field-label">موضوع الامتحان</span><input id="editExamTitle" class="text-control" value="${esc(e.title)}" minlength="3" maxlength="150" required></label><label><span class="field-label">تاريخ الامتحان</span><input id="editExamDate" class="text-control" type="date" value="${baghdadIso(e.opens_at)}" required></label><p id="editExamDateFeedback" class="form-hint" role="status"></p><label><span class="field-label">مدة الإتاحة بالساعات</span><input id="editExamHours" class="text-control" type="number" min="1" max="720" value="${n(e.available_hours)}" required></label><button class="primary-button" type="submit">حفظ تعديل الامتحان</button></form><div class="exam-editor-actions"><button class="mini-button" id="addTfQuestion" type="button">➕ صح / خطأ</button><button class="mini-button" id="addMcqQuestion" type="button">➕ اختيار متعدد</button><button class="mini-button" id="deleteExamBtn" type="button">حذف الامتحان</button></div>`:'<p class="form-hint">بدأ أحد الطلبة الامتحان؛ لا يمكن تعديل نصّ أسئلته أو حذفه. وإذا اكتشفت خللًا فيمكنك تصحيح الإجابة الصحيحة لسؤال أو حذفه من الحساب فتُعاد درجات الطلبة بالتناسب.</p>'}
         <div class="section-head compact-head"><div><span class="section-kicker">الأسئلة</span><h3>${questions.length} سؤال</h3></div></div>
-        <div class="question-list">${questions.length?questions.map((q,i)=>`<article class="question-card"><span class="question-number">${i+1}</span><div><h4>${esc(q.prompt)}</h4><p>${q.question_type==='tf'?'صح / خطأ':(Array.isArray(q.options)?q.options:[]).map(esc).join(' · ')}</p><small>الإجابة الصحيحة: ${esc(q.correct_answer)}</small>${editable?`<div class="card-actions"><button class="mini-button" type="button" data-edit-question="${n(q.id)}">تعديل السؤال</button><button class="mini-button" type="button" data-delete-question="${n(q.id)}">حذف السؤال</button></div>`:''}</div></article>`).join(''):empty('لم تُضف أسئلة بعد.')}</div>
+        <div class="question-list">${questions.length?questions.map((q,i)=>`<article class="question-card"><span class="question-number">${i+1}</span><div><h4>${esc(q.prompt)}</h4><p>${q.question_type==='tf'?'صح / خطأ':(Array.isArray(q.options)?q.options:[]).map(esc).join(' · ')}</p><small>الإجابة الصحيحة: ${esc(q.correct_answer)}</small>${editable?`<div class="card-actions"><button class="mini-button" type="button" data-edit-question="${n(q.id)}">تعديل السؤال</button><button class="mini-button" type="button" data-delete-question="${n(q.id)}">حذف السؤال</button></div>`:(!cancelled&&!draft?`<div class="card-actions"><button class="mini-button" type="button" data-fix-answer="${n(q.id)}">تصحيح الإجابة الصحيحة</button><button class="mini-button" type="button" data-remove-scored="${n(q.id)}">حذف السؤال وإعادة توزيع الدرجة</button></div>`:'')}</div></article>`).join(''):empty('لم تُضف أسئلة بعد.')}</div>
         ${cancelled?`<p class="form-hint">سبب الإلغاء: ${esc(e.cancellation_reason||'لم يُذكر سبب.')}</p>`:`<form id="cancelExamForm" class="form-stack"><label><span class="field-label">سبب الإلغاء (اختياري)</span><input name="reason" class="text-control" maxlength="500"></label><button class="secondary-button" type="submit">🚫 إلغاء الامتحان وإشعار الطلبة</button></form>`}
         <button id="backToExamList" class="secondary-button wide-button" type="button">رجوع إلى قائمة الامتحانات</button>`;
       $('#backToExamList').addEventListener('click',()=>openExams(sub));
+      if(!editable&&!cancelled&&!draft){
+        const fixed=async(id,body,message)=>{if(!confirm(message))return;try{const r=await api(`/api/teacher/questions/${id}/correct`,{method:'POST',body:JSON.stringify(body)});notify(`تم التصحيح وأُعيد حساب الدرجات (تغيّرت درجة ${n(r.changedStudents)} طالبًا${n(r.manualGradesSkipped)?`، وتُرك ${n(r.manualGradesSkipped)} تعديلًا يدويًا للدرجة النهائية كما هو`:''}).`);await openExamEditor(examId,sub);}catch(err){notify(err.message);}};
+        $$('[data-fix-answer]',sheetBody).forEach(button=>button.addEventListener('click',()=>{
+          const q=questions.find(x=>n(x.id)===n(button.dataset.fixAnswer));const choices=q.question_type==='tf'?['صح','خطأ']:(Array.isArray(q.options)?q.options:[]);
+          sheetBody.innerHTML=`<form id=\"fixAnswerForm\" class=\"form-stack\"><p class=\"form-hint\">${esc(q.prompt)}<br>الإجابة الصحيحة الحالية: ${esc(q.correct_answer)}. عند الحفظ تُعاد درجة كل من أجاب عن هذا السؤال، ويُبلَّغ الطلبة الذين تغيّرت درجتهم.</p><label><span class=\"field-label\">الإجابة الصحيحة الجديدة</span><select id=\"fixCorrect\" class=\"select-control\">${choices.filter(c=>c!==q.correct_answer).map(c=>`<option>${esc(c)}</option>`).join('')}</select></label><button class=\"primary-button\" type=\"submit\">حفظ التصحيح وإعادة الحساب</button><button id=\"fixCancel\" class=\"secondary-button\" type=\"button\">رجوع</button></form>`;
+          $('#fixCancel').addEventListener('click',()=>openExamEditor(examId,sub));
+          $('#fixAnswerForm').addEventListener('submit',e=>{e.preventDefault();fixed(n(q.id),{action:'change_answer',correct:$('#fixCorrect').value},'تغيير الإجابة الصحيحة سيعيد حساب درجات الطلبة. متابعة؟');});
+        }));
+        $$('[data-remove-scored]',sheetBody).forEach(button=>button.addEventListener('click',()=>fixed(n(button.dataset.removeScored),{action:'remove'},'سيُحذف هذا السؤال وتُعاد درجة كل طالب على الأسئلة المتبقية بالتناسب من الدرجة العظمى. لا يمكن التراجع. متابعة؟')));
+      }
       if(editable){
         $('#addTfQuestion').addEventListener('click',()=>showTfQuestionForm(examId,sub));
         $('#addMcqQuestion').addEventListener('click',()=>showMcqQuestionForm(examId,sub));
@@ -402,35 +412,32 @@
   }
 
   async function openStudentReports(studentId,subjectId,seasonId,groupId,name,page=0){
-    openSheet(`تقارير ${name}`,'التقييم من 15');
+    openSheet(`تقارير ${name}`,'مستوى كل تقرير: جيد / مقبول / ضعيف');
     try{
       const query=new URLSearchParams({studentId,subjectId,seasonId,page});if(groupId)query.set('groupId',groupId);
       const [rows,summary]=await Promise.all([api(`/api/teacher/reports?${query}`),api(`/api/teacher/reports/summary?${query}`)]);
       if(!rows.length){sheetBody.innerHTML=empty('لا توجد تقارير لهذا الطالب.');return;}
       const total=n(summary.total),graded=n(summary.graded),average=summary.average==null?null:n(summary.average);
-      sheetBody.innerHTML=`<p class="form-hint">قيّم كل تقرير أولًا. بعد اكتمال التقييمات، اعتمد متوسطها ليصبح درجة التقارير المحفوظة للطالب في هذه المادة.</p><div class="detail-grid"><div class="detail-box"><span>التقارير المقيمة</span><strong>${graded}/${total}</strong></div><div class="detail-box"><span>المتوسط</span><strong>${average==null?'—':average+'/15'}</strong></div></div>${total>0&&graded===total?'<button id="applyReportAverage" class="primary-button wide-button" type="button">اعتماد المتوسط كدرجة التقارير</button>':''}`+rows.map((r,i)=>`
+      sheetBody.innerHTML=`<p class="form-hint">قيّم كل تقرير بمستواه. الجيد وزنه كامل والمقبول نصف والضعيف صفر، وتُحسب درجة التقارير من 15 في نهاية الموسم نسبةً إلى أكثر الطلبة انتظامًا في الأسابيع. بعد اكتمال التقييمات يمكنك اعتماد الدرجة الآن، وتُعاد حسبتها تلقائيًا عند إنهاء الموسم.</p><div class="detail-grid"><div class="detail-box"><span>التقارير المقيمة</span><strong>${graded}/${total}</strong></div><div class="detail-box"><span>جيد · مقبول · ضعيف</span><strong>${n(summary.good)} · ${n(summary.acceptable)} · ${n(summary.weak)}</strong></div></div>${total>0&&graded===total?'<button id="applyReportAverage" class="primary-button wide-button" type="button">اعتماد درجة التقارير حسب المعيار</button>':''}`+rows.map((r,i)=>`
         <article class="report-item numbered-record ${r.score==null?'pending':'graded'}" data-report-id="${n(r.id)}">
           <span class="sequence-badge">${page*30+i+1}</span>
           <div class="numbered-record-body"><h4>تقرير ${esc(r.group_title_snapshot||'الطالب')} ${r.score==null?'<span class="report-pending">بانتظار التقييم</span>':'<span class="report-done">تم التقييم</span>'}</h4>
           <p>${r.note?esc(r.note):r.file_kind?`تقرير محفوظ كـ ${esc(r.file_kind)} في البوت.`:'تقرير محفوظ في النظام.'}<br>تاريخ الإرسال: ${esc(dateTime(r.submitted_at))}</p>
-          <div class="score-row"><label><span class="field-label">الدرجة من 15</span><input class="score-input" type="number" min="0" max="15" step="0.25" value="${r.score==null?'':esc(r.score)}" inputmode="decimal"></label><button class="primary-button score-save" type="button">حفظ التقييم</button></div>
+          <div class="score-row rating-row" role="group" aria-label="مستوى التقرير">${[['good','✅ جيد'],['acceptable','🟡 مقبول'],['weak','🔴 ضعيف']].map(([k,t])=>`<button class="${r.rating===k?'primary-button':'secondary-button'} rating-save" type="button" data-rating="${k}">${t}</button>`).join('')}</div>${r.score!=null&&!r.rating?`<small class="form-hint">تقييم قديم بدرجة ${esc(r.score)}؛ اختر مستوى لاعتماده بالنظام الجديد.</small>`:''}
           <button class="secondary-button report-contact" type="button">💬 الرد على هذا التقرير</button></div>
         </article>`).join('')+`<div class="form-actions">${page>0?'<button id="previousReportsPage" class="secondary-button" type="button">التقارير السابقة</button>':''}${(page+1)*30<n(rows[0].total_count)?'<button id="nextReportsPage" class="secondary-button" type="button">التقارير التالية</button>':''}</div>`;
       $('#previousReportsPage')?.addEventListener('click',()=>openStudentReports(studentId,subjectId,seasonId,groupId,name,page-1));
       $('#nextReportsPage')?.addEventListener('click',()=>openStudentReports(studentId,subjectId,seasonId,groupId,name,page+1));
-      $('#applyReportAverage')?.addEventListener('click',async()=>{try{const result=await api('/api/teacher/reports/average',{method:'POST',body:JSON.stringify({studentId,subjectId,seasonId})});notify(`اعتُمدت درجة التقارير: ${result.average} من 15.`);await loadReportStudents();}catch(err){notify(err.message);}});
-      $$('.report-item',sheetBody).forEach(item=>$('.score-save',item).addEventListener('click',async()=>{
-        const input=$('.score-input',item);const score=Number(input.value);if(!Number.isFinite(score)||score<0||score>15){notify('الدرجة يجب أن تكون بين 0 و15.');return;}
-        const btn=$('.score-save',item);btn.disabled=true;btn.textContent='جاري الحفظ…';
+      $('#applyReportAverage')?.addEventListener('click',async()=>{try{const result=await api('/api/teacher/reports/average',{method:'POST',body:JSON.stringify({studentId,subjectId,seasonId})});notify(`اعتُمدت درجة التقارير: ${result.average} من 15 (${result.points} نقطة في ${result.weeks} أسبوعًا من أصل ${result.benchmark}).`);await loadReportStudents();}catch(err){notify(err.message);}});
+      $$('.report-item',sheetBody).forEach(item=>$$('.rating-save',item).forEach(btn=>btn.addEventListener('click',async()=>{
+        const rating=btn.dataset.rating;const all=$$('.rating-save',item);all.forEach(x=>x.disabled=true);
         try{
-          await api(`/api/teacher/reports/${n(item.dataset.reportId)}/score`,{method:'POST',body:JSON.stringify({score})});
-          item.classList.remove('pending');item.classList.add('graded');
-          const status=item.querySelector('.report-pending');if(status){status.className='report-done';status.textContent='تم التقييم';}
-          btn.textContent='تم الحفظ';notify('حُفظ تقييم التقرير.');
+          await api(`/api/teacher/reports/${n(item.dataset.reportId)}/score`,{method:'POST',body:JSON.stringify({rating})});
+          notify('حُفظ مستوى التقرير.');
           await refresh();await loadReportStudents();await openStudentReports(studentId,subjectId,seasonId,groupId,name,page);
         }
-        catch(err){btn.textContent='حفظ التقييم';notify(err.message);}finally{btn.disabled=false;}
-      }));
+        catch(err){notify(err.message);all.forEach(x=>x.disabled=false);}
+      })));
       $$('.report-item',sheetBody).forEach(item=>$('.report-contact',item).addEventListener('click',()=>openContactStudent(studentId,subjectId,name,'',n(item.dataset.reportId))));
     }catch(err){sheetBody.innerHTML=empty(err.message);}
   }
