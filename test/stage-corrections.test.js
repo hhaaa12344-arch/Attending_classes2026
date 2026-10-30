@@ -70,7 +70,7 @@ test('approval preserves lesson, discussion and report history and duplicate sub
   await db.pool.query("INSERT INTO student_reports(student_id,subject_id,stage_season_id,note) VALUES($1,$2,$3,'تقرير محفوظ')",[student.id,sub.id,ss]);
   const before={};for(const t of ['attendance','mubahatha_attendance','student_reports'])before[t]=(await db.pool.query(`SELECT * FROM ${t} WHERE student_id=$1 ORDER BY id`,[student.id])).rows;
   const [a,b]=await Promise.all([service.submit(student.id,newStage.id,oldStage.id,'تصحيح نهائي',[42]),service.submit(student.id,newStage.id,oldStage.id,'تصحيح نهائي',[42])]);assert.equal(a.id,b.id);
-  const decisions=await Promise.all([service.decide(a.id,true,42),service.decide(a.id,false,42)]);assert.ok(decisions.some(x=>x.alreadyDecided));
+  const decisions=await Promise.all([service.decide(a.id,true,42),service.decide(a.id,true,42)]);assert.equal(decisions.filter(x=>x.alreadyDecided).length,1);
   assert.equal((await db.getStudentById(student.id)).stage_id,newStage.id);
   for(const t of Object.keys(before))assert.deepEqual((await db.pool.query(`SELECT * FROM ${t} WHERE student_id=$1 ORDER BY id`,[student.id])).rows,before[t]);
   assert.equal((await db.pool.query('SELECT * FROM group_memberships WHERE student_id=$1',[student.id])).rows.length,0);
