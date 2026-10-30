@@ -82,14 +82,14 @@ test('bot: emergency leave appears only after normal quota; explicit admin excep
   const buttons=()=>messages.flatMap(m=>m.reply_markup?.inline_keyboard?.flat()||[]).map(b=>b.callback_data);
   await send(st.telegram_id,'🌴 طلب إجازة');assert.ok(!buttons().includes('leave_exception'));
   await send(st.telegram_id,'','leave_exception');assert.ok(messages.some(m=>m.text?.includes('بعد استنفاد')));
-  const normal=await db.requestLeave(st.id,'2020-01-01',10,null);await db.decideLeave(normal.id,true,42);
+  const normal=await db.requestLeave(st.id,'2020-01-01',10,null);await db.decideLeave(normal.id,true,42);const remainder=await db.requestLeave(st.id,'2020-01-11',4,null);await db.decideLeave(remainder.id,true,42);
   await send(st.telegram_id,'🌴 طلب إجازة');assert.ok(buttons().includes('leave_exception'));assert.ok(messages.some(m=>m.text?.includes('الحرجة جدًا')));
-  await send(st.telegram_id,'','leave_exception');await send(st.telegram_id,'2');assert.ok(messages.some(m=>m.text?.includes('سبب طلب الاستثناء')));
+  await send(st.telegram_id,'','leave_exception');await send(st.telegram_id,'4');assert.ok(messages.some(m=>m.text?.includes('سبب طلب الاستثناء')));
   await send(st.telegram_id,'حالة صحية طارئة وحرجة');
   const l=(await db.pool.query('SELECT * FROM student_leaves WHERE student_id=$1 AND is_exception=true',[st.id])).rows[0];assert.ok(l);assert.equal(l.status,'pending');assert.ok(buttons().includes('leave_exception_approve:'+l.id));
   await send(42,'','leave_approve:'+l.id);assert.equal((await db.getLeaveById(l.id)).status,'pending');assert.ok(messages.some(m=>m.text?.includes('موافقة استثنائية')));
   await send(42,'','leave_exception_approve:'+l.id);assert.equal((await db.getLeaveById(l.id)).status,'approved');
-  await send(st.telegram_id,'','admin_leave_reduce:'+l.id);assert.equal((await db.getLeaveById(l.id)).days,2);
+  await send(st.telegram_id,'','admin_leave_reduce:'+l.id);assert.equal((await db.getLeaveById(l.id)).days,l.days);
   await send(42,'','admin_student_leaves:'+st.id);assert.ok(buttons().includes('admin_leave_reduce:'+l.id));
   await send(42,'','admin_leave_reduce:'+l.id);await send(42,'1');assert.equal((await db.getLeaveById(l.id)).days,1);
   await send(42,'','admin_leave_cancel:'+l.id);assert.equal((await db.getLeaveById(l.id)).status,'approved');

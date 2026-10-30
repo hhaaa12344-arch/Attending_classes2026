@@ -320,6 +320,7 @@ async function initSchema() {
     ALTER TABLE student_leaves
       ADD COLUMN IF NOT EXISTS stage_season_id INTEGER REFERENCES stage_seasons(id) ON DELETE SET NULL;
     ALTER TABLE student_leaves ADD COLUMN IF NOT EXISTS is_exception BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE student_leaves ADD COLUMN IF NOT EXISTS working_days_policy BOOLEAN NOT NULL DEFAULT false;
     UPDATE student_ui_messages SET message_kind='menu' WHERE message_kind IS NULL;
     ALTER TABLE student_ui_messages ALTER COLUMN message_kind SET DEFAULT 'screen';
     ALTER TABLE student_ui_messages ALTER COLUMN message_kind SET NOT NULL;
@@ -2053,6 +2054,8 @@ async function requestLeave(studentId, startDate, days, reason, {exception=false
   const d = Number(days);
   if (!Number.isInteger(d) || d < 1 || d > MAX_LEAVE_DAYS_PER_SEASON) throw new Error('عدد أيام الطلب يجب أن يكون بين 1 و10.');
   if(typeof exception!=='boolean')throw new Error('نوع طلب الإجازة غير صالح.');
+  const period=require('./leavePolicy').leavePeriod(startDate,d);
+  if(!period.days)throw new Error('الأيام المطلوبة كلها عطلة أسبوعية (الخميس والجمعة)، فلا تحتاج إلى إجازة.');
   const note=String(reason||'').trim();
   if(note.length>1000)throw new Error('سبب الإجازة طويل جدًا (الحد 1000 حرف).');
   if(exception&&note.length<5)throw new Error('بيّن الحالة الطارئة والحرجة في سبب طلب الاستثناء.');
@@ -2089,7 +2092,7 @@ async function requestLeave(studentId, startDate, days, reason, {exception=false
     if(exception&&Number(usage.rows[0].approved_days)<MAX_LEAVE_DAYS_PER_SEASON){
       const err=new Error('يظهر طلب الاستثناء بعد استنفاد الأيام العشرة المعتمدة فقط.');err.code='LEAVE_EXCEPTION_NOT_ELIGIBLE';throw err;
     }
-    if (!exception && d > remainingDays) {
+    if (!exception && period.days > remainingDays) {
       const err = new Error(
         remainingDays === 0
           ? `استنفدت رصيد الإجازات للموسم الحالي (${MAX_LEAVE_DAYS_PER_SEASON} أيام).`
@@ -2106,8 +2109,8 @@ async function requestLeave(studentId, startDate, days, reason, {exception=false
       `SELECT 1 FROM student_leaves
        WHERE student_id=$1 AND status IN ('pending','approved')
          AND stage_season_id=$4
-         AND end_date >= $2::date AND start_date <= $2::date + ($3::int-1) LIMIT 1`,
-      [studentId, startDate,d,stageSeasonId]
+         AND end_date >= $2::date AND start_date <= $3::date LIMIT 1`,
+      [studentId, period.start,period.end,stageSeasonId]
     );
     if (overlap.rows[0]) {
       const err = new Error('لديك إجازة قائمة أو طلب معلّق يتداخل مع هذا التاريخ.');
@@ -2117,17 +2120,18 @@ async function requestLeave(studentId, startDate, days, reason, {exception=false
 
     const result = await client.query(
       `INSERT INTO student_leaves(
-         student_id, stage_season_id, start_date, end_date, days, reason, status, is_exception
+         student_id, stage_season_id, start_date, end_date, days, reason, status, is_exception, working_days_policy
        )
-       VALUES($1, $2, $3::date, ($3::date + ($4 - 1) * interval '1 day')::date, $4, $5, 'pending', $6)
+       VALUES($1, $2, $3::date, $7::date, $4, $5, 'pending', $6, true)
        RETURNING *`,
-      [studentId, stageSeasonId, startDate, d, note || null, exception]
+      [studentId, stageSeasonId, period.start, period.days, note || null, exception, period.end]
     );
     await client.query('COMMIT');
     return {
       ...result.rows[0],
-      used_days: usedDays + (exception?0:d),
-      remaining_days: remainingDays - (exception?0:d),
+      used_days: usedDays + (exception?0:period.days),
+      remaining_days: remainingDays - (exception?0:period.days),
+      requested_calendar_days:d, weekly_holidays:period.holidays,
       max_days: MAX_LEAVE_DAYS_PER_SEASON,
     };
   } catch (err) {
@@ -2241,7 +2245,7 @@ async function decideLeave(leaveId, approve, adminTelegramId, {exceptionApproval
       const st=(await client.query('SELECT telegram_id FROM students WHERE id=$1',[leave.student_id])).rows[0];
       const range=`${leave.start_date.toISOString().slice(0,10)} → ${leave.end_date.toISOString().slice(0,10)}`;
       await require('./outbox').enqueueNotification(client,{key:`leave:${leaveId}:decision`,chatId:st.telegram_id,
-        text:approve?`✅ تمت الموافقة${leave.is_exception?' الاستثنائية':''} على إجازتك (${range}).\nلا تحتسب هذه الفترة غيابًا ولا تصلك خلالها إشعارات الدروس. تسجيل الحضور يبقى ضمن مهلة الدرس فقط.`:
+        text:approve?`✅ تمت الموافقة${leave.is_exception?' الاستثنائية':''} على إجازتك (${range})، وعدد الأيام المحتسبة ${leave.days}.\n${leave.working_days_policy?'الخميس والجمعة عطلة أسبوعية ولا تُخصم من رصيدك.\n':''}لا تحتسب هذه الفترة غيابًا ولا تصلك خلالها إشعارات الدروس. تسجيل الحضور يبقى ضمن مهلة الدرس فقط.`:
           `❌ لم تتم الموافقة على طلب إجازتك (${range}).`});
     }
     await client.query('COMMIT');
@@ -2288,7 +2292,9 @@ async function cancelLeave(studentId, leaveId, returnDate = null) {
              END,
              days=CASE
                WHEN $2::date <= start_date THEN 1
-               ELSE (LEAST(end_date, ($2::date - interval '1 day')::date) - start_date + 1)
+               ELSE CASE WHEN working_days_policy THEN
+                 (SELECT COUNT(*)::int FROM generate_series(start_date::timestamp,LEAST(end_date, ($2::date - interval '1 day')::date)::timestamp,interval '1 day') dt WHERE EXTRACT(DOW FROM dt) NOT IN (4,5))
+               ELSE (LEAST(end_date, ($2::date - interval '1 day')::date) - start_date + 1) END
              END,
              decided_at=now()
          WHERE id=$1 RETURNING *`,

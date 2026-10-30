@@ -516,6 +516,16 @@ async function decideParticipationChange(id, approve, actorId) {
   }
 }
 
+// Count approved student requests separately for each subject and season.
+const listParticipationChangeCounts = (studentId) => pool.query(`
+ SELECT r.stage_season_id, COALESCE(se.name, 'الموسم') AS season_name,
+        r.subject_id, sub.name AS subject_name, COUNT(*)::int AS count
+ FROM participation_change_requests r JOIN stage_seasons ss ON ss.id=r.stage_season_id
+ JOIN seasons se ON se.id=ss.season_id JOIN subjects sub ON sub.id=r.subject_id
+ WHERE r.student_id=$1 AND r.status='approved'
+ GROUP BY r.stage_season_id,se.name,r.subject_id,sub.name
+ ORDER BY r.stage_season_id DESC,sub.name`,[studentId]).then(r=>r.rows);
+
 const countParticipationBySubject = (subjectId, stageSeasonId) =>
   pool
     .query(
@@ -912,7 +922,17 @@ function upcomingWeekDays(from = new Date()) {
 }
 
 
-async function createExam(subjectId, stageSeasonId, teacherId, { examNumber, title, dateIso, hours }) {
+function examTimeMinutes(value, fallback = EXAM_START_HOUR * 60) {
+  if (value == null) return fallback;
+  if (typeof value !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) throw appError('وقت الامتحان غير صالح. استخدم صيغة 24 ساعة مثل 14:30.');
+  const [h,m] = value.split(':').map(Number);
+  return h * 60 + m;
+}
+function localExamMinutes(value) {
+  const parts = new Intl.DateTimeFormat('en-GB',{timeZone:SCHEDULE_TZ,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(value));
+  return Number(parts.find(p=>p.type==='hour').value)*60+Number(parts.find(p=>p.type==='minute').value);
+}
+async function createExam(subjectId, stageSeasonId, teacherId, { examNumber, title, dateIso, hours, time }) {
   const n = Number(examNumber);
   if (!Number.isInteger(n) || n < 1 || n > GRADE_WEIGHTS.examsPerSeason) {
     const err = new Error(`رقم الامتحان يجب أن يكون بين 1 و${GRADE_WEIGHTS.examsPerSeason}.`);
@@ -925,6 +945,7 @@ async function createExam(subjectId, stageSeasonId, teacherId, { examNumber, tit
     err.code = 'BAD_HOURS';
     throw err;
   }
+  const startMinutes = examTimeMinutes(time);
   const examTitle = typeof title === 'string' && title.trim()
     ? title.trim()
     : `الامتحان الشهري ${n}`;
@@ -936,13 +957,13 @@ async function createExam(subjectId, stageSeasonId, teacherId, { examNumber, tit
       `INSERT INTO exams(subject_id, stage_season_id, teacher_id, exam_number, title,
                          opens_at, available_hours, closes_at, max_score)
        VALUES($1,$2,$3,$4,$5,
-              (($6::date + make_interval(hours => $9::int)) AT TIME ZONE $10) AT TIME ZONE 'UTC',
+              (($6::date + make_interval(mins => $9::int)) AT TIME ZONE $10) AT TIME ZONE 'UTC',
               $7::int,
-              (($6::date + make_interval(hours => $9::int)) AT TIME ZONE $10) AT TIME ZONE 'UTC'
+              (($6::date + make_interval(mins => $9::int)) AT TIME ZONE $10) AT TIME ZONE 'UTC'
                 + make_interval(hours => $7::int),
               $8)
        RETURNING *`,
-      [subjectId, stageSeasonId, teacherId, n, examTitle, dateIso, h, GRADE_WEIGHTS.examEach, EXAM_START_HOUR, SCHEDULE_TZ]
+      [subjectId, stageSeasonId, teacherId, n, examTitle, dateIso, h, GRADE_WEIGHTS.examEach, startMinutes, SCHEDULE_TZ]
     );
     const exam = r.rows[0];
     const subject = (await client.query('SELECT name FROM subjects WHERE id=$1', [subjectId])).rows[0];
@@ -1123,7 +1144,7 @@ async function correctExamQuestion(questionId, { action, correct }, actorId) {
   } catch (err) { await c.query('ROLLBACK'); throw err; } finally { c.release(); }
 }
 
-async function updateExam(examId,{title,dateIso,hours}){
+async function updateExam(examId,{title,dateIso,hours,time}){
   if(typeof title!=='string'||title.trim().length<3||title.trim().length>150)throw appError('عنوان الامتحان يجب أن يكون بين 3 و150 حرفًا.');
   const parsedDate=new Date(`${dateIso}T00:00:00Z`);
   if(!/^\d{4}-\d{2}-\d{2}$/.test(dateIso||'')||Number.isNaN(parsedDate.getTime())||parsedDate.toISOString().slice(0,10)!==dateIso)
@@ -1140,10 +1161,11 @@ async function updateExam(examId,{title,dateIso,hours}){
     if((await c.query('SELECT 1 FROM exam_attempts WHERE exam_id=$1 LIMIT 1',[examId])).rowCount)
       throw appError('بدأ أحد الطلبة الامتحان؛ لا يمكن تعديله.','ALREADY_TAKEN',409);
     await assertExamDayFree(c,before.subject_id,before.stage_season_id,dateIso,examId);
+    const startMinutes=examTimeMinutes(time,localExamMinutes(before.opens_at));
     const result=(await c.query(`UPDATE exams SET title=$2,
-      opens_at=(($3::date+make_interval(hours=>$5::int)) AT TIME ZONE $6) AT TIME ZONE 'UTC',
-      closes_at=((($3::date+make_interval(hours=>$5::int)) AT TIME ZONE $6) AT TIME ZONE 'UTC')+make_interval(hours=>$4::int),
-      available_hours=$4::int WHERE id=$1 RETURNING *`,[examId,title.trim(),dateIso,h,EXAM_START_HOUR,SCHEDULE_TZ])).rows[0];
+      opens_at=(($3::date+make_interval(mins=>$5::int)) AT TIME ZONE $6) AT TIME ZONE 'UTC',
+      closes_at=((($3::date+make_interval(mins=>$5::int)) AT TIME ZONE $6) AT TIME ZONE 'UTC')+make_interval(hours=>$4::int),
+      available_hours=$4::int WHERE id=$1 RETURNING *`,[examId,title.trim(),dateIso,h,startMinutes,SCHEDULE_TZ])).rows[0];
     const changed=before.title!==result.title||new Date(before.opens_at).getTime()!==new Date(result.opens_at).getTime()||Number(before.available_hours)!==h;
     if(changed){
       await c.query(`UPDATE notification_outbox SET status='expired' WHERE dedupe_key LIKE $1 AND status='pending'`,[`exam:${examId}:%`]);
@@ -1298,11 +1320,11 @@ const getNextUnansweredQuestion = (attemptId) =>
 // التسليم: الدرجة نسبة الإجابات الصحيحة من 5، مهما كان عدد الأسئلة.
 
 // تأجيل امتحان منشور إلى تاريخ جديد (ما لم يكن قد سلّمه أحد).
-async function postponeExam(examId, newDateIso, hours) {
+async function postponeExam(examId, newDateIso, hours, time) {
   const client=await pool.connect();
   try {
   await client.query('BEGIN');
-   const original=(await client.query('SELECT id,status,subject_id,stage_season_id FROM exams WHERE id=$1 FOR UPDATE',[examId])).rows[0];
+   const original=(await client.query('SELECT id,status,subject_id,stage_season_id,opens_at FROM exams WHERE id=$1 FOR UPDATE',[examId])).rows[0];
    if(!original||original.status==='cancelled')throw appError('الامتحان غير موجود أو ملغى.','CONFLICT',409);
   const submitted = await client
     .query('SELECT COUNT(*) AS c FROM exam_attempts WHERE exam_id=$1', [examId])
@@ -1320,17 +1342,18 @@ async function postponeExam(examId, newDateIso, hours) {
     throw err;
   }
   await assertExamDayFree(client,original.subject_id,original.stage_season_id,newDateIso,examId);
+  const startMinutes=examTimeMinutes(time,localExamMinutes(original.opens_at));
   const result=await client
     .query(
       `UPDATE exams SET
          original_opens_at = COALESCE(original_opens_at, opens_at),
-         opens_at = (($2::date + make_interval(hours => $4::int)) AT TIME ZONE $5) AT TIME ZONE 'UTC',
+         opens_at = (($2::date + make_interval(mins => $4::int)) AT TIME ZONE $5) AT TIME ZONE 'UTC',
          available_hours = $3::int,
-         closes_at = (($2::date + make_interval(hours => $4::int)) AT TIME ZONE $5) AT TIME ZONE 'UTC'
+         closes_at = (($2::date + make_interval(mins => $4::int)) AT TIME ZONE $5) AT TIME ZONE 'UTC'
                      + make_interval(hours => $3::int),
          postponed_count = postponed_count + 1
        WHERE id=$1 RETURNING *`,
-      [examId, newDateIso, h, EXAM_START_HOUR, SCHEDULE_TZ]
+      [examId, newDateIso, h, startMinutes, SCHEDULE_TZ]
     )
     .then((r) => r.rows[0]);
   if(result?.status==='published'){
@@ -2418,6 +2441,7 @@ module.exports = {
   switchToMubahatha,
   changeParticipationMode,
   countParticipationBySubject,
+  listParticipationChangeCounts,
   createMubahathaGroup,
   listGroups,
   getGroupById,

@@ -27,6 +27,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
   const scheduleBatchImport=require('./scheduleBatchImport').createScheduleBatchImport(db.pool);
   const sessions=createSessions();const authLimits=new Map();let active=0;
   const teacherWeb=require('./teacherWeb').createTeacherWeb({db,studies,scheduler,botToken,origin,readJson});
+  const studentWeb=require('./studentWeb').createStudentWeb({db,studies,botToken,origin,readJson});
   const json=(res,code,value)=>{res.writeHead(code,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
   async function audit(actor,action,type,id,before,after) {
     await db.pool.query(`INSERT INTO admin_audit_log(actor_id,action,entity_type,entity_id,before_data,after_data)
@@ -39,6 +40,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
     try{
       const url=new URL(req.url,'http://local.invalid');
       if(await teacherWeb(req,res,url))return;
+      if(await studentWeb(req,res,url))return;
       const files={'/admin':'index.html','/admin/':'index.html','/admin/app.js':'app.js','/admin/styles.css':'styles.css'};
       if(req.method==='GET'&&files[url.pathname]) {
         const filename=files[url.pathname];res.setHeader('Content-Type',filename.endsWith('.js')?'text/javascript; charset=utf-8':filename.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8');
@@ -267,7 +269,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           if(m[2]==='question')result=await studies.addExamQuestion(id,body);
           else if(m[2]==='publish')result=await studies.publishExam(id);
           else if(m[2]==='cancel')result=await studies.cancelExam(id,actor.id,body.reason);
-          else {if(!/^\d{4}-\d{2}-\d{2}$/.test(body.dateIso||''))throw appError('التاريخ غير صالح.');result=await studies.postponeExam(id,body.dateIso,before.available_hours);}
+          else {if(!/^\d{4}-\d{2}-\d{2}$/.test(body.dateIso||''))throw appError('التاريخ غير صالح.');result=await studies.postponeExam(id,body.dateIso,before.available_hours,body.time);}
           await audit(actor.id,'exam_'+m[2],'exam',id,{status:before.status},m[2]==='question'?{question_id:result.id}:result);
         }
         else if((m=/^\/questions\/(\d+)\/remove$/.exec(route))&&req.method==='POST'){

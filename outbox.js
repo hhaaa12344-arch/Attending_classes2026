@@ -17,8 +17,18 @@ function createOutboxWorker(pool, queue, deleteMessage = null) {
     running = true;
     try {
       if(Date.now()-lastPrune>86400000){
-        await pool.query("DELETE FROM notification_outbox WHERE status IN ('sent','expired') AND created_at<now()-interval '30 days'");
-        await pool.query("DELETE FROM student_daily_lesson_notifications WHERE notification_date<CURRENT_DATE-30");
+        // Daily lesson notices alone: keep other outbox records for diagnostics,
+        // delivery history, retries, and administrative workflows.
+        await pool.query(`DELETE FROM notification_outbox WHERE dedupe_key LIKE 'daily:%' AND (
+          (status='sent' AND sent_at<now()-interval '30 days'
+            AND (expires_at IS NULL OR expires_at<now()-interval '30 days')
+            AND (telegram_message_id IS NULL OR deleted_at IS NOT NULL))
+          OR (status='expired' AND expires_at<now()-interval '30 days')
+          OR (status='failed' AND expires_at<now()-interval '90 days'))`);
+        await pool.query(`DELETE FROM student_daily_lesson_notifications d
+          WHERE d.notification_date<CURRENT_DATE-30 AND NOT EXISTS(
+            SELECT 1 FROM notification_outbox n WHERE n.dedupe_key='daily:'||d.stage_id||':'||d.notification_date||':'||d.student_id
+              AND (n.status IN ('pending','sending') OR n.expires_at>now()))`);
         lastPrune=Date.now();
       }
       await pool.query(`UPDATE notification_outbox SET status='expired'

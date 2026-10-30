@@ -214,7 +214,7 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
         const title=typeof body.title==='string'?body.title.trim():'';
         if(title.length<3)throw appError('أدخل موضوع الامتحان بوضوح.');
         if(title.length>150)throw appError('موضوع الامتحان طويل جدًا.');
-        result=await studies.createExam(subjectId,seasonId,actor.teacherId,{examNumber,title,dateIso:body.dateIso,hours});
+        result=await studies.createExam(subjectId,seasonId,actor.teacherId,{examNumber,title,dateIso:body.dateIso,hours,time:body.time});
       }
       else if((m=/^\/exams\/(\d+)\/questions$/.exec(route))){
         const exam=await requireOwnedExam(actor,m[1]);

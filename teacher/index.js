@@ -1561,10 +1561,15 @@ bot.on('text', async (ctx, next) => {
     if (title.length < 3 || title.length > 150) {
       return ctx.reply('أرسل موضوعًا واضحًا للامتحان بين 3 و150 حرفًا.');
     }
-    userState.set(ctx.from.id, { ...state, action: 'teacher_exam_hours', title });
-    return ctx.reply(
-      `الموضوع: «${title}»\n\nكم ساعة يبقى الامتحان متاحًا؟ (أرسل رقمًا، مثال: 24)`
-    );
+    userState.set(ctx.from.id, { ...state, action: 'teacher_exam_time', title });
+    return ctx.reply('أرسل وقت فتح الامتحان بتوقيت بغداد بصيغة 24 ساعة، مثال: 14:30');
+  }
+
+  if (state.action === 'teacher_exam_time') {
+    const time=ctx.message.text.trim();
+    if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return ctx.reply('أرسل الوقت بصيغة 24 ساعة، مثال: 14:30.');
+    userState.set(ctx.from.id,{...state,action:'teacher_exam_hours',time});
+    return ctx.reply('كم ساعة يبقى الامتحان متاحًا؟ أرسل رقمًا بين 1 و720.');
   }
 
   // -------- الأستاذ: ساعات إتاحة الامتحان ثم إنشاؤه --------
@@ -1581,12 +1586,12 @@ bot.on('text', async (ctx, next) => {
         examNumber: state.number,
         title: state.title || `الامتحان الشهري ${state.number}`,
         dateIso: state.dateIso,
-        hours,
+        hours, time: state.time,
       });
       await ctx.reply(
         `✅ أُنشئ الامتحان الشهري ${state.number} وتم إشعار الطلبة به.\n` +
           `الموضوع: «${state.title || `الامتحان الشهري ${state.number}`}»\n` +
-          `يفتح ${state.dateIso} ويبقى متاحًا ${hours} ساعة.\n` +
+          `يفتح ${state.dateIso} الساعة ${state.time} بتوقيت بغداد ويبقى متاحًا ${hours} ساعة.\n` +
           'أضف الأسئلة فقط؛ وسيصبح الامتحان متاحًا تلقائيًا عند الموعد المحدد.',
         teacherMainMenu()
       );
@@ -1594,6 +1599,13 @@ bot.on('text', async (ctx, next) => {
     } catch (err) {
       return ctx.reply(`تعذر إنشاء الامتحان: ${err.message}`, teacherMainMenu());
     }
+  }
+
+  if (state.action === 'teacher_exam_postpone_time') {
+    const time=ctx.message.text.trim();
+    if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return ctx.reply('أرسل الوقت بصيغة 24 ساعة، مثال: 14:30.');
+    userState.set(ctx.from.id,{...state,action:'teacher_exam_postpone_hours',time});
+    return ctx.reply('كم ساعة يبقى الامتحان متاحًا؟');
   }
 
   // -------- الأستاذ: ساعات إتاحة الامتحان المؤجَّل --------
@@ -1608,10 +1620,10 @@ bot.on('text', async (ctx, next) => {
       return ctx.reply('غير مصرح.');
     }
     try {
-      const updated = await studies.postponeExam(state.examId, state.dateIso, hours);
+      const updated = await studies.postponeExam(state.examId, state.dateIso, hours, state.time);
       userState.delete(ctx.from.id);
       await ctx.reply(
-        `✅ أُجّل الامتحان إلى ${state.dateIso} ويبقى متاحًا ${hours} ساعة.`,
+        `✅ أُجّل الامتحان إلى ${state.dateIso} الساعة ${state.time} بتوقيت بغداد ويبقى متاحًا ${hours} ساعة.`,
         isAdmin(ctx) ? adminMainMenu() : teacherMainMenu()
       );
       return ctx.reply(updated.status==='published'?'📤 حُفظت إشعارات الموعد الجديد لإرسالها إلى الطلبة.':'حُفظ الموعد الجديد للمسودة.');
@@ -4240,9 +4252,9 @@ bot.action(/ex_ppday:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
   if (!exam || !(await teacherOwnsSubject(ctx, exam.subject_id, exam.stage_season_id))) {
     return ctx.answerCbQuery('غير مصرح.');
   }
-  userState.set(ctx.from.id, { action: 'teacher_exam_postpone_hours', examId, dateIso: ctx.match[2] });
+  userState.set(ctx.from.id, { action: 'teacher_exam_postpone_time', examId, dateIso: ctx.match[2] });
   await ctx.answerCbQuery();
-  return ctx.reply(`التاريخ الجديد: ${ctx.match[2]}\n\nكم ساعة يبقى الامتحان متاحًا؟`);
+  return ctx.reply(`التاريخ الجديد: ${ctx.match[2]}\nأرسل وقت الفتح بتوقيت بغداد بصيغة 24 ساعة، مثال: 14:30.`);
 });
 
 bot.action(/ex_res:(\d+)/, async (ctx) => {

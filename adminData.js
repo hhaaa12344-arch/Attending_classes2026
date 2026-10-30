@@ -114,7 +114,8 @@ function createAdminData(db, studies) {
     const leaves = (await pool.query(`SELECT id,stage_season_id,start_date,end_date,days,status,reason,is_exception,requested_at,decided_at
       FROM student_leaves WHERE student_id=$1 ORDER BY requested_at DESC,id DESC LIMIT 100`,[id])).rows;
     const grades = await studies.getStudentFinalGrades(id);
-    return { id,full_name,telegram_id,stage_id,stage_name,is_active,official_confirmed_at,created_at,activity,groups,subjects,attendance,leaves,grades };
+    const participationChanges = await studies.listParticipationChangeCounts(id);
+    return { id,full_name,telegram_id,stage_id,stage_name,is_active,official_confirmed_at,created_at,activity,groups,subjects,attendance,leaves,grades,participationChanges };
   }
   async function updateStudent(id, { fullName, active, expectedName }, actor) {
     const c = await pool.connect();

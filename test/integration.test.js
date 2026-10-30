@@ -126,12 +126,12 @@ test('two grade component updates preserve each other; out-of-range scores rejec
 });
 test('leave quota: duplicate simultaneous requests cannot reserve more than ten days',async()=>{
   const st=await db.createStudent(90106,'طالب إجازات أول ثاني',stage.id);
-  const attempts=await Promise.allSettled([db.requestLeave(st.id,'2030-01-01',6,'اختبار'),db.requestLeave(st.id,'2030-02-01',6,'اختبار')]);
+  const attempts=await Promise.allSettled([db.requestLeave(st.id,'2030-01-01',9,'اختبار'),db.requestLeave(st.id,'2030-02-01',10,'اختبار')]);
   assert.equal(attempts.filter(x=>x.status==='fulfilled').length,1);
   const leave=attempts.find(x=>x.status==='fulfilled').value;
   const decisions=await Promise.all([db.decideLeave(leave.id,true,1),db.decideLeave(leave.id,true,2)]);
   assert.equal(decisions.filter(Boolean).length,1);
-  assert.equal(Number((await db.getStudentCurrentSeasonActivity(st.id)).approvedLeaveDays),6);
+  assert.equal(Number((await db.getStudentCurrentSeasonActivity(st.id)).approvedLeaveDays),7);
   await db.requestLeave(st.id,'2030-03-01',4,null);
   await assert.rejects(()=>db.requestLeave(st.id,'2030-04-01',1,null),{code:'LEAVE_SEASON_LIMIT'});
 });
@@ -223,7 +223,7 @@ test('absence snapshots: excused day excluded, late marking unchanged, 3 and 10 
   await db.pool.query("UPDATE enrollments SET started_at=now()-interval '40 days' WHERE student_id=$1",[a.id]);
   await db.pool.query("UPDATE absence_monitoring_config SET started_at=now()-interval '40 days' WHERE id=1");
   const lessons=(await db.pool.query(`INSERT INTO lessons(subject_id,stage_season_id,activated_at,active_until)
-    SELECT $1,$2,(CURRENT_DATE-30+n)+time '08:00',(CURRENT_DATE-29+n)+time '08:00' FROM generate_series(1,11) n RETURNING *`,[sub.id,season])).rows;
+    SELECT $1,$2,(CURRENT_DATE-30-((extract(dow from CURRENT_DATE-29)::int+1)%7)+n)+time '08:00',(CURRENT_DATE-29-((extract(dow from CURRENT_DATE-29)::int+1)%7)+n)+time '08:00' FROM generate_series(1,11) n RETURNING *`,[sub.id,season])).rows;
   const leaveDay=new Date(lessons[4].activated_at).toISOString().slice(0,10);
   const leave=await db.requestLeave(a.id,leaveDay,1,null);await db.decideLeave(leave.id,true,1);
   await db.processCompletedAttendanceDays();

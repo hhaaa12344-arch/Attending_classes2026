@@ -12,6 +12,7 @@ test('exception requests require exhausted approved quota and an emergency reaso
   const normal=await db.requestLeave(st.id,'2020-01-01',10,null);
   await assert.rejects(()=>db.requestLeave(st.id,'2020-02-01',2,'حالة صحية طارئة',{exception:true}),{code:'LEAVE_EXCEPTION_NOT_ELIGIBLE'},'pending reservation does not expose exceptions');
   await db.decideLeave(normal.id,true,42);
+  const remainder=await db.requestLeave(st.id,'2020-01-11',4,null);await db.decideLeave(remainder.id,true,42);
   assert.equal((await db.getCurrentSeasonLeaveUsage(st.id)).exceptionEligible,true);
   await assert.rejects(()=>db.requestLeave(st.id,'2020-02-01',2,null,{exception:true}),/الحالة الطارئة/);
   const extra=await db.requestLeave(st.id,'2020-02-01',2,'حالة صحية طارئة',{exception:true});
@@ -27,13 +28,13 @@ test('exception requests require exhausted approved quota and an emergency reaso
 });
 test('normal quota returns after reducing or cancelling pending and approved leaves; stale requests cannot overwrite',async()=>{
   const st=await student(),l=await db.requestLeave(st.id,'2030-01-01',6,null);
-  const reduced=await db.adjustLeave(l.id,{days:4,expectedDays:6,expectedStatus:'pending'},42);
-  assert.equal(reduced.days,4);assert.equal(reduced.end_date.toISOString().slice(0,10),'2030-01-04');assert.equal(reduced.status,'pending');
-  assert.equal((await db.getCurrentSeasonLeaveUsage(st.id)).remainingDays,6);
-  await assert.rejects(()=>db.adjustLeave(l.id,{days:2,expectedDays:6,expectedStatus:'pending'},42),{code:'CONFLICT'});
-  await assert.rejects(()=>db.adjustLeave(l.id,{days:5,expectedDays:4,expectedStatus:'pending'},42),/أقل/);
+  const reduced=await db.adjustLeave(l.id,{days:2,expectedDays:4,expectedStatus:'pending'},42);
+  assert.equal(reduced.days,2);assert.equal(reduced.end_date.toISOString().slice(0,10),'2030-01-02');assert.equal(reduced.status,'pending');
+  assert.equal((await db.getCurrentSeasonLeaveUsage(st.id)).remainingDays,8);
+  await assert.rejects(()=>db.adjustLeave(l.id,{days:1,expectedDays:4,expectedStatus:'pending'},42),{code:'CONFLICT'});
+  await assert.rejects(()=>db.adjustLeave(l.id,{days:3,expectedDays:2,expectedStatus:'pending'},42),/أقل/);
   await db.decideLeave(l.id,true,42);
-  await db.adjustLeave(l.id,{cancel:true,expectedDays:4,expectedStatus:'approved'},42);
+  await db.adjustLeave(l.id,{cancel:true,expectedDays:2,expectedStatus:'approved'},42);
   assert.equal((await row(l.id)).status,'cancelled');assert.equal((await db.getCurrentSeasonLeaveUsage(st.id)).remainingDays,10);
   assert.equal((await db.pool.query("SELECT * FROM admin_audit_log WHERE entity_type='leave' AND entity_id=$1 AND action IN ('reduce_leave','cancel_leave')",[l.id])).rows.length,2);
   const notices=(await db.pool.query("SELECT * FROM notification_outbox WHERE dedupe_key LIKE $1 AND status='pending'",[`leave:${l.id}:adjust:%`])).rows;assert.equal(notices.length,1);assert.match(notices[0].payload[0],/ألغت الإدارة/);
@@ -41,8 +42,9 @@ test('normal quota returns after reducing or cancelling pending and approved lea
 });
 test('exception approval rechecks quota after an administrator frees ordinary days',async()=>{
   const st=await student(),l=await db.requestLeave(st.id,'2020-03-01',10,null);await db.decideLeave(l.id,true,42);
+  const remainder=await db.requestLeave(st.id,'2020-03-14',2,null);await db.decideLeave(remainder.id,true,42);
   const extra=await db.requestLeave(st.id,'2020-04-01',2,'ظرف صحي حرج جدًا',{exception:true});
-  await db.adjustLeave(l.id,{days:8,expectedDays:10,expectedStatus:'approved'},42);
+  await db.adjustLeave(l.id,{days:6,expectedDays:8,expectedStatus:'approved'},42);
   await assert.rejects(()=>db.decideLeave(extra.id,true,42,{exceptionApproval:true}),{code:'CONFLICT'});
   assert.equal((await row(extra.id)).status,'pending');assert.equal((await db.getCurrentSeasonLeaveUsage(st.id)).exceptionEligible,false);
 });

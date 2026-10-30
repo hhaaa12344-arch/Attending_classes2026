@@ -1729,10 +1729,15 @@ bot.on('text', async (ctx, next) => {
     if (title.length < 3 || title.length > 150) {
       return ctx.reply('أرسل موضوعًا واضحًا للامتحان بين 3 و150 حرفًا.');
     }
-    userState.set(ctx.from.id, { ...state, action: 'teacher_exam_hours', title });
-    return ctx.reply(
-      `الموضوع: «${title}»\n\nكم ساعة يبقى الامتحان متاحًا؟ (أرسل رقمًا، مثال: 24)`
-    );
+    userState.set(ctx.from.id, { ...state, action: 'teacher_exam_time', title });
+    return ctx.reply('أرسل وقت فتح الامتحان بتوقيت بغداد بصيغة 24 ساعة، مثال: 14:30');
+  }
+
+  if (state.action === 'teacher_exam_time') {
+    const time=ctx.message.text.trim();
+    if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return ctx.reply('أرسل الوقت بصيغة 24 ساعة، مثال: 14:30.');
+    userState.set(ctx.from.id,{...state,action:'teacher_exam_hours',time});
+    return ctx.reply('كم ساعة يبقى الامتحان متاحًا؟ أرسل رقمًا بين 1 و720.');
   }
 
   // -------- الأستاذ: ساعات إتاحة الامتحان ثم إنشاؤه --------
@@ -1749,12 +1754,12 @@ bot.on('text', async (ctx, next) => {
         examNumber: state.number,
         title: state.title || `الامتحان الشهري ${state.number}`,
         dateIso: state.dateIso,
-        hours,
+        hours, time: state.time,
       });
       await ctx.reply(
         `✅ أُنشئ الامتحان الشهري ${state.number} وتم إشعار الطلبة به.\n` +
           `الموضوع: «${state.title || `الامتحان الشهري ${state.number}`}»\n` +
-          `يفتح ${state.dateIso} ويبقى متاحًا ${hours} ساعة.\n` +
+          `يفتح ${state.dateIso} الساعة ${state.time} بتوقيت بغداد ويبقى متاحًا ${hours} ساعة.\n` +
           'أضف الأسئلة فقط؛ وسيصبح الامتحان متاحًا تلقائيًا عند الموعد المحدد.',
         teacherMainMenu()
       );
@@ -1762,6 +1767,13 @@ bot.on('text', async (ctx, next) => {
     } catch (err) {
       return ctx.reply(`تعذر إنشاء الامتحان: ${err.message}`, teacherMainMenu());
     }
+  }
+
+  if (state.action === 'teacher_exam_postpone_time') {
+    const time=ctx.message.text.trim();
+    if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return ctx.reply('أرسل الوقت بصيغة 24 ساعة، مثال: 14:30.');
+    userState.set(ctx.from.id,{...state,action:'teacher_exam_postpone_hours',time});
+    return ctx.reply('كم ساعة يبقى الامتحان متاحًا؟');
   }
 
   // -------- الأستاذ: ساعات إتاحة الامتحان المؤجَّل --------
@@ -1776,10 +1788,10 @@ bot.on('text', async (ctx, next) => {
       return ctx.reply('غير مصرح.');
     }
     try {
-      const updated = await studies.postponeExam(state.examId, state.dateIso, hours);
+      const updated = await studies.postponeExam(state.examId, state.dateIso, hours, state.time);
       userState.delete(ctx.from.id);
       await ctx.reply(
-        `✅ أُجّل الامتحان إلى ${state.dateIso} ويبقى متاحًا ${hours} ساعة.`,
+        `✅ أُجّل الامتحان إلى ${state.dateIso} الساعة ${state.time} بتوقيت بغداد ويبقى متاحًا ${hours} ساعة.`,
         isAdmin(ctx) ? adminMainMenu() : teacherMainMenu()
       );
       return ctx.reply(updated.status==='published'?'📤 حُفظت إشعارات الموعد الجديد لإرسالها إلى الطلبة.':'حُفظ الموعد الجديد للمسودة.');
@@ -2371,9 +2383,10 @@ async function submitStudentLeaveRequest(ctx,student,days,reason,exception){
     const leave=await db.requestLeave(student.id,currentDateInTimeZone(ATTENDANCE_TIME_ZONE),days,reason,{exception});
     userState.delete(ctx.from.id);
     const range=`${dateOnly(leave.start_date)} → ${dateOnly(leave.end_date)}`;
-    await replyStudentScreen(ctx,student,`✅ أُرسل طلب إجازتك${exception?' الاستثنائية الطارئة':''} (${range}، ${days} يومًا).\n`+
+    await replyStudentScreen(ctx,student,`✅ أُرسل طلب إجازتك${exception?' الاستثنائية الطارئة':''} (${range}، ${leave.days} يوم دوام).\n`+
+      (leave.weekly_holidays?`من أصل ${days} يومًا طلبتها، ${leave.weekly_holidays} يوم عطلة أسبوعية (الخميس والجمعة) ولا يُخصم من رصيدك.\n`:'')+
       (exception?'الطلب قيد المراجعة ولا يعفي من الغياب إلا بعد موافقة استثنائية من الإدارة.':`الرصيد المتبقي في هذا الموسم: ${leave.remaining_days} من ${leave.max_days} أيام.\nعند موافقة الإدارة لا تُحسب أيام الإجازة غيابًا. تسجيل الحضور يبقى ضمن مهلة كل درس.`),studentMainMenu(await effectiveStudent(ctx)));
-    await notifyAdmins(`🌴 طلب إجازة جديد${exception?' — استثناء طارئ من الضوابط':''}\nالطالب: ${student.full_name}\nالمرحلة: ${student.stage_name||'—'}\nالمدة: ${days} يومًا (${range})\n`+
+    await notifyAdmins(`🌴 طلب إجازة جديد${exception?' — استثناء طارئ من الضوابط':''}\nالطالب: ${student.full_name}\nالمرحلة: ${student.stage_name||'—'}\nالمحتسب: ${leave.days} يوم دوام (${range})؛ أيام العطلة ضمن الطلب: ${leave.weekly_holidays}.\n`+
       (exception?`السبب: ${reason}\nيحتاج موافقة استثنائية صريحة؛ استُنفد الرصيد الاعتيادي.`:`الرصيد المحجوز بعد الطلب: ${leave.used_days} من ${leave.max_days} أيام`),adminLeaveKeyboard(leave));
   }catch(e){userState.delete(ctx.from.id);return replyStudentScreen(ctx,student,`تعذّر تسجيل الإجازة: ${e.message}`,studentMainMenu(await effectiveStudent(ctx)));}
 }
@@ -2432,7 +2445,7 @@ async function openLeaveRequest(ctx) {
     student,
     withStudentName(student, 'طلب إجازة 🌴\nأرسل عدد أيام الإجازة المطلوبة، مثال: 1 أو ١.\n' +
       `المتبقي لك في هذا الموسم: ${usage.remainingDays} من ${usage.maxDays} أيام.\n` +
-      'ستبدأ الإجازة تلقائيًا من اليوم بعد موافقة الأدمن.\n' +
+      'تبدأ المدة من اليوم بعد موافقة الأدمن؛ الخميس والجمعة عطلة ولا يُخصمان من الرصيد.\n' +
       `للرجوع اضغط «${BACK_BUTTON}».`),
     studentMainMenu(await effectiveStudent(ctx))
   );
@@ -3523,9 +3536,10 @@ bot.action(/stu_select:(\d+)/, async (ctx) => {
     : [];
   const groups=await studies.listStudentGroups(studentId);
   const twins=await duplicateStudents.twins(studentId);
+  const changes=await studies.listParticipationChangeCounts(studentId);
   return ctx.reply(
     formatAdminStudentDetails(student, activity, attendanceRows)+`\nمعرّف تليجرام: ${student.telegram_id}`+'\n\n👥 المجموعات حسب المادة:\n'+
-      (groups.map(g=>`• ${g.subject_name}: ${g.group_title}`).join('\n')||'لم يُوزع على مجموعات بعد.')+duplicateTwinsText(twins),
+      (groups.map(g=>`• ${g.subject_name}: ${g.group_title}`).join('\n')||'لم يُوزع على مجموعات بعد.')+'\n\n🔁 التحويلات المعتمدة حسب الموسم والمادة:\n'+(changes.map(c=>`• ${c.season_name} — ${c.subject_name}: ${c.count}`).join('\n')||'لا توجد طلبات تحويل معتمدة محفوظة.')+duplicateTwinsText(twins),
     studentActionsKeyboard(studentId, student.is_active, twins.map((t) => [callbackButton(
       limitButtonText(`👁️ فتح سجل ${t.is_active ? 'نشط' : 'مؤرشف'} …${String(t.telegram_id).slice(-4)} — ${t.stage_name}`), `stu_select:${t.id}`)]))
   );
@@ -4714,9 +4728,9 @@ bot.action(/ex_ppday:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
   if (!exam || !(await teacherOwnsSubject(ctx, exam.subject_id, exam.stage_season_id))) {
     return ctx.answerCbQuery('غير مصرح.');
   }
-  userState.set(ctx.from.id, { action: 'teacher_exam_postpone_hours', examId, dateIso: ctx.match[2] });
+  userState.set(ctx.from.id, { action: 'teacher_exam_postpone_time', examId, dateIso: ctx.match[2] });
   await ctx.answerCbQuery();
-  return ctx.reply(`التاريخ الجديد: ${ctx.match[2]}\n\nكم ساعة يبقى الامتحان متاحًا؟`);
+  return ctx.reply(`التاريخ الجديد: ${ctx.match[2]}\nأرسل وقت الفتح بتوقيت بغداد بصيغة 24 ساعة، مثال: 14:30.`);
 });
 
 bot.action(/ex_res:(\d+)/, async (ctx) => {
@@ -4916,10 +4930,11 @@ bot.hears('📝 الامتحانات الشهرية', async (ctx) => {
     : 'لم تُسلّم أي امتحان بعد.';
 
   const rows = open.map((e) => [
-    Markup.button.callback(
-      limitButtonText(`📝 ${e.subject_name} — الشهري ${e.exam_number}`, 50),
-      `stex_start:${e.id}`
-    ),
+    (()=>{
+      const label=limitButtonText(`📝 ${e.subject_name} — الشهري ${e.exam_number}`,50);
+      try{const url=new URL(process.env.ADMIN_WEB_URL);if(process.env.ADMIN_WEB_ENABLED==='true'&&url.protocol==='https:'){url.pathname='/student-exam/';url.search='?exam='+e.id;url.hash='';return Markup.button.webApp(label,url.toString());}}catch(_){}
+      return Markup.button.callback(label,`stex_start:${e.id}`);
+    })(),
   ]);
 
   return replyStudentScreen(
@@ -5005,6 +5020,15 @@ bot.action(/stex_start:(\d+)/, async (ctx) => {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   const examId = Number(ctx.match[1]);
+  try {
+    const url=new URL(process.env.ADMIN_WEB_URL||'');
+    if(process.env.ADMIN_WEB_ENABLED==='true' && url.protocol==='https:' && ctx.chat?.type==='private') {
+      if(!await studies.isExamAvailable(examId,student.id)) return ctx.answerCbQuery('الامتحان غير متاح الآن.',{show_alert:true});
+      url.pathname='/student-exam/';url.search='?exam='+examId;url.hash='';
+      await ctx.answerCbQuery();
+      return ctx.reply('افتح لوحة الامتحان:',Markup.inlineKeyboard([[Markup.button.webApp('📝 بدء الامتحان',url.toString())]]));
+    }
+  } catch (_) { /* في حال عدم تهيئة لوحة الويب يستمر مسار الأزرار القديم. */ }
   try {
     const attempt = await studies.startOrResumeAttempt(examId, student.id);
     await ctx.answerCbQuery();
@@ -5649,7 +5673,10 @@ async function decideParticipationChangeAction(ctx, requestId, approve) {
   const request = await studies.getParticipationChangeRequest(requestId);
   const tell = async (text, extra) => {
     try { await bot.telegram.sendMessage(request.telegram_id, text, extra); }
-    catch (err) { console.warn('تعذر إشعار الطالب بقرار تغيير الاشتراك:', err.description || err.message); }
+    catch (err) {
+      console.warn('تعذر إشعار الطالب بقرار تغيير الاشتراك؛ سيعاد الإرسال:', err.description || err.message);
+      await require('./outbox').enqueueNotification(db.pool,{key:`participation-decision:${request.id}`,chatId:request.telegram_id,text,extra:extra||{}});
+    }
   };
   if (result.stale) {
     await ctx.answerCbQuery('تغيّر نمط الطالب؛ أُلغي الطلب.');
@@ -5662,19 +5689,23 @@ async function decideParticipationChangeAction(ctx, requestId, approve) {
   if (!approve) {
     return tell(`❌ لم تعتمد الإدارة طلب تحويلك إلى ${PARTICIPATION_MODE_NAME[request.to_mode]} في «${request.subject_name}». يبقى اشتراكك الحالي كما هو.`);
   }
+  const counts=await studies.listParticipationChangeCounts(request.student_id);
+  const subjectCount=counts.find(c=>Number(c.stage_season_id)===Number(request.stage_season_id)&&Number(c.subject_id)===Number(request.subject_id))?.count||0;
+  const seasonCount=counts.filter(c=>Number(c.stage_season_id)===Number(request.stage_season_id)).reduce((n,c)=>n+Number(c.count),0);
+  const countNotice=`\nعدد طلبات تحويلك المعتمدة في هذه المادة خلال هذا الموسم: ${subjectCount}؛ وفي جميع مواد الموسم: ${seasonCount}.`;
   if (request.to_mode === 'report') {
-    return tell(`✅ اعتمدت الإدارة تحويلك إلى التقارير في «${request.subject_name}».\nأرسل تقاريرك من «📖 المباحثات والتقارير» ← المادة ← «إرسال تقرير».`);
+    return tell(`✅ اعتمدت الإدارة تحويلك إلى التقارير في «${request.subject_name}».\nأرسل تقاريرك من «📖 المباحثات والتقارير» ← المادة ← «إرسال تقرير».${countNotice}`);
   }
   const assigned = await studies.assignStudentToGroup(request.student_id, request.subject_id, request.stage_season_id);
   if (!assigned.group) {
     await notifyAdmins(`⚠️ اعتُمد تحويل «${request.full_name}» إلى المباحثات في «${request.subject_name}» لكن تعذر توزيعه.\n${assigned.message}`);
-    return tell(`✅ اعتمدت الإدارة تحويلك إلى المباحثات في «${request.subject_name}».\nسيصلك رابط المجموعة بعد توفيرها.`);
+    return tell(`✅ اعتمدت الإدارة تحويلك إلى المباحثات في «${request.subject_name}».\nسيصلك رابط المجموعة بعد توفيرها.${countNotice}`);
   }
   if (!assigned.group.invite_link) {
     await notifyAdmins(`⚠️ «${assigned.group.title}» بلا رابط دعوة، وطالب ينتظر الانضمام إليها.`);
-    return tell(`✅ اعتمدت الإدارة تحويلك إلى المباحثات في «${request.subject_name}» وسُجّلت في «${assigned.group.title}».\nسيصلك رابط الدعوة قريبًا.`);
+    return tell(`✅ اعتمدت الإدارة تحويلك إلى المباحثات في «${request.subject_name}» وسُجّلت في «${assigned.group.title}».\nسيصلك رابط الدعوة قريبًا.${countNotice}`);
   }
-  return tell(`✅ اعتمدت الإدارة تحويلك إلى المباحثات في «${request.subject_name}».\n👥 مجموعتك: ${assigned.group.title}\nانضم من الرابط أدناه.`,
+  return tell(`✅ اعتمدت الإدارة تحويلك إلى المباحثات في «${request.subject_name}».\n👥 مجموعتك: ${assigned.group.title}\nانضم من الرابط أدناه.${countNotice}`,
     Markup.inlineKeyboard([[Markup.button.url('🔗 الدخول إلى المباحثة', assigned.group.invite_link)]]));
 }
 

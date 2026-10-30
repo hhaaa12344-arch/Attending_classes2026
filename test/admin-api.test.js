@@ -62,8 +62,8 @@ test('admin HTTP: leave double decision, export date columns, archived access an
   await require('../outbox').enqueueNotification(db.pool,{key:'daily:approval-race',chatId:student.telegram_id,text:'يجب إلغاؤه عند الموافقة'});
   const decisions=await Promise.all([request('/leaves/'+leave.id+'/decision',{approve:true}),request('/leaves/'+leave.id+'/decision',{approve:true})]);
   assert.deepEqual(decisions.map(r=>r.status).sort(),[200,409]);
-  assert.equal((await db.pool.query("SELECT status FROM notification_outbox WHERE dedupe_key='daily:approval-race'")).rows[0].status,'expired');
-  const activity=await (await request('/students/'+student.id)).json();assert.equal(activity.activity.approvedLeaveDays,2);
+  assert.equal((await db.pool.query("SELECT status FROM notification_outbox WHERE dedupe_key='daily:approval-race'")).rows[0].status,leave.start_date.toISOString().slice(0,10)===today?'expired':'pending');
+  const activity=await (await request('/students/'+student.id)).json();assert.equal(activity.activity.approvedLeaveDays,leave.days);
   const csv=await request('/attendance.csv?seasonId='+ss);assert.equal(csv.status,200);assert.match(await csv.text(),/تاريخ تسجيل الحضور/);
   const md=await request('/attendance.md?seasonId='+ss);assert.equal(md.status,200);assert.match(md.headers.get('content-type'),/text\/markdown/);assert.match(md.headers.get('content-disposition'),/\.md"$/);
   const markdown=await md.text();assert.match(markdown,/^# تقرير حضور الدروس/);assert.match(markdown,/تاريخ تسجيل الحضور/);assert.match(markdown,/لا توجد تسجيلات حضور/);
@@ -74,7 +74,8 @@ test('admin HTTP: leave double decision, export date columns, archived access an
 test('admin HTTP: exception approval is explicit, leave corrections reject stale edits and require admin access',async()=>{
   const st=await db.createStudent(1987012,'طالب استثناءات واجهة الإدارة',stage.id);
   const l=await db.requestLeave(st.id,'2020-03-01',10,null);await db.decideLeave(l.id,true,42);
-  const extra=await db.requestLeave(st.id,'2020-04-01',3,'حالة طارئة وحرجة جدًا',{exception:true});
+  const remainder=await db.requestLeave(st.id,'2020-03-14',2,null);await db.decideLeave(remainder.id,true,42);
+  const extra=await db.requestLeave(st.id,'2020-04-04',3,'حالة طارئة وحرجة جدًا',{exception:true});
   assert.equal((await request('/leaves/'+extra.id,{days:1,expectedDays:3,expectedStatus:'pending'},'PATCH',null)).status,401);
   assert.equal((await request('/leaves/'+extra.id+'/decision',{approve:true})).status,400);
   assert.equal((await request('/leaves/'+extra.id+'/decision',{approve:true,exceptionApproval:true})).status,200);

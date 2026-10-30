@@ -36,8 +36,8 @@ function createLeaveManagement(pool) {
       const after=(await c.query(`UPDATE student_leaves SET
         status=CASE WHEN $2 THEN 'cancelled' ELSE status END,
         days=CASE WHEN $2 THEN days ELSE $3::int END,
-        end_date=CASE WHEN $2 THEN end_date ELSE start_date+($3::int-1) END,
-        decided_at=now(),decided_by=$4,backlog_notified=false WHERE id=$1 RETURNING *`,[leaveId,cancel,cancel?before.days:Number(days),actorId])).rows[0];
+        end_date=CASE WHEN $2 THEN end_date ELSE $5::date END,
+        decided_at=now(),decided_by=$4,backlog_notified=false WHERE id=$1 RETURNING *`,[leaveId,cancel,cancel?before.days:Number(days),actorId,cancel?day(before.end_date):(before.working_days_policy?require('./leavePolicy').endAfterWorkingDays(before.start_date,Number(days)):new Date(new Date(before.start_date).getTime()+(Number(days)-1)*86400000).toISOString().slice(0,10))])).rows[0];
       await refreshLeaveAttendance(c,after);
       await c.query(`UPDATE notification_outbox SET status='expired' WHERE status='pending'
         AND (dedupe_key=$1 OR dedupe_key LIKE $2)`,[`leave:${leaveId}:decision`,`leave:${leaveId}:adjust:%`]);

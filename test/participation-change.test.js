@@ -97,6 +97,7 @@ test('only an administrator can decide; approval applies the change and informs 
   assert.equal(await modeOf(fiqh.id), 'report');
   assert.equal((await studies.getParticipationChangeRequest(pending.id)).status, 'approved');
   assert.match(toChat(STUDENT).at(-1).text, /تحويلك إلى التقارير/);
+  assert.match(toChat(STUDENT).at(-1).text, /هذه المادة خلال هذا الموسم: 1/);
   assert.equal((await db.pool.query("SELECT COUNT(*)::int AS n FROM admin_audit_log WHERE action='change_participation_mode'")).rows[0].n, 1, 'the approval is audited');
 
   await send(42, '', `pc_approve:${pending.id}`);
@@ -127,6 +128,7 @@ test('approving the move to mubahatha assigns the group, sends its link, and sho
   assert.equal(await modeOf(fiqh.id), 'mubahatha');
   const note = toChat(STUDENT).find((m) => /تحويلك إلى المباحثات/.test(m.text || ''));
   assert.ok(note);
+  assert.match(note.text, /هذه المادة خلال هذا الموسم: 2/);
   assert.ok(note.reply_markup.inline_keyboard.flat().some((b) => b.url === INVITE), 'the group invite link is delivered');
   await send(STUDENT, '', 'il_view:groups:0');
   assert.ok(buttons().some((b) => b.url === INVITE), 'the group is visible again once back in mubahatha');
