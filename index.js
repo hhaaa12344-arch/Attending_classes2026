@@ -2605,13 +2605,14 @@ async function decideLeaveAction(ctx, leaveId, approve, exceptionApproval=false)
     return ctx.editMessageText('تم التعامل مع هذا الطلب مسبقًا.');
   }
   const leave = await db.getLeaveById(leaveId);
-  await ctx.answerCbQuery(approve ? 'تمت الموافقة ✅' : 'تم الرفض');
+  await ctx.answerCbQuery(updated.weekend_only?'المدة عطلة أسبوعية؛ لم تُحتسب إجازة.':approve ? 'تمت الموافقة ✅' : 'تم الرفض');
   const range = `${updated.start_date.toISOString().slice(0, 10)} → ${updated.end_date
     .toISOString()
     .slice(0, 10)}`;
   await ctx.editMessageText(
-    `${approve ? '✅ تمت الموافقة'+(updated.is_exception?' الاستثنائية':'')+' على' : '❌ رُفض'} طلب إجازة «${leave.full_name}» (${range}).`,
-    approve?adminLeaveKeyboard(updated):{}
+    updated.weekend_only?`ℹ️ طلب «${leave.full_name}» (${range}) يقع كله في العطلة الأسبوعية؛ لم يُخصم أي يوم وحُفظ إشعار الطالب للإرسال.`:
+      `${approve ? '✅ تمت الموافقة'+(updated.is_exception?' الاستثنائية':'')+' على' : '❌ رُفض'} طلب إجازة «${leave.full_name}» (${range})${approve?`، المحتسب ${updated.days} يوم دوام`:''}.`,
+    approve&&!updated.weekend_only?adminLeaveKeyboard(updated):{}
   );
   // The decision notice is saved atomically with the decision and retried by the outbox worker.
   return undefined;

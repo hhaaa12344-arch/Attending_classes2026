@@ -2192,7 +2192,15 @@ async function decideLeave(leaveId, approve, adminTelegramId, {exceptionApproval
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock(734221,1)');
     await client.query('SELECT id FROM students WHERE id=(SELECT student_id FROM student_leaves WHERE id=$1) FOR UPDATE',[leaveId]);
-    const before=(await client.query('SELECT * FROM student_leaves WHERE id=$1 FOR UPDATE',[leaveId])).rows[0];
+    const before=(await client.query('SELECT *,start_date::text AS policy_start_date,end_date::text AS policy_end_date FROM student_leaves WHERE id=$1 FOR UPDATE',[leaveId])).rows[0];
+    let normalizedPeriod=null,weekendOnly=false;
+    if(before?.status==='pending'&&approve&&!before.working_days_policy){
+      const start=new Date(before.policy_start_date+'T00:00:00Z'),end=new Date(before.policy_end_date+'T00:00:00Z');
+      const span=Math.floor((end-start)/86400000)+1;
+      if(!Number.isInteger(span)||span<1||span>366)throw new Error('تعذر مراجعة مدة الإجازة القديمة؛ راجعها من إدارة الإجازات.');
+      normalizedPeriod=require('./leavePolicy').leavePeriod(start,span);
+      weekendOnly=normalizedPeriod.days===0;
+    }
     if(before?.status==='pending'&&approve){
       const valid=(await client.query(`SELECT 1 FROM enrollments e JOIN students st ON st.id=e.student_id AND st.is_active=true
         JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
@@ -2200,19 +2208,22 @@ async function decideLeave(leaveId, approve, adminTelegramId, {exceptionApproval
       if(!valid)throw new Error('الطالب غير مسجل في موسم الإجازة النشط.');
       const {appError}=require('./integrity');
       const used=Number((await client.query("SELECT COALESCE(SUM(days),0) AS n FROM student_leaves WHERE student_id=$1 AND stage_season_id=$2 AND NOT is_exception AND status IN ('approved','ended')",[before.student_id,before.stage_season_id])).rows[0].n);
-      if(before.is_exception){
+      if(before.is_exception&&!weekendOnly){
         if(exceptionApproval!==true)throw appError('هذا طلب استثناء طارئ؛ يحتاج موافقة استثنائية صريحة.');
         if(used<MAX_LEAVE_DAYS_PER_SEASON)throw appError('عاد للطالب رصيد اعتيادي؛ اسحب طلب الاستثناء وقدّم طلبًا اعتياديًا.','CONFLICT',409);
-      }else if(used+Number(before.days)>MAX_LEAVE_DAYS_PER_SEASON)throw appError('تتجاوز الموافقة رصيد الإجازات: عشرة أيام للموسم.');
+      }else if(!before.is_exception&&used+Number(normalizedPeriod?.days??before.days)>MAX_LEAVE_DAYS_PER_SEASON)throw appError('تتجاوز الموافقة رصيد الإجازات: عشرة أيام للموسم.');
     }
     const result = await client.query(
       `UPDATE student_leaves
-       SET status=$2, decided_at=now(), decided_by=$3
+       SET status=$2, decided_at=now(), decided_by=$3,
+           start_date=COALESCE($4::date,start_date),end_date=COALESCE($5::date,end_date),
+           days=COALESCE($6::int,days),working_days_policy=CASE WHEN $7::boolean THEN true ELSE working_days_policy END
        WHERE id=$1 AND status='pending' RETURNING *`,
-      [leaveId, approve ? 'approved' : 'rejected', adminTelegramId]
+      [leaveId, approve ? (weekendOnly?'cancelled':'approved') : 'rejected', adminTelegramId,
+       normalizedPeriod?.start||null,normalizedPeriod?.end||null,normalizedPeriod?.days||null,Boolean(normalizedPeriod)]
     );
     const leave = result.rows[0];
-    if (leave && approve) {
+    if (leave && approve && !weekendOnly) {
       // إذا جاءت الموافقة بعد حفظ لقطة يوم ما، تُصحَّح فورًا إلى يوم إجازة غير محسوب.
       await client.query(
         `UPDATE student_attendance_days
@@ -2245,11 +2256,12 @@ async function decideLeave(leaveId, approve, adminTelegramId, {exceptionApproval
       const st=(await client.query('SELECT telegram_id FROM students WHERE id=$1',[leave.student_id])).rows[0];
       const range=`${leave.start_date.toISOString().slice(0,10)} → ${leave.end_date.toISOString().slice(0,10)}`;
       await require('./outbox').enqueueNotification(client,{key:`leave:${leaveId}:decision`,chatId:st.telegram_id,
-        text:approve?`✅ تمت الموافقة${leave.is_exception?' الاستثنائية':''} على إجازتك (${range})، وعدد الأيام المحتسبة ${leave.days}.\n${leave.working_days_policy?'الخميس والجمعة عطلة أسبوعية ولا تُخصم من رصيدك.\n':''}لا تحتسب هذه الفترة غيابًا ولا تصلك خلالها إشعارات الدروس. تسجيل الحضور يبقى ضمن مهلة الدرس فقط.`:
+        text:weekendOnly?`ℹ️ طلب إجازتك (${range}) يوافق الخميس والجمعة، وهما عطلة أسبوعية أصلًا. لم تُحتسب إجازة ولم يُخصم شيء من رصيدك.`:
+          approve?`✅ تمت الموافقة${leave.is_exception?' الاستثنائية':''} على إجازتك (${range})، وعدد الأيام المحتسبة ${leave.days}.\n${leave.working_days_policy?'الخميس والجمعة عطلة أسبوعية ولا تُخصم من رصيدك.\n':''}لا تحتسب هذه الفترة غيابًا ولا تصلك خلالها إشعارات الدروس. تسجيل الحضور يبقى ضمن مهلة الدرس فقط.`:
           `❌ لم تتم الموافقة على طلب إجازتك (${range}).`});
     }
     await client.query('COMMIT');
-    return leave;
+    return leave?{...leave,weekend_only:weekendOnly,weekly_holidays:normalizedPeriod?.holidays||0}:leave;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

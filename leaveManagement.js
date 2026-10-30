@@ -29,7 +29,7 @@ function createLeaveManagement(pool) {
       await c.query('BEGIN');
       await c.query('SELECT pg_advisory_xact_lock(734221,1)');
       await c.query('SELECT id FROM students WHERE id=(SELECT student_id FROM student_leaves WHERE id=$1) FOR UPDATE',[leaveId]);
-      const before=(await c.query('SELECT * FROM student_leaves WHERE id=$1 FOR UPDATE',[leaveId])).rows[0];
+      const before=(await c.query('SELECT *,start_date::text AS policy_start_date,end_date::text AS policy_end_date FROM student_leaves WHERE id=$1 FOR UPDATE',[leaveId])).rows[0];
       if(!before)throw appError('الإجازة غير موجودة.','NOT_FOUND',404);
       if(before.days!==Number(expectedDays)||before.status!==expectedStatus)throw appError('تغيّرت الإجازة. حدّث الصفحة قبل تعديلها.','CONFLICT',409);
       if(!cancel&&Number(days)>=before.days)throw appError('العدد الجديد يجب أن يكون أقل من عدد الأيام الحالي.');
@@ -45,7 +45,7 @@ function createLeaveManagement(pool) {
         VALUES($1,$2,'leave',$3,$4::jsonb,$5::jsonb)`,[actorId,cancel?'cancel_leave':'reduce_leave',leaveId,JSON.stringify(before),JSON.stringify(after)]);
       const st=(await c.query('SELECT telegram_id FROM students WHERE id=$1',[after.student_id])).rows[0];
       await enqueueNotification(c,{key:`leave:${leaveId}:adjust:${before.status}:${before.days}:${cancel?'cancel':after.days}`,chatId:st.telegram_id,
-        text:cancel?`ألغت الإدارة إجازتك (${day(before.start_date)} → ${day(before.end_date)}). لم تعد هذه الفترة معفاة من الغياب بسبب هذه الإجازة.`:
+        text:cancel?(require('./leavePolicy').countWorkingDays(before.policy_start_date,before.policy_end_date)===0?`صححت الإدارة طلب إجازتك (${before.policy_start_date} → ${before.policy_end_date}): هذه الأيام عطلة أسبوعية أصلًا، ولا تُخصم من رصيد إجازاتك.`:`ألغت الإدارة إجازتك (${day(before.start_date)} → ${day(before.end_date)}). لم تعد هذه الفترة معفاة من الغياب بسبب هذه الإجازة.`):
           `عدّلت الإدارة إجازتك إلى ${after.days} يومًا (${day(after.start_date)} → ${day(after.end_date)}).`+(after.status==='pending'?' الطلب ما زال قيد المراجعة.':' الإعفاء من الغياب يقتصر على الفترة المعدلة.')});
       await c.query('COMMIT');return after;
     }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
