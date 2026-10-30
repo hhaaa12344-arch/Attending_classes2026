@@ -1146,7 +1146,6 @@ document.addEventListener('submit',async event=>{
   try{tg?.disableVerticalSwipes?.();}catch{}
   try{tg?.setHeaderColor?.('#244643');}catch{}
   try{tg?.setBackgroundColor?.('#faf7f2');}catch{}
-  try{tg?.requestFullscreen?.();}catch{}
   if(!tg?.initData){setContent(empty('افتح اللوحة من البوت','سجّل دخولك إلى تليجرام، ثم اضغط «لوحة الإدارة» في حساب الأدمن. فتح الرابط وحده لا يمنح صلاحية الاطلاع على بيانات الطلبة.'));return;}
   try{
     const session=await api('/auth',{initData:tg.initData},'POST');token=session.token;$('#identity').textContent=session.user.name;
