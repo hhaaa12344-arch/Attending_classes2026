@@ -28,4 +28,12 @@ function createSessions({ttlMs=30*60000,max=1000}={}) {
     revoke(token){sessions.delete(token);}
   };
 }
-module.exports={validateInitData,createSessions};
+function createBrowserTickets(sessions,{ttlMs=60000,max=200,now=()=>Date.now()}={}) {
+  const tickets=new Map();
+  function clean(){for(const [key,entry] of tickets)if(entry.expires<=now()||!sessions.get(entry.source))tickets.delete(key);}
+  return {
+    issue(source){clean();if(!sessions.get(source))throw appError('أعد فتح لوحة الإدارة من البوت.','UNAUTHORIZED',401);if(tickets.size>=max)throw appError('حاول الدخول لاحقًا.','BUSY',503);const ticket=randomBytes(32).toString('hex');tickets.set(ticket,{source,expires:now()+ttlMs});return ticket;},
+    redeem(ticket){clean();if(typeof ticket!=='string'||!/^[a-f0-9]{64}$/.test(ticket))throw appError('رابط الدخول غير صالح أو انتهت صلاحيته.','UNAUTHORIZED',401);const entry=tickets.get(ticket);tickets.delete(ticket);const user=entry&&sessions.get(entry.source);if(!user)throw appError('رابط الدخول غير صالح أو انتهت صلاحيته.','UNAUTHORIZED',401);return {user,token:sessions.issue(user)};}
+  };
+}
+module.exports={validateInitData,createSessions,createBrowserTickets};

@@ -2,9 +2,9 @@
 const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const {JSDOM}=require('jsdom');
 const stage={id:1,name:'المرحلة التمهيدية',is_active:true,stage_type:'full',stage_season_id:1,season_name:'الموسم الأول',student_count:35,subject_count:1,group_count:1,
   subjects:[{id:1,name:'الفقه',hashtag:'فقه',teacher_name:'الأستاذ الأول',teachers:[{id:1,name:'الأستاذ الأول'}]}],groups:[{id:1,title:'الأولى',subject_id:1,subject_name:'الفقه',member_count:35,reserved_count:38,capacity:40}],seasons:[{id:1,name:'الأول',is_active:true}]};
-async function setup({authorized=true,noticeState=null,grouped=true,impact=null,leaves=[],cleanup=null}={}){
+async function setup({authorized=true,noticeState=null,grouped=true,impact=null,leaves=[],cleanup=null,browserTicket=''}={}){
   const fixture=JSON.parse(JSON.stringify(stage));fixture.discussion_grouping=grouped;
-  const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../admin/index.html'),'utf8'),{url:'https://institute.example/admin/',runScripts:'outside-only'});
+  const dom=new JSDOM(fs.readFileSync(path.join(__dirname,'../admin/index.html'),'utf8'),{url:'https://institute.example/admin/'+(browserTicket?'#browserLogin='+browserTicket:''),runScripts:'outside-only'});
   const w=dom.window;w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;};w.confirm=()=>true;
   w.Telegram={WebApp:{showConfirm(message,done){done(w.confirm(message));},ready(){},expand(){},initData:authorized?'signed-test-data':''}};
   const requests=[];let slots=[];
@@ -12,7 +12,8 @@ async function setup({authorized=true,noticeState=null,grouped=true,impact=null,
   const subjects=[{subject_id:1,stage_season_id:1,subject_name:'الفقه',mode:'report',participation_enabled:true},{subject_id:2,stage_season_id:1,subject_name:'العقائد',mode:'mubahatha',participation_enabled:true}];
   w.fetch=async(url,options={})=>{
     requests.push({url,options});const u=new URL(url,'https://institute.example');let data,status=200;
-    if(u.pathname.endsWith('/auth'))data={token:'a'.repeat(64),user:{name:'إدارة الاختبار'}};
+    if(u.pathname.endsWith('/auth')||u.pathname.endsWith('/browser-auth'))data={token:'a'.repeat(64),user:{name:'إدارة الاختبار'}};
+    else if(u.pathname.endsWith('/browser-ticket'))data={ticket:'b'.repeat(64)};
     else if(u.pathname.endsWith('/seasons'))data=[{id:1,name:'الموسم الأول',is_current:true}];
     else if(u.pathname.endsWith('/one-time-lesson-cleanup/status'))data={completed:Boolean(cleanup?.completed)};
     else if(u.pathname.endsWith('/one-time-lesson-cleanup')){
@@ -108,6 +109,24 @@ test('admin DOM: Telegram entry, stages, pagination, escaped names and visible m
     click('[data-action="exam"]');await until(()=>w.document.querySelector('#exam-question'));assert.equal(w.document.querySelector('#dialog-body script'),null);
     click('[data-action="close-dialog"]');click('[data-action="logout"]');await until(()=>w.document.querySelector('#content').textContent.includes('انتهت جلسة'));
     assert.ok(!w.document.querySelector('#content').textContent.includes('طالب <img'));
+  }finally{dom.window.close();}
+});
+test('admin can open an authenticated browser session from Telegram',async()=>{
+  const {dom,w,requests,until,click}=await setup();try{
+    await until(()=>w.document.querySelector('.stage-card'));
+    let opened;w.Telegram.WebApp.openLink=url=>{opened=url;};
+    assert.equal(w.document.querySelector('#open-browser').hidden,false);
+    click('#open-browser');await until(()=>opened);
+    assert.equal(opened,'https://institute.example/admin/#browserLogin='+'b'.repeat(64));
+    assert.equal(requests.find(r=>r.url.endsWith('/browser-ticket')).options.headers.Authorization,'Bearer '+'a'.repeat(64));
+  }finally{dom.window.close();}
+});
+test('browser consumes its ticket once and removes it from the address',async()=>{
+  const ticket='b'.repeat(64);const {dom,w,requests,until}=await setup({authorized:false,browserTicket:ticket});try{
+    await until(()=>w.document.querySelector('.stage-card'));
+    const request=requests.find(r=>r.url.endsWith('/browser-auth'));
+    assert.deepEqual(JSON.parse(request.options.body),{ticket});assert.equal(w.location.hash,'');
+    assert.equal(w.document.querySelector('#open-browser').hidden,true);
   }finally{dom.window.close();}
 });
 test('admin DOM: emergency request has explicit approval; reduce and cancel use reviewed current values and unlock the UI',async()=>{

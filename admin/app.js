@@ -955,6 +955,11 @@ document.addEventListener('click',async event=>{
     }else if(a==='toggle-group'){
       const active=target.dataset.active==='true';if(!await confirmAction(active?'إعادة تفعيل المجموعة؟':'تعطيل المجموعة؟ يبقى سجلها محفوظًا.'))return;
       busy=true;await api('/groups/'+target.dataset.id,{active},'PATCH');closeDetail();await refresh();notify('حُفظت حالة المجموعة.');
+    }else if(a==='open-browser'){
+      const result=await api('/browser-ticket',{},'POST');
+      const url=location.origin+'/admin/#browserLogin='+result.ticket;
+      if(typeof window.Telegram?.WebApp?.openLink!=='function')throw Error('تعذر فتح المتصفح من تليجرام.');
+      window.Telegram.WebApp.openLink(url);
     }else if(a==='logout'){if(token)await api('/logout',{},'POST');token='';sequence++;closeDetail();setContent(empty('انتهت جلسة الإدارة','أغلق النافذة وافتحها مجددًا من البوت للدخول.'));}
   }catch(e){notify(e.message,true);}finally{busy=false;}
 });
@@ -1146,9 +1151,12 @@ document.addEventListener('submit',async event=>{
   try{tg?.disableVerticalSwipes?.();}catch{}
   try{tg?.setHeaderColor?.('#244643');}catch{}
   try{tg?.setBackgroundColor?.('#faf7f2');}catch{}
-  if(!tg?.initData){setContent(empty('افتح اللوحة من البوت','سجّل دخولك إلى تليجرام، ثم اضغط «لوحة الإدارة» في حساب الأدمن. فتح الرابط وحده لا يمنح صلاحية الاطلاع على بيانات الطلبة.'));return;}
+  const ticket=new URLSearchParams(location.hash.slice(1)).get('browserLogin');
+  if(ticket)history.replaceState(null,'',location.pathname);
+  if(!tg?.initData&&!ticket){setContent(empty('افتح اللوحة من البوت','سجّل دخولك إلى تليجرام، ثم اضغط «لوحة الإدارة» في حساب الأدمن. فتح الرابط وحده لا يمنح صلاحية الاطلاع على بيانات الطلبة.'));return;}
   try{
-    const session=await api('/auth',{initData:tg.initData},'POST');token=session.token;$('#identity').textContent=session.user.name;
+    const session=tg?.initData?await api('/auth',{initData:tg.initData},'POST'):await api('/browser-auth',{ticket},'POST');token=session.token;$('#identity').textContent=session.user.name;
+    $('#open-browser').hidden=!tg?.initData;
     seasons=await api('/seasons');
     if(seasons.length>1){const sel=$('#season-select');sel.hidden=false;sel.innerHTML=seasons.map(se=>`<option value="${se.is_current?'':se.id}">${esc(se.name)}${se.is_current?' — الموسم الحالي':''}</option>`).join('');}
     await home();

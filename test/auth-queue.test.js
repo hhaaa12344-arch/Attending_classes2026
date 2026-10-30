@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test');const assert=require('node:assert/strict');const {createHmac}=require('node:crypto');
-const {validateInitData,createSessions}=require('../adminAuth');
+const {validateInitData,createSessions,createBrowserTickets}=require('../adminAuth');
 const {createTelegramQueue}=require('../telegramQueue');
 const {createUpdateGate}=require('../updateGate');
 const fakeToken='123456:LOCAL_TEST_ONLY';
@@ -22,6 +22,13 @@ test('Telegram initData: signature, freshness, allowlist and duplicate keys',()=
 test('admin sessions are opaque, expiring and revocable',()=>{
   const s=createSessions();const token=s.issue({id:10});assert.equal(token.length,64);assert.equal(s.get(token).id,10);s.revoke(token);assert.equal(s.get(token),null);
   const expired=createSessions({ttlMs:-1});assert.equal(expired.get(expired.issue({id:10})),null);
+});
+test('browser tickets expire and cannot outlive their originating admin session',()=>{
+  const sessions=createSessions();let now=1000;const tickets=createBrowserTickets(sessions,{ttlMs:60,now:()=>now});
+  const source=sessions.issue({id:10}),ticket=tickets.issue(source);now+=60;
+  assert.throws(()=>tickets.redeem(ticket),{code:'UNAUTHORIZED'});
+  const next=tickets.issue(source);sessions.revoke(source);assert.throws(()=>tickets.redeem(next),{code:'UNAUTHORIZED'});
+  assert.throws(()=>tickets.issue(source),{code:'UNAUTHORIZED'});
 });
 test('Telegram queue retries transient errors, stops permanent errors and caps backlog',async()=>{
   let calls=0;const api={sendMessage:async()=>{calls++;if(calls===1)throw Object.assign(Error('temporary'),{code:'ECONNRESET'});return 'sent';},sendPhoto:async()=>{},sendVideo:async()=>{},sendDocument:async()=>{throw {response:{error_code:403}};}};
