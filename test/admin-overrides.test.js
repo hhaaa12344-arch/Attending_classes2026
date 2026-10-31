@@ -231,3 +231,20 @@ test('attendance closes at the boundary; student records remain unchanged and ex
   assert.equal(await db.markAttendance(f.students[0].id,f.lesson.id),undefined);
   assert.equal((await ops.lateAttendance(f.lesson.id,{subjectId:f.subject.id,studentIds:[f.students[0].id]},42)).added,1);
 });
+
+test('reopening an exam for one student announces the future opening time to that student only',async()=>{
+  const f=await examFixture();
+  const opensAt=new Date(Date.now()+2*3600000).toISOString(),closesAt=new Date(Date.now()+26*3600000).toISOString();
+  const body={studentId:f.students[0].id,subjectId:f.subject.id,opensAt,closesAt,note:'موعد لاحق'};
+  await ops.reopenExam(f.exam.id,body,42);
+  const rows=(await db.pool.query("SELECT chat_id,payload FROM notification_outbox WHERE dedupe_key LIKE $1",[`exam-reopen-student:${f.exam.id}:%`])).rows;
+  assert.equal(rows.length,1);assert.equal(String(rows[0].chat_id),String(f.students[0].telegram_id));
+  const text=rows[0].payload[0];assert.match(text,/أُعيد فتح الامتحان/);assert.match(text,/سيُفتح لك يوم/);assert.match(text,/بغداد/);assert.match(text,/سيصلك زر أداء الامتحان/);
+  // the same window again does not duplicate the notice
+  await ops.reopenExam(f.exam.id,body,42);
+  assert.equal((await db.pool.query("SELECT 1 FROM notification_outbox WHERE dedupe_key LIKE $1",[`exam-reopen-student:${f.exam.id}:%`])).rowCount,1);
+  // a window that starts now needs no advance notice: the regular "opened for you" notice carries the button
+  const g=await examFixture();
+  await ops.reopenExam(g.exam.id,futureWindow(g),42);
+  assert.equal((await db.pool.query("SELECT 1 FROM notification_outbox WHERE dedupe_key LIKE $1",[`exam-reopen-student:${g.exam.id}:%`])).rowCount,0);
+});
