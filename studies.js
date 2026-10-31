@@ -32,7 +32,7 @@ const REPORT_RATINGS = {
 const REPORT_WEEK_POINTS_SQL = `
   SELECT student_id, COUNT(*)::int AS weeks, COALESCE(SUM(week_weight),0)::float8 AS points, SUM(cnt)::int AS reports FROM (
     SELECT r.student_id,
-           date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $3)+interval '1 day') AS wk,
+           COALESCE(r.counted_week,(date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $3)+interval '1 day')-interval '1 day')::date) AS wk,
            MAX(CASE r.rating WHEN 'good' THEN 1 WHEN 'acceptable' THEN 0.5 WHEN 'weak' THEN 0
                  ELSE CASE WHEN r.score>0 THEN 1 ELSE 0 END END) AS week_weight,
            COUNT(*) AS cnt
@@ -330,6 +330,24 @@ async function initStudiesSchema() {
     CREATE INDEX IF NOT EXISTS idx_attempts_student ON exam_attempts(student_id);
     CREATE INDEX IF NOT EXISTS idx_exam_answers_attempt ON exam_answers(attempt_id);
     CREATE INDEX IF NOT EXISTS idx_reports_subject ON student_reports(subject_id, stage_season_id);
+    -- الأسبوع الذي يُحتسب له التقرير (بداية الأسبوع: الأحد). NULL = أسبوع تاريخ الإرسال.
+    ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS counted_week DATE;
+    -- استثناء إداري: السماح لطالب بتقرير مادة لأسبوع محدد في أي يوم (يُستهلك بأول تقرير).
+    CREATE TABLE IF NOT EXISTS report_week_grants (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+      stage_season_id INTEGER NOT NULL REFERENCES stage_seasons(id) ON DELETE CASCADE,
+      week_start DATE NOT NULL,
+      granted_by BIGINT,
+      note TEXT,
+      created_at TIMESTAMP NOT NULL DEFAULT now(),
+      used_at TIMESTAMP,
+      report_id INTEGER REFERENCES student_reports(id) ON DELETE SET NULL,
+      cancelled_at TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_report_week_grant
+      ON report_week_grants(student_id,subject_id,stage_season_id,week_start);
   `);
   // Keep closed participation periods; existing per-subject choices are the fallback.
   // No backfill changes a student's choice or invents one for undecided students.
@@ -1703,12 +1721,19 @@ async function resetStudentStudies(studentId, stageSeasonId) {
 // ---------------------------------------------------------------------------
 // التقارير
 // ---------------------------------------------------------------------------
-const submitReport = (studentId, subjectId, stageSeasonId, { fileId, kind, note, sourceMessageId = null }) =>
-  pool
-    .query(
+const submitReport = async (studentId, subjectId, stageSeasonId, { fileId, kind, note, sourceMessageId = null }) => {
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    // إن وُجد استثناء إداري مفتوح فأول تقرير يُحتسب لأسبوعه، وإلا فلأسبوع الإرسال.
+    const grant = (await c.query(
+      `SELECT id,week_start FROM report_week_grants WHERE student_id=$1 AND subject_id=$2 AND stage_season_id=$3
+         AND used_at IS NULL AND cancelled_at IS NULL ORDER BY week_start LIMIT 1 FOR UPDATE`,
+      [studentId, subjectId, stageSeasonId])).rows[0];
+    const row = (await c.query(
       `INSERT INTO student_reports(student_id, subject_id, stage_season_id, telegram_file_id, file_kind, note,
-                                   group_id, group_title_snapshot, source_message_id)
-       SELECT pm.student_id,pm.subject_id,pm.stage_season_id,$4,$5,$6,g.id,CASE WHEN ss.discussion_grouping THEN g.title ELSE 'المرحلة كاملة' END,$7
+                                   group_id, group_title_snapshot, source_message_id, counted_week)
+       SELECT pm.student_id,pm.subject_id,pm.stage_season_id,$4,$5,$6,g.id,CASE WHEN ss.discussion_grouping THEN g.title ELSE 'المرحلة كاملة' END,$7,$8::date
        FROM participation_modes pm
        JOIN students st ON st.id=pm.student_id AND st.is_active=true
        JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=pm.stage_season_id AND e.status='active'
@@ -1718,9 +1743,17 @@ const submitReport = (studentId, subjectId, stageSeasonId, { fileId, kind, note,
        JOIN mubahatha_groups g ON g.id=m.group_id AND g.is_active=true
        WHERE pm.student_id=$1 AND pm.subject_id=$2 AND pm.stage_season_id=$3 AND pm.mode='report' AND participation_enabled(pm.subject_id,pm.stage_season_id)
        ON CONFLICT(student_id,source_message_id) WHERE source_message_id IS NOT NULL DO NOTHING RETURNING *`,
-      [studentId, subjectId, stageSeasonId, fileId, kind, note, sourceMessageId]
-    )
-    .then((r) => r.rows[0]);
+      [studentId, subjectId, stageSeasonId, fileId, kind, note, sourceMessageId, grant ? grant.week_start : null])).rows[0];
+    if (row && grant) await c.query('UPDATE report_week_grants SET used_at=now(),report_id=$2 WHERE id=$1', [grant.id, row.id]);
+    await c.query('COMMIT');
+    return row;
+  } catch (err) {
+    await c.query('ROLLBACK');
+    throw err;
+  } finally {
+    c.release();
+  }
+};
 
 // طلبة التقارير في المادة مع عدد ما سلّموه — يستعرضهم الأستاذ واحدًا تلو الآخر عند التقييم.
 const listReportStudentsForGrading = (subjectId, stageSeasonId, { groupId = null, page = 0, size = 25, onlyUngraded = false } = {}) =>
@@ -1773,20 +1806,30 @@ const listStudentReports = (studentId, subjectId, stageSeasonId, { page = 0, siz
 const REPORT_SEND_DAYS = (process.env.REPORT_SEND_DAYS || '3,4,5').split(',').map(Number).filter((d) => d >= 1 && d <= 7);
 const REPORT_DAY_NAMES = { 1: 'الاثنين', 2: 'الثلاثاء', 3: 'الأربعاء', 4: 'الخميس', 5: 'الجمعة', 6: 'السبت', 7: 'الأحد' };
 const reportSendDaysLabel = () => REPORT_SEND_DAYS.map((d) => REPORT_DAY_NAMES[d]).join(' والـ');
+// يوم السماح: يُقبل فيه تقرير الأسبوع المتأخر لمن لم يرسل. السبت فقط افتراضيًا، لأن أسبوع التقارير
+// ينتهي يوم السبت (الأحد يبدأ أسبوعًا جديدًا)، فيُحتسب التقرير في الأسبوع نفسه. للإيقاف: REPORT_LATE_DAYS=none
+const REPORT_LATE_DAYS = String(process.env.REPORT_LATE_DAYS ?? '6') === 'none' ? []
+  : String(process.env.REPORT_LATE_DAYS ?? '6').split(',').map(Number).filter((d) => d === 6);
+const REPORT_ACCEPT_DAYS = [...new Set([...REPORT_SEND_DAYS, ...REPORT_LATE_DAYS])];
 async function getReportSubmissionBlock(studentId, subjectId, stageSeasonId, { at = null } = {}) {
   const r = (await pool.query(
     `WITH t AS (SELECT COALESCE($5::timestamptz, now()) AS at)
      SELECT EXTRACT(ISODOW FROM (t.at AT TIME ZONE $1))::int AS dow,
+            EXISTS(SELECT 1 FROM report_week_grants g WHERE g.student_id=$2 AND g.subject_id=$3
+                   AND g.stage_season_id=$4 AND g.used_at IS NULL AND g.cancelled_at IS NULL) AS has_grant,
             EXISTS(SELECT 1 FROM student_reports r
                    WHERE r.student_id=$2 AND r.subject_id=$3 AND r.stage_season_id=$4
-                     AND EXTRACT(ISODOW FROM ((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $1))::int = ANY($6::int[])
-                     AND date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $1)+interval '1 day')
-                       = date_trunc('week',(t.at AT TIME ZONE $1)+interval '1 day')) AS sent_this_week
+                     AND (r.counted_week IS NOT NULL
+                          OR EXTRACT(ISODOW FROM ((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $1))::int = ANY($6::int[]))
+                     AND COALESCE(r.counted_week,(date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $1)+interval '1 day')-interval '1 day')::date)
+                       = (date_trunc('week',(t.at AT TIME ZONE $1)+interval '1 day')-interval '1 day')::date) AS sent_this_week
      FROM t`,
-    [SCHEDULE_TZ, studentId, subjectId, stageSeasonId, at, REPORT_SEND_DAYS]
+    [SCHEDULE_TZ, studentId, subjectId, stageSeasonId, at, REPORT_ACCEPT_DAYS]
   )).rows[0];
-  if (!REPORT_SEND_DAYS.includes(r.dow))
-    return { code: 'WRONG_DAY', message: `إرسال التقارير متاح أيام ${reportSendDaysLabel()} فقط. أرسل تقريرك في أحد هذه الأيام.` };
+  // استثناء إداري مفتوح: يُقبل التقرير في أي يوم ويُحتسب للأسبوع الممنوح (ينظر submitReport).
+  if (r.has_grant) return null;
+  if (!REPORT_ACCEPT_DAYS.includes(r.dow))
+    return { code: 'WRONG_DAY', message: `إرسال التقارير متاح أيام ${reportSendDaysLabel()}${REPORT_LATE_DAYS.length ? '، ويُقبل التقرير المتأخر يوم ' + REPORT_LATE_DAYS.map((d) => REPORT_DAY_NAMES[d]).join(' والـ') : ''} فقط. أرسل تقريرك في أحد هذه الأيام.` };
   if (r.sent_this_week)
     return { code: 'WEEK_USED', message: 'أرسلت تقرير هذه المادة هذا الأسبوع بالفعل. يُحتسب تقرير واحد فقط في الأسبوع، وأي تكرار لا يُحتسب.' };
   return null;
@@ -2512,6 +2555,7 @@ module.exports = {
   setReportItemRating,
   getReportSubmissionBlock,
   REPORT_SEND_DAYS,
+  REPORT_LATE_DAYS,
   reportSendDaysLabel,
   REPORT_RATINGS,
   correctExamQuestion,

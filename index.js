@@ -705,7 +705,7 @@ function withStudentName(student, text) {
   return `👤 الطالب: ${student.full_name}\n\n${text}`;
 }
 
-const REPORT_WEEKLY_REMINDER = '🗓️ تذكير: أرسل تقرير كل مادة مرة واحدة أسبوعيًا، وليس يوميًا، أيام الأربعاء والخميس والجمعة فقط. أي تقرير مكرر في الأسبوع لا يُحتسب.';
+const REPORT_WEEKLY_REMINDER = '🗓️ تذكير: أرسل تقرير كل مادة مرة واحدة أسبوعيًا، وليس يوميًا، أيام الأربعاء والخميس والجمعة، ويُقبل التقرير المتأخر يوم السبت. أي تقرير مكرر في الأسبوع لا يُحتسب.';
 
 function formatStudentSeasonActivity(activity) {
   if (!activity) return '📋 لا يوجد موسم دراسي نشط في حسابك حاليًا.';
@@ -7048,7 +7048,7 @@ async function main() {
   }
   // تذكير التقارير: الجمعة (آخر يوم) والسبت (انتهت المهلة) لمن لم يرسل تقرير الأسبوع.
   const weeklyReportReminders = require('./weeklyReportReminders').createWeeklyReportReminders(db.pool, {
-    sendDays: studies.REPORT_SEND_DAYS, tz: studies.SCHEDULE_TZ,
+    sendDays: studies.REPORT_SEND_DAYS, lateDays: studies.REPORT_LATE_DAYS, tz: studies.SCHEDULE_TZ,
     dayNames: { 1: 'الاثنين', 2: 'الثلاثاء', 3: 'الأربعاء', 4: 'الخميس', 5: 'الجمعة', 6: 'السبت', 7: 'الأحد' },
   });
   const sweepWeeklyReports = () => weeklyReportReminders.sweep()

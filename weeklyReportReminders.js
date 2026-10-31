@@ -8,11 +8,14 @@ function lastDayText(subjects) {
   return `⏰ تذكير من إدارة المعهد\n\nاليوم آخر يوم لإرسال التقارير هذا الأسبوع، ولم يصلنا تقريرك في:\n${subjects.map((s) => `• ${s}`).join('\n')}\n\nافتح «🗂️ المباحثات والتقارير» ثم «📄 إرسال تقرير»، واختر المادة وأرسل التقرير قبل نهاية اليوم.\nيُحتسب تقرير واحد لكل مادة في الأسبوع.`;
 }
 
-function missedText(subjects, daysLabel) {
-  return `📌 تنويه من إدارة المعهد\n\nانتهت أيام إرسال التقارير لهذا الأسبوع (${daysLabel})، ولم يصلنا تقريرك في:\n${subjects.map((s) => `• ${s}`).join('\n')}\n\nلا يمكن إرسال تقرير هذا الأسبوع الآن، فاحرص على إرسال تقرير الأسبوع القادم في موعده. وإن كان لديك عذر فتواصل مع إدارة المعهد.`;
+function missedText(subjects, daysLabel, lateAccepted = true) {
+  const head = `📌 تنويه من إدارة المعهد\n\nانتهت أيام إرسال التقارير لهذا الأسبوع (${daysLabel})، ولم يصلنا تقريرك في:\n${subjects.map((s) => `• ${s}`).join('\n')}\n\n`;
+  return lateAccepted
+    ? head + 'يمكنك إرسال تقريرك المتأخر اليوم فقط، حتى نهاية يوم السبت: افتح «🗂️ المباحثات والتقارير» ثم «📄 إرسال تقرير»، واختر المادة وأرسل التقرير. وبعد اليوم لا يُقبل تقرير هذا الأسبوع.'
+    : head + 'لا يمكن إرسال تقرير هذا الأسبوع الآن، فاحرص على إرسال تقرير الأسبوع القادم في موعده. وإن كان لديك عذر فتواصل مع إدارة المعهد.';
 }
 
-function createWeeklyReportReminders(pool, { sendDays, tz, dayNames, fridayHour = DEFAULT_FRIDAY_HOUR, saturdayHour = DEFAULT_SATURDAY_HOUR }) {
+function createWeeklyReportReminders(pool, { sendDays, tz, dayNames, lateDays = [], fridayHour = DEFAULT_FRIDAY_HOUR, saturdayHour = DEFAULT_SATURDAY_HOUR }) {
   const lastDay = Math.max(...sendDays);
   const nextDay = (lastDay % 7) + 1;
   const daysLabel = sendDays.map((d) => dayNames[d]).join(' والـ');
@@ -49,9 +52,9 @@ function createWeeklyReportReminders(pool, { sendDays, tz, dayNames, fridayHour 
            AND (((SELECT at FROM t) AT TIME ZONE $1)::date) BETWEEN sl.start_date AND sl.end_date)
          AND NOT EXISTS(SELECT 1 FROM student_reports r
            WHERE r.student_id=st.id AND r.subject_id=pm.subject_id AND r.stage_season_id=pm.stage_season_id
-             AND EXTRACT(ISODOW FROM ((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $1))::int = ANY($3::int[])
-             AND date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $1)+interval '1 day')
-               = date_trunc('week',(((SELECT at FROM t)) AT TIME ZONE $1)+interval '1 day'))
+             AND (r.counted_week IS NOT NULL OR EXTRACT(ISODOW FROM ((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $1))::int = ANY($3::int[]))
+             AND COALESCE(r.counted_week,(date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $1)+interval '1 day')-interval '1 day')::date)
+               = (date_trunc('week',(((SELECT at FROM t)) AT TIME ZONE $1)+interval '1 day')-interval '1 day')::date)
        GROUP BY st.id,st.telegram_id ORDER BY st.id`, [tz, at, sendDays])).rows;
 
     // ينتهي صلاحية التذكير بنهاية يوم المعهد الحالي
@@ -59,7 +62,7 @@ function createWeeklyReportReminders(pool, { sendDays, tz, dayNames, fridayHour 
       `SELECT ((((COALESCE($2::timestamptz,now())) AT TIME ZONE $1)::date+1)::timestamp AT TIME ZONE $1) AS e`, [tz, at])).rows[0].e;
     let queued = 0;
     for (const row of rows) {
-      const text = kind === 'last-day' ? lastDayText(row.subjects) : missedText(row.subjects, daysLabel);
+      const text = kind === 'last-day' ? lastDayText(row.subjects) : missedText(row.subjects, daysLabel, lateDays.includes(nextDay));
       const r = await pool.query(
         `INSERT INTO notification_outbox(dedupe_key,chat_id,payload,priority,expires_at)
          VALUES($1,$2,$3::jsonb,5,$4) ON CONFLICT(dedupe_key) DO NOTHING RETURNING id`,
