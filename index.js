@@ -7046,6 +7046,16 @@ async function main() {
   if (publicationFollowup.minutes !== null) {
     timers.push(setInterval(() => publicationFollowup.sweepToday().catch((err) => console.error('Publication follow-up failed:', err.message)), 60 * 1000));
   }
+  // تذكير التقارير: الجمعة (آخر يوم) والسبت (انتهت المهلة) لمن لم يرسل تقرير الأسبوع.
+  const weeklyReportReminders = require('./weeklyReportReminders').createWeeklyReportReminders(db.pool, {
+    sendDays: studies.REPORT_SEND_DAYS, tz: studies.SCHEDULE_TZ,
+    dayNames: { 1: 'الاثنين', 2: 'الثلاثاء', 3: 'الأربعاء', 4: 'الخميس', 5: 'الجمعة', 6: 'السبت', 7: 'الأحد' },
+  });
+  const sweepWeeklyReports = () => weeklyReportReminders.sweep()
+    .then((r) => { if (r.queued) console.log(`Weekly report reminders (${r.kind}): queued ${r.queued}`); })
+    .catch((err) => console.error('Weekly report reminders failed:', err.message));
+  timers.push(setInterval(sweepWeeklyReports, 60 * 1000));
+  sweepWeeklyReports();
   // تنظيف الذاكرة كل خمس دقائق: حالات إدخال منتهية، وسجلات مجموعات قديمة
   timers.push(setInterval(cleanupMemory, 5 * 60 * 1000));
   const tick=()=>runScheduleTick().catch(err=>console.error('Schedule failed:',err.message));
