@@ -215,7 +215,21 @@ function createAdminOverrides(pool) {
         VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(exam_id,student_id) DO UPDATE
         SET opens_at=EXCLUDED.opens_at,closes_at=EXCLUDED.closes_at,note=EXCLUDED.note,created_by=EXCLUDED.created_by,updated_at=now()
         RETURNING *`,[id,studentId,start,end,note,positiveInt(actor)])).rows[0];
-      await audit(c,actor,'reopen_student_exam','exam',exam.id,{window:before,attempt:attempt||null},result);
+      // إعلان فوري للطالب بموعد فتح الامتحان له؛ زر الدخول يصله عند بدء النافذة من إشعارات الامتحان.
+      // النافذة التي تبدأ الآن لا تحتاج إعلانًا مسبقًا لأن إشعار «فُتح لك الامتحان» يصل بزره مباشرة.
+      let announced=0;
+      if(start>new Date()){
+        const student=(await c.query('SELECT telegram_id FROM students WHERE id=$1 AND is_active=true AND telegram_id IS NOT NULL',[studentId])).rows[0];
+        if(student){
+          const fmt=d=>d.toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad',hour12:false});
+          const text=`📝 أُعيد فتح الامتحان «${exam.title||'الشهري '+exam.exam_number}» في مادة «${exam.subject_name}» لك بقرار من الإدارة.\nسيُفتح لك يوم ${fmt(start)} (بغداد)، وينتهي ${fmt(end)} (بغداد).\nعند بدء الموعد سيصلك زر أداء الامتحان.`;
+          announced=(await c.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
+            VALUES($1,$2,$3::jsonb,$4) ON CONFLICT(dedupe_key) DO NOTHING`,[
+            `exam-reopen-student:${id}:${studentId}:${Math.floor(start.getTime()/1000)}:${Math.floor(end.getTime()/1000)}`,
+            student.telegram_id,JSON.stringify([text,{}]),end])).rowCount;
+        }
+      }
+      await audit(c,actor,'reopen_student_exam','exam',exam.id,{window:before,attempt:attempt||null},{...result,announced});
       return result;
     });
   }
