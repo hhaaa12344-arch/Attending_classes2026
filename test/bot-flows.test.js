@@ -228,6 +228,24 @@ test('bot: reopened monthly exam accepts an answer after the original deadline o
   assert.ok(messages.some(m=>m.text?.includes('انتهت مهلة الامتحان')));
   assert.equal((await db.pool.query('SELECT * FROM exam_answers WHERE attempt_id=$1',[attempt.id])).rowCount,1);
 });
+test('bot: exams are always taken through bot buttons, even when the web panel is enabled',async()=>{
+  const saved={u:process.env.ADMIN_WEB_URL,e:process.env.ADMIN_WEB_ENABLED};
+  process.env.ADMIN_WEB_URL='https://institute.example/admin/';process.env.ADMIN_WEB_ENABLED='true';
+  let e;
+  try{
+    e=(await db.pool.query(`INSERT INTO exams(subject_id,stage_season_id,exam_number,opens_at,closes_at,available_hours,status)
+      VALUES($1,$2,2,now()-interval '1 hour',now()+interval '1 day',24,'published') RETURNING *`,[subject.id,ss])).rows[0];
+    for(let i=1;i<=2;i++)await db.pool.query(`INSERT INTO exam_questions(exam_id,position,question_type,prompt,correct_answer) VALUES($1,$2,'tf','سؤال داخل البوت','صح')`,[e.id,i]);
+    messages.length=0;
+    await send(90000,'',`stex_start:${e.id}`);
+    assert.ok(messages.some(m=>m.text?.includes('سؤال داخل البوت')&&m.reply_markup?.inline_keyboard?.flat().some(b=>String(b.callback_data).startsWith('stex_ans:'))));
+    assert.ok(!messages.some(m=>JSON.stringify(m.reply_markup||{}).includes('web_app')));
+  }finally{
+    if(e){await db.pool.query('DELETE FROM exam_attempts WHERE exam_id=$1',[e.id]);await db.pool.query('DELETE FROM exams WHERE id=$1',[e.id]);}
+    if(saved.u===undefined)delete process.env.ADMIN_WEB_URL;else process.env.ADMIN_WEB_URL=saved.u;
+    if(saved.e===undefined)delete process.env.ADMIN_WEB_ENABLED;else process.env.ADMIN_WEB_ENABLED=saved.e;
+  }
+});
 test('bot: administrator and assigned teacher search one student, open their profile and queue private messages',async()=>{
   await send(42,'💬 التواصل مع طالب معين');assert.ok(messages.some(m=>m.text?.includes('اسم الطالب')));
   await send(42,'طالب حقيقي');assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data===`contact:select:admin:${student.id}:0`)));
