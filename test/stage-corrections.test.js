@@ -25,6 +25,8 @@ async function send(id,text='',data=null){
 }
 test('renamed student menus route to the student schedule and channel screen exposes correction',async()=>{
   await send(student.telegram_id,'↩️ رجوع');
+  assert.ok(messages.some(m=>m.reply_markup?.keyboard?.flat().some(b=>b.text==='🗂️ المباحثات والتقارير')));
+  await send(student.telegram_id,'🗂️ المباحثات والتقارير');
   assert.ok(messages.some(m=>m.reply_markup?.keyboard?.flat().some(b=>b.text==='🗓️ جدول المباحثات')));
   await send(student.telegram_id,'🗓️ جدول المباحثات');assert.ok(messages.some(m=>m.text?.includes('لا توجد مواعيد مباحثات في جدولك')));
   assert.ok(!messages.some(m=>m.text?.includes('متاحة للأساتذة')));

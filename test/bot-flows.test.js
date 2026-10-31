@@ -151,7 +151,7 @@ test('bot: first-use confirmation required, marking disappears and today retains
   await send(90000,'📚 دروس اليوم');assert.ok(messages.some(m=>m.reply_markup?.inline_keyboard?.flat().some(b=>b.callback_data==='confirm_official_student')));
   await send(90000,'','confirm_official_student');assert.ok((await db.getStudentById(student.id)).official_confirmed_at);
   const menu=messages.find(m=>m.reply_markup?.keyboard);assert.ok(menu,'confirmation supplies persistent main keyboard');
-  const keys=menu.reply_markup.keyboard.flat().map(b=>b.text);assert.ok(keys.includes('📊 تقرير الحضور'));assert.ok(keys.includes('📖 المباحثات والتقارير'));assert.ok(!keys.includes('📊 تقريري'));
+  const keys=menu.reply_markup.keyboard.flat().map(b=>b.text);assert.ok(keys.includes('📊 تقرير الحضور'));assert.ok(keys.includes('🗂️ المباحثات والتقارير'));assert.ok(keys.length<=6);assert.ok(!keys.includes('📊 تقريري'));
   const saved=await db.pool.query("SELECT message_id FROM student_ui_messages WHERE student_id=$1 AND message_kind='menu'",[student.id]);assert.equal(saved.rows.length,1);
   const lesson=await db.activateLesson(subject.id,24);await send(90000,'📚 دروس اليوم');
   assert.ok(!messages.some(m=>m.method==='deleteMessage'&&Number(m.message_id)===Number(saved.rows[0].message_id)),'today never deletes the menu message');
