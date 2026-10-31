@@ -6,7 +6,7 @@ let db,studies,svc;
 test.before(async()=>{
   ({db,studies}=await testDatabase());
   svc=require('../weeklyReportReminders').createWeeklyReportReminders(db.pool,{sendDays:[3,4,5],tz:'Asia/Baghdad',
-    dayNames:{3:'الأربعاء',4:'الخميس',5:'الجمعة'}});
+    dayNames:{3:'الأربعاء',4:'الخميس',5:'الجمعة'},lateDays:[6]});
 });
 test.after(async()=>{await db.pool.end();});
 
@@ -42,6 +42,10 @@ test('friday and saturday reminders reach only students who forgot, once per day
   const satRows=(await db.pool.query("SELECT chat_id,payload FROM notification_outbox WHERE dedupe_key LIKE 'weekly-report:missed:2026-10-31:%'")).rows
     .filter(r=>[991001,991002,991003].includes(Number(r.chat_id)));
   assert.deepEqual(satRows.map(r=>Number(r.chat_id)),[991001]);
-  assert.match(satRows[0].payload[0],/انتهت أيام إرسال التقارير/);
+  assert.match(satRows[0].payload[0],/انتهت أيام إرسال التقارير/);assert.match(satRows[0].payload[0],/تقريرك المتأخر اليوم/);
+  // التقرير المتأخر يوم السبت مقبول لمن نسي ثم يمنع تكراره
+  assert.equal(await studies.getReportSubmissionBlock(f.id,subject.id,ss,{at:SAT}),null);
+  await db.pool.query("INSERT INTO student_reports(student_id,subject_id,stage_season_id,file_kind,note,submitted_at) VALUES($1,$2,$3,'text','متأخر','2026-10-31 15:00:00')",[f.id,subject.id,ss]);
+  assert.equal((await studies.getReportSubmissionBlock(f.id,subject.id,ss,{at:SAT})).code,'WEEK_USED');
   assert.equal((await svc.sweep({at:SAT})).queued,0);
 });

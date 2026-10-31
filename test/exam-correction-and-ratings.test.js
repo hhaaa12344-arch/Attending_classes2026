@@ -153,10 +153,10 @@ test('reports may only be sent Wednesday–Friday, one per week; repeats are ref
   const at=day=>new Date(Date.UTC(2026,0,day,9)).toISOString();
   const block=(day)=>studies.getReportSubmissionBlock(st.id,sub.id,ss,{at:at(day)});
   assert.equal((await block(4)).code,'WRONG_DAY');assert.equal((await block(5)).code,'WRONG_DAY');assert.equal((await block(6)).code,'WRONG_DAY');
-  assert.equal((await block(10)).code,'WRONG_DAY');assert.equal((await block(11)).code,'WRONG_DAY');
+  assert.equal((await block(11)).code,'WRONG_DAY');assert.equal(await block(10),null,'السبت يقبل التقرير المتأخر لمن لم يرسل');
   for(const d of [7,8,9])assert.equal(await block(d),null,'الأربعاء والخميس والجمعة مفتوحة');
   const r=await db.pool.query(`INSERT INTO student_reports(student_id,subject_id,stage_season_id,file_kind,note,submitted_at,score,rating) VALUES($1,$2,$3,'text','ت',$4,1,'good') RETURNING id`,[st.id,sub.id,ss,at(7)]);
-  assert.equal((await block(8)).code,'WEEK_USED');assert.equal((await block(9)).code,'WEEK_USED');
+  assert.equal((await block(8)).code,'WEEK_USED');assert.equal((await block(9)).code,'WEEK_USED');assert.equal((await block(10)).code,'WEEK_USED','من أرسل في الأسبوع لا يرسل متأخرًا');
   assert.equal(await block(14),null,'الأسبوع التالي يبدأ من جديد');
   // تقرير قديم أُرسل الاثنين لا يمنع إرسال هذا الأسبوع
   const st2=await db.createStudent(++seq,'طالب2',stage.id);
