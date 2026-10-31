@@ -426,6 +426,24 @@ function scheduleOpenMonth(months){
   const current=`${parts.year}-${parts.month}`;
   return months.includes(current)?current:(months.find(m=>m>current)||months[months.length-1]||'');
 }
+function lessonAuditPanelHtml(audit){
+  const auditRows=audit?.subjects||[];
+  const problems=auditRows.filter(s=>Number(s.outside_count)+Number(s.repeated_count)>0);
+  const auditSummary=table(['المادة','مواعيد الجدول','الدروس المفعّلة','نُشرت اليوم','مفتوحة للحضور','أُعيد نشرها','مطابقة للجدول','مواعيد بلا تفعيل','خارج الجدول','أكثر من درس في اليوم','المراجعة'],
+    auditRows.map(s=>[esc(s.subject_name),esc(s.planned_count),esc(s.activated_count),esc(s.today_count||0),esc(s.open_count||0),esc(s.reopened_count||0),esc(s.matched_count),esc(s.missing_count),
+      esc(s.outside_count),esc(s.repeated_count),button('فتح دروس المادة','lesson-audit-open',`data-subject-id="${s.subject_id}"`)]));
+  const auditProblems=problems.map(s=>`<h3>${esc(s.subject_name)} — ${s.exceptions.length} سجلًا للمراجعة</h3>`+
+    table(['معرّف الدرس','التاريخ','الملاحظة','المصدر','حضور محفوظ','رابط المنشور'],s.exceptions.map(l=>[
+      `#${esc(l.id)}`,esc(l.lesson_date),l.issue==='repeated_day'?'الدرس الثاني أو اللاحق في التاريخ نفسه':'لا توجد علامة ✓ للمادة في هذا اليوم',
+      esc(lessonSource(l.source_type)),esc(l.attendance_count),/^https:\/\//i.test(l.source_url||'')?`<a href="${esc(l.source_url)}" target="_blank" rel="noopener noreferrer">فتح المصدر</a>`:'—'
+    ]))).join('');
+  const auditPanel=`<section class="detail-section"><h2>مطابقة جدول الدروس مع الدروس المفعّلة</h2>
+    <p class="subtle">مواعيد الجدول ✓ ليست هي الدروس المفعّلة. عدد الطالب يُحتسب من الدروس المفعّلة بحسب استحقاقه، وقد تظهر زيادات عند التفعيل بالهاشتاغ خارج أيام الجدول أو نشر أكثر من ملف للمادة في اليوم نفسه. الأرقام أدناه لكل موسم المرحلة.</p>
+    ${auditSummary}
+    ${problems.length?`<p><strong>${problems.length} مادة فيها اختلافات تستحق المراجعة.</strong> هذه مؤشرات للفحص وليست حكمًا بأن المنشورات زائدة؛ افحص محتواها وحضورها قبل إلغائها.</p>${auditProblems}`:'<p>لا توجد دروس مفعلة خارج الجدول ولا أكثر من درس واحد لنفس المادة في اليوم نفسه.</p>'}
+    <p class="subtle">حذف علامة من الجدول لا يحذف الدرس المفعّل ولا حضور الطلبة. التصحيح يتم بعد مراجعة رابط المنشور من «الدروس المفعّلة».</p></section>`;
+  return auditPanel;
+}
 async function renderLessonSchedule(eligible){
   const stage=eligible.find(x=>String(x.id)===String(lessonScheduleStageId));if(!stage)return;
   const [data,audit]=await Promise.all([api('/lesson-schedule?stageSeasonId='+stage.stage_season_id),api('/lesson-schedule/audit?stageSeasonId='+stage.stage_season_id)]);lessonScheduleData=data;
@@ -449,21 +467,7 @@ async function renderLessonSchedule(eligible){
       return `<tr class="day-${wd}" data-month="${key}" ${open?'':'hidden'}><td class="day-cell">${WEEKDAY_NAMES[wd]}${holiday?' · 🏖️ عطلة':discussionOff?' · مباحثات معطلة':''}</td><td class="date-cell">${esc(isoDateLabel(iso))}</td>${cells}</tr>`;
     }).join('');
   }).join('');
-  const auditRows=audit?.subjects||[];
-  const problems=auditRows.filter(s=>Number(s.outside_count)+Number(s.repeated_count)>0);
-  const auditSummary=table(['المادة','مواعيد الجدول','الدروس المفعّلة','نُشرت اليوم','مفتوحة للحضور','أُعيد نشرها','مطابقة للجدول','مواعيد بلا تفعيل','خارج الجدول','أكثر من درس في اليوم','المراجعة'],
-    auditRows.map(s=>[esc(s.subject_name),esc(s.planned_count),esc(s.activated_count),esc(s.today_count||0),esc(s.open_count||0),esc(s.reopened_count||0),esc(s.matched_count),esc(s.missing_count),
-      esc(s.outside_count),esc(s.repeated_count),button('فتح دروس المادة','lesson-audit-open',`data-subject-id="${s.subject_id}"`)]));
-  const auditProblems=problems.map(s=>`<h3>${esc(s.subject_name)} — ${s.exceptions.length} سجلًا للمراجعة</h3>`+
-    table(['معرّف الدرس','التاريخ','الملاحظة','المصدر','حضور محفوظ','رابط المنشور'],s.exceptions.map(l=>[
-      `#${esc(l.id)}`,esc(l.lesson_date),l.issue==='repeated_day'?'الدرس الثاني أو اللاحق في التاريخ نفسه':'لا توجد علامة ✓ للمادة في هذا اليوم',
-      esc(lessonSource(l.source_type)),esc(l.attendance_count),/^https:\/\//i.test(l.source_url||'')?`<a href="${esc(l.source_url)}" target="_blank" rel="noopener noreferrer">فتح المصدر</a>`:'—'
-    ]))).join('');
-  const auditPanel=`<section class="detail-section"><h2>مطابقة جدول الدروس مع الدروس المفعّلة</h2>
-    <p class="subtle">مواعيد الجدول ✓ ليست هي الدروس المفعّلة. عدد الطالب يُحتسب من الدروس المفعّلة بحسب استحقاقه، وقد تظهر زيادات عند التفعيل بالهاشتاغ خارج أيام الجدول أو نشر أكثر من ملف للمادة في اليوم نفسه. الأرقام أدناه لكل موسم المرحلة.</p>
-    ${auditSummary}
-    ${problems.length?`<p><strong>${problems.length} مادة فيها اختلافات تستحق المراجعة.</strong> هذه مؤشرات للفحص وليست حكمًا بأن المنشورات زائدة؛ افحص محتواها وحضورها قبل إلغائها.</p>${auditProblems}`:'<p>لا توجد دروس مفعلة خارج الجدول ولا أكثر من درس واحد لنفس المادة في اليوم نفسه.</p>'}
-    <p class="subtle">حذف علامة من الجدول لا يحذف الدرس المفعّل ولا حضور الطلبة. التصحيح يتم بعد مراجعة رابط المنشور من «الدروس المفعّلة».</p></section>`;
+  const auditPanel=lessonAuditPanelHtml(audit);
   setContent(head('جدول الدروس','ضع علامة ✓ في تاريخ نشر كل مادة. هذا الجدول التخطيطي لا يفعّل الدرس ولا يرسل الإشعارات.')+
     `<div class="toolbar"><label>المرحلة الدراسية<select id="lesson-schedule-stage">${eligible.map(e=>`<option value="${e.id}" ${String(e.id)===String(lessonScheduleStageId)?'selected':''}>${esc(e.name)}</option>`).join('')}</select></label>
     <div class="subtle">من ${esc(isoDateLabel(data.start_date))} إلى ما قبل ${esc(isoDateLabel(data.end_date_exclusive))} · الخميس والجمعة مستبعدان تلقائيًا.</div>
@@ -478,7 +482,7 @@ async function renderLessonSchedule(eligible){
         <label>سبب أو وصف (اختياري)<input name="note" maxlength="250" placeholder="مثل: العطلة الرسمية"></label>
       </div><div class="form-actions"><button class="primary">إضافة القرار للمرحلة المختارة</button></div></form>
       <h3>القرارات المحفوظة</h3>${blocksTable}</section>`+
-    auditPanel+
+    `<div id="lesson-audit-panel">${auditPanel}</div>`+
     `<div class="table-wrap lesson-schedule-wrap"><table class="lesson-schedule"><thead><tr><th>اليوم</th><th>التاريخ</th>${data.subjects.map(s=>`<th>${esc(s.name)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 let mgtStageId='',mgtSubjectId='',mgtPage=0,sessionSubjectId='',sessionPage=0;
@@ -897,7 +901,8 @@ document.addEventListener('click',async event=>{
         const monthKey=target.closest('tr')?.dataset.month;
         const planned=document.querySelector(`.lesson-schedule .month-toggle[data-month="${monthKey}"] .month-planned`);
         if(planned)planned.textContent=String(document.querySelectorAll(`.lesson-schedule tr[data-month="${monthKey}"] .schedule-check.checked`).length);
-        await renderLessonSchedule(stages.filter(s=>s.stage_season_id));
+        // لا نُعيد رسم الجدول كله (يرجع إلى أعلى الصفحة ويطوي الأشهر)؛ نحدّث لوحة المطابقة وحدها.
+        try{const audit=await api('/lesson-schedule/audit?stageSeasonId='+lessonScheduleData.stage_season_id);const box=document.querySelector('#lesson-audit-panel');if(box)box.innerHTML=lessonAuditPanelHtml(audit);}catch{}
         notify(next?'تمت إضافة تاريخ النشر إلى الجدول.':'أزيل تاريخ النشر من الجدول.');
       }catch(e){notify(e.message,true);}finally{busy=false;}
     }
@@ -955,11 +960,6 @@ document.addEventListener('click',async event=>{
     }else if(a==='toggle-group'){
       const active=target.dataset.active==='true';if(!await confirmAction(active?'إعادة تفعيل المجموعة؟':'تعطيل المجموعة؟ يبقى سجلها محفوظًا.'))return;
       busy=true;await api('/groups/'+target.dataset.id,{active},'PATCH');closeDetail();await refresh();notify('حُفظت حالة المجموعة.');
-    }else if(a==='open-browser'){
-      const result=await api('/browser-ticket',{},'POST');
-      const url=location.origin+'/admin/#browserLogin='+result.ticket;
-      if(typeof window.Telegram?.WebApp?.openLink!=='function')throw Error('تعذر فتح المتصفح من تليجرام.');
-      window.Telegram.WebApp.openLink(url);
     }else if(a==='logout'){if(token)await api('/logout',{},'POST');token='';sequence++;closeDetail();setContent(empty('انتهت جلسة الإدارة','أغلق النافذة وافتحها مجددًا من البوت للدخول.'));}
   }catch(e){notify(e.message,true);}finally{busy=false;}
 });
@@ -1151,12 +1151,9 @@ document.addEventListener('submit',async event=>{
   try{tg?.disableVerticalSwipes?.();}catch{}
   try{tg?.setHeaderColor?.('#244643');}catch{}
   try{tg?.setBackgroundColor?.('#faf7f2');}catch{}
-  const ticket=new URLSearchParams(location.hash.slice(1)).get('browserLogin');
-  if(ticket)history.replaceState(null,'',location.pathname);
-  if(!tg?.initData&&!ticket){setContent(empty('افتح اللوحة من البوت','سجّل دخولك إلى تليجرام، ثم اضغط «لوحة الإدارة» في حساب الأدمن. فتح الرابط وحده لا يمنح صلاحية الاطلاع على بيانات الطلبة.'));return;}
+  if(!tg?.initData){setContent(empty('افتح اللوحة من البوت','سجّل دخولك إلى تليجرام، ثم اضغط «لوحة الإدارة» في حساب الأدمن. فتح الرابط وحده لا يمنح صلاحية الاطلاع على بيانات الطلبة.'));return;}
   try{
-    const session=tg?.initData?await api('/auth',{initData:tg.initData},'POST'):await api('/browser-auth',{ticket},'POST');token=session.token;$('#identity').textContent=session.user.name;
-    $('#open-browser').hidden=!tg?.initData;
+    const session=await api('/auth',{initData:tg.initData},'POST');token=session.token;$('#identity').textContent=session.user.name;
     seasons=await api('/seasons');
     if(seasons.length>1){const sel=$('#season-select');sel.hidden=false;sel.innerHTML=seasons.map(se=>`<option value="${se.is_current?'':se.id}">${esc(se.name)}${se.is_current?' — الموسم الحالي':''}</option>`).join('');}
     await home();
