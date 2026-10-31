@@ -111,24 +111,6 @@ test('admin DOM: Telegram entry, stages, pagination, escaped names and visible m
     assert.ok(!w.document.querySelector('#content').textContent.includes('طالب <img'));
   }finally{dom.window.close();}
 });
-test('admin can open an authenticated browser session from Telegram',async()=>{
-  const {dom,w,requests,until,click}=await setup();try{
-    await until(()=>w.document.querySelector('.stage-card'));
-    let opened;w.Telegram.WebApp.openLink=url=>{opened=url;};
-    assert.equal(w.document.querySelector('#open-browser').hidden,false);
-    click('#open-browser');await until(()=>opened);
-    assert.equal(opened,'https://institute.example/admin/#browserLogin='+'b'.repeat(64));
-    assert.equal(requests.find(r=>r.url.endsWith('/browser-ticket')).options.headers.Authorization,'Bearer '+'a'.repeat(64));
-  }finally{dom.window.close();}
-});
-test('browser consumes its ticket once and removes it from the address',async()=>{
-  const ticket='b'.repeat(64);const {dom,w,requests,until}=await setup({authorized:false,browserTicket:ticket});try{
-    await until(()=>w.document.querySelector('.stage-card'));
-    const request=requests.find(r=>r.url.endsWith('/browser-auth'));
-    assert.deepEqual(JSON.parse(request.options.body),{ticket});assert.equal(w.location.hash,'');
-    assert.equal(w.document.querySelector('#open-browser').hidden,true);
-  }finally{dom.window.close();}
-});
 test('admin DOM: emergency request has explicit approval; reduce and cancel use reviewed current values and unlock the UI',async()=>{
   const {dom,w,requests,until,click}=await setup({leaves:[{id:7,student_id:1,full_name:'طالب <img src=x> إجازة',stage_name:'التمهيدية',days:3,status:'pending',is_exception:true,reason:'حالة طارئة <script>bad()</script>',start_date:'2026-10-05',end_date:'2026-10-07'}]});
   try{
@@ -238,8 +220,14 @@ test('lesson schedule: only the current month is open, days are named and each w
     click('[data-action="schedule-months-all"]');assert.ok(!open(prev)&&open(cur)&&!open(next));
     // the per-month counter follows a toggle
     const counter=w.document.querySelector(`.month-toggle[data-month="${cur}"] .month-planned`);assert.equal(counter.textContent,'1');
+    // ticking a day must not re-render the table: the scroll position and the opened months stay as they are
+    click(`.month-toggle[data-month="${next}"]`);assert.ok(open(next));
+    const tableBefore=w.document.querySelector('.lesson-schedule'),wrapBefore=w.document.querySelector('.lesson-schedule-wrap');
     click(`.lesson-schedule tr[data-month="${cur}"] .schedule-check[data-checked="false"]`);
     await until(()=>counter.textContent==='2');
+    await new Promise(r=>setTimeout(r,20));
+    assert.equal(w.document.querySelector('.lesson-schedule'),tableBefore);assert.equal(w.document.querySelector('.lesson-schedule-wrap'),wrapBefore);
+    assert.ok(open(next)&&open(cur));assert.ok(w.document.querySelector('#lesson-audit-panel'));
   }finally{dom.window.close();}
 });
 

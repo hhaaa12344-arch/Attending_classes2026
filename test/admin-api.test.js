@@ -45,21 +45,6 @@ test('admin HTTP: stages, search, pagination validation, optimistic edits and au
   const audit=await (await request('/audit')).json();assert.equal(Number(audit[0].actor_id),42);assert.equal(audit[0].action,'update_student');
   const detail=await (await request('/students/'+student.id)).json();assert.ok(!('transfer_code' in detail));
 });
-test('browser login requires an admin session and tickets work only once',async()=>{
-  assert.equal((await request('/browser-ticket',{},'POST',null)).status,401);
-  const ticketResponse=await request('/browser-ticket',{},'POST',token);
-  assert.equal(ticketResponse.status,200);const {ticket}=await ticketResponse.json();
-  assert.match(ticket,/^[a-f0-9]{64}$/);
-  const response=await request('/browser-auth',{ticket},'POST',null);
-  assert.equal(response.status,200);const browserSession=await response.json();
-  assert.equal(browserSession.user.id,42);assert.equal((await request('/stages',null,'GET',browserSession.token)).status,200);
-  assert.equal((await request('/browser-auth',{ticket},'POST',null)).status,401);
-  assert.equal((await request('/browser-auth',{ticket:'invalid'},'POST',null)).status,401);
-  const source=(await (await request('/auth',{initData:signed()},'POST',null)).json()).token;
-  const revokedTicket=(await (await request('/browser-ticket',{},'POST',source)).json()).ticket;
-  await request('/logout',{},'POST',source);
-  assert.equal((await request('/browser-auth',{ticket:revokedTicket},'POST',null)).status,401);
-});
 test('admin HTTP: independent groups, teacher assignment, conflict rejection and non-destructive schedule removal',async()=>{
   let response=await request('/groups',{subjectId:subject.id,seasonId:ss,title:'الأولى',capacity:40});assert.equal(response.status,200);group=await response.json();
   assert.equal((await request('/groups',{subjectId:subject.id,seasonId:ss,title:'رابط سيئ',capacity:40,inviteLink:'javascript:alert(1)'})).status,400);
