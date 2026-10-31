@@ -213,9 +213,16 @@ let scheduleTickRunning = false;  // قفل يمنع تداخل جولات ال�
 
 const BACK_BUTTON = '↩️ رجوع';
 const STUDENT_ACTIVITY_BUTTON = '📋 المتغيرات';
+// أزرار المجموعات في قائمة الطالب المختصرة (كل زر يفتح قائمة فرعية)
+const STUDENT_LEAVE_GROUP_BUTTON = '🌴 الإجازات والمتغيرات';
+const STUDENT_PARTICIPATION_GROUP_BUTTON = '🗂️ المباحثات والتقارير';
+const STUDENT_MORE_GROUP_BUTTON = '🔗 المزيد';
 const LEGACY_STUDENT_ACTIVITY_BUTTON = '📋 إجازاتي وإنذاراتي';
 const LEGACY_STUDENT_ACTIVITY_BUTTON_2 = '📋 إجازاتي وتنبيهاتي';
 const STUDENT_MENU_BUTTONS = new Set([
+  STUDENT_LEAVE_GROUP_BUTTON,
+  STUDENT_PARTICIPATION_GROUP_BUTTON,
+  STUDENT_MORE_GROUP_BUTTON,
   GUIDE_BUTTON,
   '🔗 روابط المعهد',
   '🚪 الخروج من المعاينة',
@@ -370,18 +377,33 @@ function subjectsKeyboard(subjects, prefix) {
 // فلا يُعرض للطالب ما لا ينطبق على مرحلته.
 function studentMainMenu(student = null) {
   const lessonsOnly = student && student.stage_type === 'lessons_only';
+  // ستة أزرار كحد أقصى؛ الباقي داخل قوائم فرعية
   const rows = [
     [replyButton('📚 دروس اليوم'), replyButton('📊 تقرير الحضور')],
-    [replyButton('🌴 طلب إجازة'), replyButton(STUDENT_ACTIVITY_BUTTON)],
+    [replyButton(STUDENT_LEAVE_GROUP_BUTTON)],
   ];
   if (!lessonsOnly) {
-    rows.push([replyButton('🗓️ جدول المباحثات'), replyButton('📝 الامتحانات الشهرية')]);
-    rows.push([replyButton('🎯 درجات المباحثات والتقارير'), replyButton('📖 المباحثات والتقارير')]);
-    rows.push([replyButton('📄 إرسال تقرير')]);
+    rows[1].push(replyButton('📝 الامتحانات الشهرية'));
+    rows.push([replyButton(STUDENT_PARTICIPATION_GROUP_BUTTON)]);
   }
-  rows.push([replyButton('🔗 روابط المعهد'),replyButton(GUIDE_BUTTON)]);
-  rows.push([replyButton(BACK_BUTTON)]);
+  rows[rows.length - 1].push(replyButton(STUDENT_MORE_GROUP_BUTTON));
   return Markup.keyboard(rows).resize().persistent();
+}
+
+// القوائم الفرعية للطالب: زر الرجوع القائم (BACK_BUTTON) يعيده للقائمة الرئيسية
+function studentSubMenu(rows) {
+  return Markup.keyboard([...rows.map((r) => r.map((t) => replyButton(t))), [replyButton(BACK_BUTTON)]]).resize().persistent();
+}
+
+async function openStudentSubmenu(ctx, text, rows) {
+  const student = await effectiveStudent(ctx);
+  if (!student) return ctx.reply('الرجاء التسجيل أولًا. أرسل /start لبدء التسجيل.');
+  userState.delete(ctx.from.id);
+  const menu = studentSubMenu(rows);
+  if (isInPreview(ctx)) {
+    return ctx.reply(text, Markup.keyboard([...menu.reply_markup.keyboard, ['🚪 الخروج من المعاينة']]).resize().persistent());
+  }
+  return replyStudentScreen(ctx, student, text, menu);
 }
 
 // حارس مشترك: يمنع ميزات المباحثات في مرحلة «حضور دروس فقط»
@@ -2181,6 +2203,21 @@ bot.action('menu_previous_lessons', async (ctx) => {
 });
 
 bot.hears('📚 دروس اليوم', (ctx) => showTodayLessons(ctx));
+
+bot.hears(STUDENT_LEAVE_GROUP_BUTTON, (ctx) =>
+  openStudentSubmenu(ctx, '🌴 الإجازات والمتغيرات — اختر:', [['🌴 طلب إجازة', STUDENT_ACTIVITY_BUTTON]]));
+
+bot.hears(STUDENT_PARTICIPATION_GROUP_BUTTON, async (ctx) => {
+  const student = await effectiveStudent(ctx);
+  if (student && student.stage_type === 'lessons_only') return ctx.reply('هذا القسم غير متاح في مرحلتك.');
+  return openStudentSubmenu(ctx, '🗂️ المباحثات والتقارير — اختر:', [
+    ['🗓️ جدول المباحثات', '📖 المباحثات والتقارير'],
+    ['🎯 درجات المباحثات والتقارير', '📄 إرسال تقرير'],
+  ]);
+});
+
+bot.hears(STUDENT_MORE_GROUP_BUTTON, (ctx) =>
+  openStudentSubmenu(ctx, '🔗 المزيد — اختر:', [['🔗 روابط المعهد', GUIDE_BUTTON]]));
 
 
 function studentScheduleDateLabel(iso){
