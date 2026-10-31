@@ -4,7 +4,7 @@ const fs=require('node:fs/promises');
 const path=require('node:path');
 const {Readable}=require('node:stream');
 const {pipeline}=require('node:stream/promises');
-const {validateInitData,createSessions,createBrowserTickets}=require('./adminAuth');
+const {validateInitData,createSessions}=require('./adminAuth');
 const {positiveInt,appError,validScore,pageOptions}=require('./integrity');
 const {enqueueNotification}=require('./outbox');
 
@@ -25,7 +25,7 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
   const oneTimeCohortMove=require('./oneTimeCohortMove').createOneTimeCohortMove(db.pool);
   const oneTimeLessonCleanup=require('./oneTimeLessonCleanup').createOneTimeLessonCleanup(db.pool);
   const scheduleBatchImport=require('./scheduleBatchImport').createScheduleBatchImport(db.pool);
-  const sessions=createSessions();const browserTickets=createBrowserTickets(sessions);const authLimits=new Map();let active=0;
+  const sessions=createSessions();const authLimits=new Map();let active=0;
   const teacherWeb=require('./teacherWeb').createTeacherWeb({db,studies,scheduler,botToken,origin,readJson});
   const studentWeb=require('./studentWeb').createStudentWeb({db,studies,botToken,origin,readJson});
   const json=(res,code,value)=>{res.writeHead(code,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
@@ -51,14 +51,13 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
       if(req.headers.origin&&req.headers.origin!==origin)throw appError('مصدر الطلب غير مسموح.','FORBIDDEN',403);
       if(active>=16)throw appError('اللوحة مشغولة لحظيًا. حاول مجددًا.','BUSY',503);
       active++;acquired=true;
-      if(req.method==='POST'&&['/api/admin/auth','/api/admin/browser-auth'].includes(url.pathname)){
+      if(req.method==='POST'&&url.pathname==='/api/admin/auth'){
         const key=req.socket.remoteAddress;const now=Date.now();
         for(const [ip,r]of authLimits)if(r.until<=now)authLimits.delete(ip);
         const limit=authLimits.get(key)||{count:0,until:now+60000};
         if(++limit.count>30)throw appError('محاولات دخول كثيرة. انتظر دقيقة.','RATE_LIMIT',429);
         authLimits.set(key,limit);
         const body=await readJson(req);
-        if(url.pathname==='/api/admin/browser-auth')return json(res,200,browserTickets.redeem(body.ticket));
         const user=validateInitData(body.initData,botToken,adminIds);
         return json(res,200,{token:sessions.issue(user),user});
       }
@@ -67,7 +66,6 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
       if(!actor||!adminIds.includes(actor.id))throw appError('أعد فتح لوحة الإدارة من البوت.','UNAUTHORIZED',401);
       const route=url.pathname.slice('/api/admin'.length);const q=Object.fromEntries(url.searchParams);
       let result,m;
-      if(req.method==='POST'&&route==='/browser-ticket')return json(res,200,{ticket:browserTickets.issue(token)});
       if(req.method==='POST'&&route==='/logout'){sessions.revoke(token);return json(res,200,{ok:true});}
       if(req.method==='GET'){
         if(route==='/stages')result=await adminData.stages(q.seasonId?positiveInt(q.seasonId):null);
