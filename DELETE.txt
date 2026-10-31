@@ -1,0 +1,4 @@
+احذف هذه الملفات من مشروعك:
+studentWeb.js
+student/ (المجلد كاملًا)
+test/student-panel.test.js

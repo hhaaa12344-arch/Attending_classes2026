@@ -4931,11 +4931,7 @@ bot.hears('📝 الامتحانات الشهرية', async (ctx) => {
     : 'لم تُسلّم أي امتحان بعد.';
 
   const rows = open.map((e) => [
-    (()=>{
-      const label=limitButtonText(`📝 ${e.subject_name} — الشهري ${e.exam_number}`,50);
-      try{const url=new URL(process.env.ADMIN_WEB_URL);if(process.env.ADMIN_WEB_ENABLED==='true'&&url.protocol==='https:'){url.pathname='/student-exam/';url.search='?exam='+e.id;url.hash='';return Markup.button.webApp(label,url.toString());}}catch(_){}
-      return Markup.button.callback(label,`stex_start:${e.id}`);
-    })(),
+    Markup.button.callback(limitButtonText(`📝 ${e.subject_name} — الشهري ${e.exam_number}`,50),`stex_start:${e.id}`),
   ]);
 
   return replyStudentScreen(
@@ -5021,15 +5017,6 @@ bot.action(/stex_start:(\d+)/, async (ctx) => {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
   const examId = Number(ctx.match[1]);
-  try {
-    const url=new URL(process.env.ADMIN_WEB_URL||'');
-    if(process.env.ADMIN_WEB_ENABLED==='true' && url.protocol==='https:' && ctx.chat?.type==='private') {
-      if(!await studies.isExamAvailable(examId,student.id)) return ctx.answerCbQuery('الامتحان غير متاح الآن.',{show_alert:true});
-      url.pathname='/student-exam/';url.search='?exam='+examId;url.hash='';
-      await ctx.answerCbQuery();
-      return ctx.reply('افتح لوحة الامتحان:',Markup.inlineKeyboard([[Markup.button.webApp('📝 بدء الامتحان',url.toString())]]));
-    }
-  } catch (_) { /* في حال عدم تهيئة لوحة الويب يستمر مسار الأزرار القديم. */ }
   try {
     const attempt = await studies.startOrResumeAttempt(examId, student.id);
     await ctx.answerCbQuery();
