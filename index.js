@@ -1349,6 +1349,15 @@ async function deliverReportToTeachers(student, subjectId, subjectName, payload)
 bot.on(['photo','video'],async(ctx,next)=>{
   if(ctx.chat?.type!=='private')return next();
   const state=userState.get(ctx.from?.id);
+  if(state?.action==='broadcast_edit'){
+    if(state.kind==='text')return ctx.reply('هذا الإرسال نصي؛ أرسل نصًا جديدًا بدل الصورة.');
+    const kind=ctx.message.video?'video':'photo';
+    const fileId=kind==='video'?ctx.message.video.file_id:ctx.message.photo?.at(-1)?.file_id;
+    const caption=String(ctx.message.caption||'').trim();
+    if(!fileId||caption.length>850)return ctx.reply('التعليق يجب أن يكون 850 حرفًا أو أقل. أعد إرسال الملف.');
+    if(kind==='video'&&ctx.message.video.file_size>50*1024*1024)return ctx.reply('الفيديو كبير جدًا. اختر فيديو أصغر من 50 ميغابايت.');
+    return previewBroadcastEdit(ctx,state,{media:{kind,fileId},text:caption||undefined});
+  }
   if(state?.action!=='broadcast_compose')return next();
   const actor=await broadcastActor(ctx);
   if(!actor){userState.delete(ctx.from.id);return ctx.reply('انتهت صلاحية الإرسال. افتح القائمة من جديد.');}
@@ -1376,6 +1385,14 @@ bot.on(['photo','video'],async(ctx,next)=>{
 });
 
 // استقبال ملف التقرير (مستند أو صورة) عندما يكون الطالب في خطوة الإرسال
+// يتحقق أن المادة التي اختارها الطالب لإرسال التقرير ما زالت ضمن مرحلته الحالية وبنظام التقارير
+// (قد يُنقل الطالب بين اختيار المادة وإرسال التقرير).
+async function reportTargetStillValid(student, state) {
+  const subjects = await studies.listStudentSubjects(student.id);
+  return subjects.some((s) => s.subject_id === state.subjectId && s.stage_season_id === state.ssId && s.mode === 'report');
+}
+const STALE_REPORT_TARGET = 'تغيّرت مرحلتك أو نظام مشاركتك منذ اختيار المادة، فلم يُرسل التقرير. افتح «🗂️ المباحثات والتقارير» ثم «📄 إرسال تقرير» واختر المادة من جديد.';
+
 bot.on(['document', 'photo'], async (ctx, next) => {
   const state = userState.get(ctx.from.id);
   if (!state || state.action !== 'student_report_upload') return next();
@@ -1389,6 +1406,7 @@ bot.on(['document', 'photo'], async (ctx, next) => {
     ? msg.document.file_id
     : msg.photo[msg.photo.length - 1].file_id; // أعلى دقة متاحة
   const kind = msg.document ? 'document' : 'photo';
+  if (!(await reportTargetStillValid(student, state))) { userState.delete(ctx.from.id); return ctx.reply(STALE_REPORT_TARGET, studentMainMenu(student)); }
   const blockedUpload = await studies.getReportSubmissionBlock(student.id, state.subjectId, state.ssId);
   if (blockedUpload) { userState.delete(ctx.from.id); return ctx.reply(blockedUpload.message); }
   const assignment=await studies.assignStudentToGroup(student.id,state.subjectId,state.ssId);
@@ -1496,6 +1514,12 @@ bot.on('text', async (ctx, next) => {
       userState.delete(ctx.from.id);
       return ctx.reply(`حُفظت رسالتك للطالب للإرسال عبر البوت ✅\nرقم الرسالة: ${saved.id}`,role==='admin'?adminMainMenu():teacherMainMenu());
     }catch(err){return ctx.reply(`تعذر حفظ الرسالة: ${err.message}`);}
+  }
+  if(state.action==='broadcast_edit'){
+    const message=String(ctx.message.text||'').trim();
+    const limit=state.kind==='text'?3000:850;
+    if(!message||message.length>limit)return ctx.reply(`أرسل نصًا من 1 إلى ${limit} حرفًا، أو اضغط «❌ إلغاء العملية».`);
+    return previewBroadcastEdit(ctx,state,{text:message});
   }
   if(state.action==='broadcast_compose'){
     const message=String(ctx.message.text||'').trim();
@@ -1893,6 +1917,7 @@ bot.on('text', async (ctx, next) => {
     if (text.length < 10) {
       return ctx.reply('التقرير النصي قصير جدًا. أرسل نصًا أوفى أو أرسل ملفًا.');
     }
+    if (!(await reportTargetStillValid(student, state))) { userState.delete(ctx.from.id); return ctx.reply(STALE_REPORT_TARGET, studentMainMenu(student)); }
     const blockedText = await studies.getReportSubmissionBlock(student.id, state.subjectId, state.ssId);
     if (blockedText) { userState.delete(ctx.from.id); return ctx.reply(blockedText.message); }
     const assignment=await studies.assignStudentToGroup(student.id,state.subjectId,state.ssId);
@@ -4189,6 +4214,7 @@ bot.hears('📣 رسالة جماعية', async ctx=>{
   rows.push(...subjects.map(s=>[callbackButton(limitButtonText(`${s.subject_name} — ${s.stage_name}`,50),
     `broadcast:subject:${s.subject_id}:${s.stage_season_id}`)]));
   if(!rows.length)return ctx.reply('لا توجد مواد مسندة إليك في الموسم الحالي.');
+  rows.push([callbackButton('✏️ تعديل إرسال سابق','bcedit:list')]);
   return ctx.reply('اختر المادة، ثم حدد جميع طلبتها أو مجموعة معينة:',Markup.inlineKeyboard(rows));
 });
 
@@ -4220,6 +4246,62 @@ bot.action('broadcast:confirm',async ctx=>{
     const success=`✅ حُفظت الرسالة الجماعية للإرسال إلى ${result.recipientCount} طالبًا.\nرقم الإرسال: ${result.id}`;
     return state.media?ctx.reply(success):ctx.editMessageText(success);
   }catch(err){return ctx.answerCbQuery(`تعذر الإرسال: ${err.message}`,{show_alert:true});}
+});
+
+// ---- تعديل رسالة جماعية سابقة (نص/صورة/فيديو) عند كل مستلميها ----
+const broadcastEdit = require('./broadcastEdit').createBroadcastEdit(db.pool, bot.telegram);
+const BC_KIND = { text: 'نص', photo: 'صورة', video: 'فيديو' };
+
+bot.action('bcedit:list', async (ctx) => {
+  const actor = await broadcastActor(ctx);
+  if (!actor) return ctx.answerCbQuery('هذه العملية متاحة للأستاذ والإدارة فقط.');
+  await ctx.answerCbQuery();
+  const list = await broadcastEdit.listRecent(actor);
+  if (!list.length) return ctx.reply('لا توجد رسائل جماعية خلال آخر 30 يومًا.');
+  const rows = list.map((b) => {
+    const kind = b.method === 'sendPhoto' ? 'photo' : b.method === 'sendVideo' ? 'video' : 'text';
+    const when = new Date(b.created_at).toLocaleString('ar-IQ', { timeZone: 'Asia/Baghdad', dateStyle: 'short', timeStyle: 'short' });
+    return [callbackButton(limitButtonText(`#${b.id} · ${BC_KIND[kind]} · ${when} · ${b.message_text}`, 55), `bcedit:pick:${b.id}`)];
+  });
+  return ctx.reply('اختر الإرسال الذي تريد تعديله:', Markup.inlineKeyboard(rows));
+});
+
+bot.action(/^bcedit:pick:(\d+)$/, async (ctx) => {
+  const actor = await broadcastActor(ctx);
+  if (!actor) return ctx.answerCbQuery('غير مصرح.', { show_alert: true });
+  try {
+    const info = await broadcastEdit.load(actor, Number(ctx.match[1]));
+    await ctx.answerCbQuery();
+    userState.set(ctx.from.id, { action: 'broadcast_edit', id: info.id, kind: info.kind });
+    const how = info.kind === 'text'
+      ? 'أرسل الآن النص الجديد ليحل محل النص الحالي.'
+      : 'أرسل صورة (أو فيديو) جديدة لاستبدال الحالية، مع تعليق جديد اختياري. وإن أردت تعديل التعليق فقط فأرسله كنص.';
+    return ctx.reply(`✏️ تعديل الإرسال #${info.id} (${BC_KIND[info.kind]}) عند ${info.count} طالبًا.\n\n${how}\nيبقى عنوان الرسالة («📣 رسالة من...») كما هو، وستظهر عند الطلبة علامة «معدّلة» دون إشعار جديد.`);
+  } catch (err) { return ctx.answerCbQuery(err.message, { show_alert: true }); }
+});
+
+async function previewBroadcastEdit(ctx, state, pending) {
+  userState.set(ctx.from.id, { ...state, pending });
+  const keyboard = Markup.inlineKeyboard([[callbackButton('✅ تأكيد التعديل', 'bcedit:confirm')], [callbackButton('❌ إلغاء', 'admin_cancel_noop')]]);
+  const note = pending.text === undefined ? 'سيبقى التعليق الحالي كما هو.' : `النص الجديد:\n${pending.text}`;
+  const head = `✏️ معاينة تعديل الإرسال #${state.id}\n${note}\n\nسيُعدَّل عند جميع مستلميه. هل تريد المتابعة؟`;
+  if (!pending.media) return ctx.reply(head, keyboard);
+  const cap = head.length > 1000 ? head.slice(0, 997) + '...' : head;
+  return pending.media.kind === 'photo' ? ctx.replyWithPhoto(pending.media.fileId, { caption: cap, ...keyboard })
+    : ctx.replyWithVideo(pending.media.fileId, { caption: cap, ...keyboard });
+}
+
+bot.action('bcedit:confirm', async (ctx) => {
+  const state = userState.get(ctx.from.id);
+  if (state?.action !== 'broadcast_edit' || !state.pending) return ctx.answerCbQuery('انتهت صلاحية المعاينة. ابدأ من جديد.', { show_alert: true });
+  const actor = await broadcastActor(ctx);
+  if (!actor) return ctx.answerCbQuery('غير مصرح.', { show_alert: true });
+  userState.delete(ctx.from.id);
+  await ctx.answerCbQuery('بدأ التعديل ⏳');
+  await ctx.reply('⏳ جارٍ تعديل الرسالة عند الطلبة، قد يستغرق دقائق إن كان العدد كبيرًا...');
+  broadcastEdit.apply(actor, state.id, state.pending)
+    .then((r) => ctx.reply(`✅ اكتمل تعديل الإرسال #${r.id}.\nتم التعديل عند ${r.edited} طالبًا${r.failed ? `، وتعذر عند ${r.failed} (حظروا البوت أو حذفوا الرسالة)` : ''}.`))
+    .catch((err) => ctx.reply(`تعذر التعديل: ${err.message}`));
 });
 
 bot.hears('👥 المجموعات', (ctx) => pickTeacherSubject(ctx, 'tg_groups', 'اختر المادة لإدارة مجموعاتها:'));
@@ -7046,6 +7128,12 @@ async function main() {
   if (publicationFollowup.minutes !== null) {
     timers.push(setInterval(() => publicationFollowup.sweepToday().catch((err) => console.error('Publication follow-up failed:', err.message)), 60 * 1000));
   }
+  // إصلاح اتساق التسجيل عند كل تشغيل: تسجيل نشط واحد يطابق مرحلة الطالب الحالية.
+  const repairEnrollments = () => require('./enrollmentConsistency').repairEnrollments(db.pool)
+    .then((r) => { if (r.created || r.closed) console.log(`Enrollment repair: closed ${r.closed}, created ${r.created}`); })
+    .catch((err) => console.error('Enrollment repair failed:', err.message));
+  timers.push(setInterval(repairEnrollments, 30 * 60 * 1000));
+  repairEnrollments();
   // تذكير التقارير: الجمعة (آخر يوم) والسبت (انتهت المهلة) لمن لم يرسل تقرير الأسبوع.
   const weeklyReportReminders = require('./weeklyReportReminders').createWeeklyReportReminders(db.pool, {
     sendDays: studies.REPORT_SEND_DAYS, lateDays: studies.REPORT_LATE_DAYS, tz: studies.SCHEDULE_TZ,

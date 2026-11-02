@@ -36,6 +36,7 @@ function createWeeklyReportReminders(pool, { sendDays, tz, dayNames, lateDays = 
        active AS (
          SELECT DISTINCT ON (e.student_id) e.student_id,e.stage_season_id,ss.stage_id
          FROM enrollments e JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+         JOIN students cs ON cs.id=e.student_id AND cs.stage_id=ss.stage_id
          WHERE e.status='active' AND e.started_at<=(SELECT at FROM t) AND (e.ended_at IS NULL OR e.ended_at>(SELECT at FROM t))
          ORDER BY e.student_id,e.started_at DESC)
        SELECT st.id AS student_id,st.telegram_id,array_agg(sub.name ORDER BY sub.name) AS subjects

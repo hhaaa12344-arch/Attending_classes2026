@@ -1503,7 +1503,8 @@ const listStudentSubjects = (studentId, {includeDisabled=false}={}) =>
               (SELECT COUNT(*) FROM student_reports r
                WHERE r.student_id=$1 AND r.subject_id=sub.id AND r.stage_season_id=ss.id) AS report_count
        FROM enrollments e
-       JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true
+       JOIN students cur ON cur.id=e.student_id
+       JOIN stage_seasons ss ON ss.id=e.stage_season_id AND ss.is_active=true AND ss.stage_id=cur.stage_id
        JOIN stages sg ON sg.id=ss.stage_id
        JOIN subjects sub ON sub.stage_id=ss.stage_id
        LEFT JOIN participation_modes pm
