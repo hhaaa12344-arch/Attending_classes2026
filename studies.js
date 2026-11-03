@@ -348,6 +348,13 @@ async function initStudiesSchema() {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS uq_report_week_grant
       ON report_week_grants(student_id,subject_id,stage_season_id,week_start);
+    -- حسابات غير مسجَّلة فتحت البوت مؤخرًا: يختارها الأدمن عند ربط حساب جديد بسجل طالب.
+    CREATE TABLE IF NOT EXISTS recent_unknown_accounts (
+      telegram_id BIGINT PRIMARY KEY,
+      display_name TEXT,
+      username TEXT,
+      last_seen TIMESTAMP NOT NULL DEFAULT now()
+    );
   `);
   // Keep closed participation periods; existing per-subject choices are the fallback.
   // No backfill changes a student's choice or invents one for undecided students.

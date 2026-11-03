@@ -80,6 +80,7 @@ const { createTelegramQueue, PRIORITY } = require('./telegramQueue');
 const tgQueue = createTelegramQueue(bot.telegram);
 const outboxWorker = require('./outbox').createOutboxWorker(db.pool,tgQueue,bot.telegram.deleteMessage.bind(bot.telegram));
 const broadcasts = require('./broadcasts').createBroadcasts(db.pool);
+const accountLinks = require('./accountLinks').createAccountLinks(db.pool);
 // Both background sends and replies share the same rate limiter.
 for(const method of ['sendMessage','sendDocument','sendPhoto','sendVideo']) bot.telegram[method]=tgQueue[method];
 bot.use((ctx,next)=>{
@@ -479,6 +480,7 @@ function studentActionsKeyboard(studentId, isActive = true, extraRows = []) {
   ];
   if (isActive) {
     rows.push([callbackButton('📱 كود نقل الحساب (تغيير الهاتف)', `stu_xfer:${studentId}`)]);
+    rows.push([callbackButton('🔗 ربط حساب جديد (بدون كود)', `stu_link:${studentId}`)]);
     rows.push([callbackButton('👥 نقل إلى مجموعة أخرى', `stu_movegrp:${studentId}`)]);
     rows.push([callbackButton('🔀 نقل لمرحلة أخرى بلا درجات', `stu_movefresh:${studentId}`)]);
     rows.push([callbackButton('🗄️ أرشفة الطالب (مع حفظ بياناته)', `stu_archive_confirm:${studentId}`)]);
@@ -1135,6 +1137,7 @@ async function startStudentRegistration(ctx,codeOnly=false){
   }
   const teacher=await effectiveTeacher(ctx);
   if(teacher)return ctx.reply(`أهلًا بك أستاذ ${teacher.full_name} 👋`,teacherMainMenu());
+  accountLinks.noteUnknown(ctx.from.id,[ctx.from.first_name,ctx.from.last_name].filter(Boolean).join(' '),ctx.from.username).catch(()=>{});
   const registrationOpen=await db.isStudentRegistrationOpen();
   userState.set(ctx.from.id,{action:'awaiting_full_name'});
   if(!registrationOpen){
@@ -1183,6 +1186,7 @@ bot.start(async (ctx) => {
   }
   const teacher=await effectiveTeacher(ctx);
   if(teacher){await studentGuide.clear(ctx);return ctx.reply(`أهلًا بك أستاذ ${teacher.full_name} 👋`,teacherMainMenu());}
+  accountLinks.noteUnknown(ctx.from.id,[ctx.from.first_name,ctx.from.last_name].filter(Boolean).join(' '),ctx.from.username).catch(()=>{});
   if(!(await db.isStudentRegistrationOpen()))return startStudentRegistration(ctx);
   return studentGuide.open(ctx);
 });
@@ -1443,6 +1447,17 @@ stageCorrections.install({bot,Markup,userState,effectiveStudent,isAdmin,isInPrev
 bot.on('text', async (ctx, next) => {
   const inputText = ctx.message.text.trim();
 
+  const linkState = userState.get(ctx.from.id);
+  if (linkState?.action === 'admin_link_account' && isAdmin(ctx) && inputText !== BACK_BUTTON) {
+    const origin = ctx.message.forward_origin;
+    const forwardedId = origin?.type === 'user' ? origin.sender_user?.id : ctx.message.forward_from?.id;
+    if (origin?.type === 'hidden_user' || (ctx.message.forward_sender_name && !forwardedId))
+      return ctx.reply('هذا الطالب يخفي هويته عند تحويل رسائله، فلا أستطيع معرفة حسابه. اطلب منه أن يرسل /start للبوت من حسابه الجديد ثم اختره من القائمة، أو اكتب معرّفه الرقمي.');
+    const typedId = /^\d{5,15}$/.test(inputText) ? Number(inputText) : null;
+    const newId = forwardedId || typedId;
+    if (!newId) return ctx.reply('حوّل رسالة من حساب الطالب الجديد، أو اكتب معرّفه الرقمي، أو اضغط «❌ إلغاء العملية».');
+    return confirmLink(ctx, linkState.studentId, newId);
+  }
   if (inputText === BACK_BUTTON) {
     await studentGuide.clear(ctx);
     const hadStep = userState.delete(ctx.from.id);
@@ -4246,6 +4261,66 @@ bot.action('broadcast:confirm',async ctx=>{
     const success=`✅ حُفظت الرسالة الجماعية للإرسال إلى ${result.recipientCount} طالبًا.\nرقم الإرسال: ${result.id}`;
     return state.media?ctx.reply(success):ctx.editMessageText(success);
   }catch(err){return ctx.answerCbQuery(`تعذر الإرسال: ${err.message}`,{show_alert:true});}
+});
+
+// ---- ربط حساب تليجرام جديد بسجل طالب (بدون كود) ----
+const accountLabel = (a) => [a.display_name || 'بلا اسم', a.username ? `@${a.username}` : null].filter(Boolean).join(' ');
+
+async function showLinkPicker(ctx, studentId) {
+  const student = await db.getStudentById(studentId);
+  if (!student) return ctx.reply('الطالب غير موجود.');
+  userState.set(ctx.from.id, { action: 'admin_link_account', studentId });
+  const recent = await accountLinks.listRecent();
+  const rows = recent.map((a) => [callbackButton(limitButtonText(`${accountLabel(a)} · ${a.telegram_id}`, 55), `stu_linkpick:${studentId}:${a.telegram_id}`)]);
+  rows.push([callbackButton('🔄 تحديث القائمة', `stu_link:${studentId}`)], [callbackButton('❌ إلغاء', 'admin_cancel_noop')]);
+  const text = `🔗 ربط حساب جديد بسجل «${student.full_name}»\n\n` +
+    '1) اطلب من الطالب أن يفتح البوت من حسابه الجديد ويضغط /start فقط (لا يكتب شيئًا آخر).\n' +
+    '2) اضغط «🔄 تحديث القائمة» ثم اختر حسابه من القائمة أدناه.\n\n' +
+    (recent.length ? 'حسابات جديدة فتحت البوت خلال آخر 3 أيام:' : 'لا توجد حسابات جديدة بعد.') +
+    '\n\nبديل: حوّل إلى هنا أي رسالة أرسلها لك الطالب من حسابه الجديد، أو اكتب معرّف حسابه الرقمي.';
+  return ctx.reply(text, Markup.inlineKeyboard(rows));
+}
+
+async function confirmLink(ctx, studentId, newTelegramId) {
+  try {
+    const student = await accountLinks.check(studentId, newTelegramId);
+    const info = await accountLinks.describe(newTelegramId);
+    userState.set(ctx.from.id, { action: 'admin_link_account', studentId });
+    return ctx.reply(
+      `هل تريد ربط الحساب الجديد (${info ? accountLabel(info) + ' · ' : ''}${newTelegramId}) بسجل «${student.full_name}»؟\n\n` +
+      'سينتقل سجله كاملًا (الحضور والمباحثات والامتحانات والدرجات) إلى الحساب الجديد، ولن يستطيع حسابه القديم استعمال البوت بعد ذلك.',
+      Markup.inlineKeyboard([[callbackButton('✅ تأكيد الربط', `stu_linkok:${studentId}:${newTelegramId}`)], [callbackButton('❌ إلغاء', 'admin_cancel_noop')]]));
+  } catch (err) { return ctx.reply(`تعذر الربط: ${err.message}`); }
+}
+
+bot.action(/^stu_link:(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();
+  return showLinkPicker(ctx, Number(ctx.match[1]));
+});
+
+bot.action(/^stu_linkpick:(\d+):(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  await ctx.answerCbQuery();
+  return confirmLink(ctx, Number(ctx.match[1]), Number(ctx.match[2]));
+});
+
+bot.action(/^stu_linkok:(\d+):(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('غير مصرح.');
+  try {
+    const r = await accountLinks.link(Number(ctx.match[1]), Number(ctx.match[2]), ctx.from.id);
+    userState.delete(ctx.from.id); userState.delete(r.oldTelegramId); userState.delete(r.newTelegramId);
+    await ctx.answerCbQuery('تم الربط ✅');
+    const { enqueueNotification } = require('./outbox');
+    await enqueueNotification(db.pool, { key: `account-link:${r.studentId}:${r.newTelegramId}`, chatId: r.newTelegramId,
+      text: `✅ ربطت إدارة المعهد هذا الحساب بسجلك «${r.fullName}». أرسل /start لتفتح قائمتك. سجلك كامل محفوظ.` }).catch(() => {});
+    await enqueueNotification(db.pool, { key: `account-link-old:${r.studentId}:${r.oldTelegramId}:${r.newTelegramId}`, chatId: r.oldTelegramId,
+      text: 'ℹ️ نُقل سجلك إلى حسابك الجديد بطلب منك. لم يعد هذا الحساب مرتبطًا بسجلك.' }).catch(() => {});
+    return ctx.editMessageText(`✅ رُبط الحساب ${r.newTelegramId} بسجل «${r.fullName}».\nاطلب من الطالب أن يرسل /start من حسابه الجديد.`);
+  } catch (err) {
+    await ctx.answerCbQuery('تعذر الربط', { show_alert: true });
+    return ctx.reply(`تعذر الربط: ${err.message}`);
+  }
 });
 
 // ---- تعديل رسالة جماعية سابقة (نص/صورة/فيديو) عند كل مستلميها ----
