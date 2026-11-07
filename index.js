@@ -5198,13 +5198,14 @@ async function sendNextExamQuestion(ctx, attemptId, examId) {
       : Array.isArray(q.options)
       ? q.options
       : JSON.parse(q.options || '[]');
-  const rows = options.map((o, i) => [
-    Markup.button.callback(limitButtonText(o, 50), `stex_ans:${attemptId}:${q.id}:${i}`),
-  ]);
-  return ctx.reply(
-    `السؤال ${q.display_no} من ${Number(q.total)}:\n\n${q.prompt}`,
-    Markup.inlineKeyboard(rows)
-  );
+  const view = require('./examQuestionView').buildExamQuestionView({
+    header: `السؤال ${q.display_no} من ${Number(q.total)}:`,
+    prompt: q.prompt,
+    options,
+    callbackFor: (i) => `stex_ans:${attemptId}:${q.id}:${i}`,
+    limitText: limitButtonText,
+  });
+  return ctx.reply(view.text, { reply_markup: { inline_keyboard: view.rows } });
 }
 
 bot.action(/stex_start:(\d+)/, async (ctx) => {
