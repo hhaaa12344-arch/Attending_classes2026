@@ -238,7 +238,7 @@ async function renderStage(){
     const exams=await api('/exams?seasonId='+s.stage_season_id);
     body=(ro?'':`<div class="toolbar">${button('إنشاء امتحان','new-exam','','primary')}</div>`)+table(['المادة','الامتحان','الفتح','الإغلاق','الحالة','الأسئلة والنشر'],exams.map(ex=>[esc(ex.subject_name),esc(ex.title||'الشهري '+ex.exam_number),stamp(ex.opens_at),stamp(ex.closes_at),esc(labels[ex.status]),button('فتح الامتحان','exam',`data-id="${ex.id}"`)]));
   }else if(tab==='exports'){
-    body=`<section class="empty"><h2>سجلات الحضور بصيغة MD</h2><p>صف مستقل لكل تسجيل حضور، مع عمود للتاريخ وآخر للوقت بتوقيت بغداد ووقت UTC. حضور البداية والنهاية سجلان منفصلان.</p><div class="toolbar"><label>الموسم<select id="export-season">${s.seasons.map(se=>`<option value="${se.id}">${esc(se.name||se.season_name||'الموسم')} ${se.is_active?'— الحالي':'— أرشيف'}</option>`).join('')}</select></label>${button('تنزيل حضور الدروس','export',`data-kind="lessons"`,'primary')}${s.stage_type!=='lessons_only'?button('تنزيل حضور المباحثات','export','data-kind="discussions"'):''}</div></section>`;
+    body=`<section class="empty"><h2>سجلات الحضور بصيغة MD</h2><p>صف مستقل لكل تسجيل حضور، مع عمود للتاريخ وآخر للوقت بتوقيت بغداد ووقت UTC. يُسجَّل حضور الطالب بضغطة واحدة وتظهر فيه سجلات البداية والنهاية معًا (للتوافق مع الحضور القديم).</p><div class="toolbar"><label>الموسم<select id="export-season">${s.seasons.map(se=>`<option value="${se.id}">${esc(se.name||se.season_name||'الموسم')} ${se.is_active?'— الحالي':'— أرشيف'}</option>`).join('')}</select></label>${button('تنزيل حضور الدروس','export',`data-kind="lessons"`,'primary')}${s.stage_type!=='lessons_only'?button('تنزيل حضور المباحثات','export','data-kind="discussions"'):''}</div></section>`;
   }
   if(n===sequence)setContent(stageHeader()+body);
 }
@@ -624,11 +624,10 @@ async function sessionManagementContent(stage,ro){
       const canEnd=!x.attendance_reopened_at&&!x.is_closed&&!x.end_opened_at&&x.start_notifications_queued&&new Date(x.closes_at)>new Date()&&firstOpen&&firstOpen<=new Date();
       return [
       `${x.item_number}<div class="subtle">المعرف #${x.id}</div>`,`${esc(x.subject_name)}<div>${esc(x.group_title)}</div><div>${esc(x.title)}</div>`,stamp(x.opened_at),
-      x.attendance_reopened_at?`فرصة إضافية للبداية والنهاية: من ${stamp(x.attendance_reopened_at)}<div>حتى ${stamp(x.attendance_reopen_until)}</div><div>${new Date(x.attendance_reopen_until)>new Date()?'مفتوحة':'انتهت الفرصة الإضافية'}</div>`:
-        `الحضور الأول: يبدأ ${stamp(firstOpen)}<div>ويبقى حتى ${stamp(lastMinute)}</div>`+
-        `<div style="margin-top:.35rem">الحضور الثاني: ${x.end_opened_at?'بدأ '+stamp(x.end_opened_at):'يفتح عند إنهاء الأستاذ أو تلقائيًا '+stamp(autoEnd)}</div><div>ويبقى حتى ${stamp(lastMinute)}</div>`,esc(x.complete_count),
-      ...(ro?[]:[(canEnd?button('إنهاء وفتح الحضور الثاني','end-session',`data-id="${x.id}"`):'')+
-        (x.can_reopen?button('إعادة فتح الحضور 10 دقائق','session-reopen',`data-id="${x.id}"`):`<span class="subtle">${new Date(x.attendance_reopen_until)>new Date()?'الفرصة الإضافية مفتوحة':'إعادة الفتح غير متاحة الآن'}</span>`)+
+      x.attendance_reopened_at?`فرصة إضافية للحضور: من ${stamp(x.attendance_reopened_at)}<div>حتى ${stamp(x.attendance_reopen_until)}</div><div>${new Date(x.attendance_reopen_until)>new Date()?'مفتوحة':'انتهت الفرصة الإضافية'}</div>`:
+        `الحضور (مرة واحدة): يبدأ ${stamp(firstOpen)}<div>ويبقى حتى ${stamp(lastMinute)}</div>`+
+        '',esc(x.complete_count),
+      ...(ro?[]:[        (x.can_reopen?button('إعادة فتح الحضور 10 دقائق','session-reopen',`data-id="${x.id}"`):`<span class="subtle">${new Date(x.attendance_reopen_until)>new Date()?'الفرصة الإضافية مفتوحة':'إعادة الفتح غير متاحة الآن'}</span>`)+
         button('حالة إشعارات إعادة الفتح','session-notifications',`data-id="${x.id}"`)+
         button('حضور إداري لطلبة محددين','session-selected',`data-id="${x.id}"`)+
         button('تحضير طلبة المجموعة','session-markall',`data-id="${x.id}"`)+button('حذف المباحثة','session-cancel',`data-id="${x.id}"`,'danger')])];
@@ -854,7 +853,7 @@ document.addEventListener('click',async event=>{
         'mark-all':'تسجيل البداية والنهاية لطلبة المجموعة النشطين المؤهلين لهذه المباحثة؟',cancel:'حذف المباحثة نهائيًا مع حضورها؟ لن يعيد الجدول إنشاءها تلقائيًا لهذا الموعد. لا يمكن التراجع.'};
       if(!await confirmAction(messages[action]))return;
       busy=true;const r=await api('/sessions/'+target.dataset.id+'/'+action,{},'POST');await renderStage();
-      notify(action==='mark-all'?`اكتمل حضور ${r.added} طالبًا؛ أضيف ${r.records} تسجيلًا جديدًا.`:action==='cancel'?'حُذفت المباحثة وحضورها.':`أُعيد فتح حضور البداية والنهاية حتى ${stamp(r.attendance_reopen_until)} (10 دقائق من إعادة الفتح). ${sessionNoticeSummary(r.notifications)}`,action==='reopen'&&r.notifications?.counts.total===0);
+      notify(action==='mark-all'?`اكتمل حضور ${r.added} طالبًا؛ أضيف ${r.records} تسجيلًا جديدًا.`:action==='cancel'?'حُذفت المباحثة وحضورها.':`أُعيد فتح الحضور حتى ${stamp(r.attendance_reopen_until)} (10 دقائق من إعادة الفتح). ${sessionNoticeSummary(r.notifications)}`,action==='reopen'&&r.notifications?.counts.total===0);
     }
     else if(a==='lesson-reopen'){
       if(!await confirmAction(`إعادة فتح درس «${target.dataset.subject}» للوقت المتبقي من 24 ساعة منذ ${target.dataset.recovered==='1'?'استرجاع الدرس':'النشر الأصلي'}، مع حفظ الحضور السابق؟`))return;
