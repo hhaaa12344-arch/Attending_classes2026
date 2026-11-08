@@ -35,9 +35,9 @@ function createScheduler({ pool, studies }) {
         JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=m.subject_id AND pm.stage_season_id=m.stage_season_id AND pm.mode='mubahatha'
         WHERE m.group_id=$1 AND m.assigned_at <= $2 AND pm.joined_mubahatha_at <= $2`, [s.group_id, s.opened_at]);
       const text = phase === 'start'
-        ? `🟢 فُتح تسجيل الحضور الأول لمباحثة «${s.subject_name}» — ${s.group_title}.\nسجّل حضور البداية الآن. ويلزم تسجيل حضور النهاية أيضًا لاكتمال الحضور.`
+        ? `🟢 فُتح تسجيل الحضور لمباحثة «${s.subject_name}» — ${s.group_title}.\nسجّل حضورك الآن بضغطة واحدة، والزر متاح لغاية ${lastAvailableMinute(expires)}. لا يوجد حضور ثانٍ.`
         : `🔔 فُتح تسجيل الحضور الثاني لمباحثة «${s.subject_name}» — ${s.group_title}.\nيبقى متاحًا لغاية ${lastAvailableMinute(expires)}. يلزم تسجيل البداية والنهاية للاكتمال.`;
-      const extra = buttons(phase === 'start' ? '✅ حضرتُ بداية المباحثة' : '✅ حضرتُ نهاية المباحثة', `${phase === 'start' ? 'mub_attend' : 'mub_end_attend'}:${s.id}`);
+      const extra = buttons(phase === 'start' ? '✅ تسجيل الحضور' : '✅ تسجيل الحضور', `mub_attend:${s.id}`);
       // One bounded SQL insert, no thousands of promises held in RAM.
       await client.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at)
         SELECT $1||':'||x::text,x,$2::jsonb,$3 FROM unnest($4::bigint[]) x
@@ -47,8 +47,7 @@ function createScheduler({ pool, studies }) {
         const teacher = (await client.query('SELECT telegram_id FROM teachers WHERE id=$1 AND is_active=true', [s.teacher_id])).rows[0];
         if (teacher?.telegram_id) await enqueueNotification(client, {
           key: `session:${s.id}:teacher`, chatId: teacher.telegram_id, expiresAt: s.closes_at,
-          text: `فُتح الحضور الأول لمباحثة «${s.subject_name}» — ${s.group_title}.\nموعد الجلسة: ${new Date(s.opened_at).toLocaleString('ar-IQ',{timeZone:studies.SCHEDULE_TZ})}.\nعند انتهاء المباحثة اضغط الزر لفتح الحضور الثاني للطلبة. إذا لم تنهها، سيفتح الحضور الثاني تلقائيًا قبل نهاية الموعد بـ ${studies.END_ATTENDANCE_MINUTES} دقائق.`,
-          extra: buttons('🔚 إنهاء المباحثة وفتح حضور النهاية', `mub_finish:${s.id}`)
+          text: `🟢 فُتح تسجيل الحضور لمباحثة «${s.subject_name}» — ${s.group_title}.\nموعد الجلسة: ${new Date(s.opened_at).toLocaleString('ar-IQ',{timeZone:studies.SCHEDULE_TZ})}.\nيسجّل الطلبة حضورهم مرة واحدة بضغطة واحدة، ويبقى الزر متاحًا لغاية ${lastAvailableMinute(s.closes_at)}. لا حاجة لأي إجراء منك لفتح الحضور أو إغلاقه.`
         });
       }
       await client.query(`UPDATE mubahatha_sessions SET ${field}=true WHERE id=$1`, [s.id]);
@@ -57,22 +56,12 @@ function createScheduler({ pool, studies }) {
     } catch (err) { await client.query('ROLLBACK'); throw err; }
     finally { client.release(); }
   }
+  // لم يعد هناك حضور ثانٍ: الحضور مرة واحدة يفتح بعد دقائق من الموعد ويبقى لنهاية وقته.
+  // تبقى الدالة لأن أزرار قديمة في المحادثات وواجهات الإدارة قد تستدعيها.
   async function openEnd(sessionId, automatic = false) {
-    // A delayed scheduler must not prevent a teacher from finishing a current session.
-    if(!automatic)await queueSession(sessionId,'start');
-    const opened = await studies.openEndAttendance(sessionId, automatic);
-    if(opened)return {status:'opened',notified:await queueSession(sessionId,'end'),closesAt:opened.end_closes_at};
     if(automatic)return null;
-    const s=await studies.getSessionById(sessionId);
-    if(!s)return {status:'unavailable',message:'هذه الجلسة غير موجودة. افتح المباحثات الحالية.'};
-    const valid=(await pool.query(`SELECT 1 FROM mubahatha_groups g JOIN stage_seasons ss ON ss.id=g.stage_season_id
-      WHERE g.id=$1 AND g.is_active=true AND ss.is_active=true AND participation_enabled(g.subject_id,g.stage_season_id)`,[s.group_id])).rows[0];
-    if(!valid)return {status:'unavailable',message:'المجموعة أو الموسم غير نشط، أو المادة غير مشمولة بالمباحثات.'};
-    if(s.attendance_reopened_at)return {status:'unavailable',message:'هذه الجلسة أُعيد فتح حضورها من الإدارة؛ استخدم أزرار فرصة الحضور الإضافية.'};
-    if(s.end_opened_at&&new Date(s.end_closes_at)>new Date())return {status:'already_open',notified:await queueSession(sessionId,'end'),closesAt:s.end_closes_at};
-    if(new Date(s.closes_at)<=new Date())return {status:'unavailable',message:`انتهت مهلة هذه المباحثة في ${new Date(s.closes_at).toLocaleString('ar-IQ',{timeZone:studies.SCHEDULE_TZ})}. هذا زر جلسة سابقة؛ لا يفتح حضورًا جديدًا.`};
-    if(s.is_closed)return {status:'unavailable',message:'هذه الجلسة مغلقة. راجع الإدارة إذا كان الإغلاق بالخطأ.'};
-    return {status:'unavailable',message:`يمكن فتح حضور النهاية بعد بدء حضور البداية (${studies.START_ATTENDANCE_DELAY_MINUTES} دقائق من بداية الموعد). حاول عند حلول الوقت.`};
+    if(!await studies.getSessionById(sessionId))return {status:'unavailable',message:'هذه الجلسة غير موجودة. افتح المباحثات الحالية.'};
+    return {status:'unavailable',message:`لم يعد هناك حضور ثانٍ. صار حضور المباحثة مرة واحدة: يفتح بعد ${studies.START_ATTENDANCE_DELAY_MINUTES} دقائق من الموعد ويبقى حتى نهاية وقت المباحثة، ولا حاجة لإنهائها يدويًا.`};
   }
   async function queueSlotDecisionNotice(slotId, scheduledDate, decision, reason = null) {
     const client = await pool.connect();
@@ -190,7 +179,6 @@ function createScheduler({ pool, studies }) {
            OR (end_notifications_queued=false AND end_closes_at > now())) ORDER BY id LIMIT 100`,
         [studies.START_ATTENDANCE_DELAY_MINUTES]);
       for (const s of pending.rows) { await queueSession(s.id,'start'); await queueSession(s.id,'end'); }
-      for (const s of await studies.getSessionsNeedingAutoEnd()) await openEnd(s.id,true);
       await studies.closeExpiredSessionsWithoutEnd();
       await queueMissedSlotAlerts(adminIds);
     } finally { running=false; }

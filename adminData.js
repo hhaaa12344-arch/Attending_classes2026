@@ -286,8 +286,8 @@ function createAdminData(db, studies) {
           WHERE id=$1 RETURNING *`,[id,studies.DISCUSSION_REOPEN_MINUTES])).rows[0];
         if(!session.recovery_open)await c.query("UPDATE notification_outbox SET status='expired',expires_at=now() WHERE dedupe_key LIKE $1 AND status IN ('pending','sending')",['session:'+id+':%']);
         // Reopened attendance must be reachable even if the old Telegram buttons were consumed.
-        const payload=JSON.stringify(['أُعيد فتح حضور مباحثة «'+session.subject_name+'» — '+session.group_title+' ('+session.title+') لمدة 10 دقائق من إعادة الفتح، حتى '+new Date(result.attendance_reopen_until).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad'})+'؛ استخدم الزرين لتسجيل البداية والنهاية. التسجيل السابق محفوظ.',
-          {reply_markup:{inline_keyboard:[[{text:'حضرت البداية',callback_data:'mub_attend:'+id},{text:'حضرت النهاية',callback_data:'mub_end_attend:'+id}]]}}]);
+        const payload=JSON.stringify(['أُعيد فتح حضور مباحثة «'+session.subject_name+'» — '+session.group_title+' ('+session.title+') لمدة 10 دقائق من إعادة الفتح، حتى '+new Date(result.attendance_reopen_until).toLocaleString('ar-IQ',{timeZone:'Asia/Baghdad'})+'؛ اضغط الزر لتسجيل حضورك. التسجيل السابق محفوظ.',
+          {reply_markup:{inline_keyboard:[[{text:'✅ تسجيل الحضور',callback_data:'mub_attend:'+id}]]}}]);
         const prefix='session:'+id+':reopen:'+result.attendance_reopen_count+':';
         const queued=(await c.query(`WITH audience AS (${sessionAudienceSql})
           INSERT INTO notification_outbox(dedupe_key,chat_id,payload,expires_at,priority)

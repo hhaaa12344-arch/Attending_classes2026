@@ -13,8 +13,8 @@ const confirmationSetting = String(process.env.SCHEDULE_REQUIRE_CONFIRMATION ?? 
 if (!['true','false'].includes(confirmationSetting)) throw new Error('SCHEDULE_REQUIRE_CONFIRMATION must be true or false');
 const SCHEDULE_REQUIRE_CONFIRMATION = confirmationSetting === 'true';
 const EXAM_START_HOUR = Number(process.env.EXAM_START_HOUR || 22);
-// لا يظهر حضور البداية فور بدء المباحثة؛ يفتح بعد عشر دقائق من الموعد الأصلي.
-const START_ATTENDANCE_DELAY_MINUTES = Number(process.env.START_ATTENDANCE_DELAY_MINUTES || 10);
+// الحضور مرة واحدة: لا يظهر زر التسجيل فور بدء المباحثة؛ يفتح بعد 5 دقائق من الموعد ويبقى 55 دقيقة حتى نهاية وقتها.
+const START_ATTENDANCE_DELAY_MINUTES = Number(process.env.START_ATTENDANCE_DELAY_MINUTES || 5);
 // Administrative attendance recovery never changes the original discussion schedule.
 const DISCUSSION_REOPEN_MINUTES = 10;
 if (!Number.isInteger(START_ATTENDANCE_DELAY_MINUTES) || START_ATTENDANCE_DELAY_MINUTES < 1 || START_ATTENDANCE_DELAY_MINUTES > 30) {
@@ -791,29 +791,41 @@ const getOpenSessionForGroup = (groupId) =>
     )
     .then((r) => r.rows[0]);
 
-const markSessionAttendance = (sessionId, studentId, phase = 'start', markedBy = 'student') =>
-  pool
+// حضور المباحثة مرة واحدة: ضغطة الطالب الواحدة تُسجَّل بالبداية والنهاية معًا، فيبقى
+// «الحضور المكتمل» (بداية + نهاية) في كل التقارير والدرجات والاستعلامات كما هو، والسجلات القديمة سليمة.
+// الزر يفتح بعد START_ATTENDANCE_DELAY_MINUTES (5) من موعد المباحثة ويبقى حتى نهاية وقتها (closes_at).
+// أزرار «حضرت النهاية» القديمة تُعامَل كالحضور الواحد. تسجيل الإدارة/الأستاذ لسجل واحد يبقى كما هو.
+const markSessionAttendance = (sessionId, studentId, phase = 'start', markedBy = 'student') => {
+  const single = markedBy === 'student';
+  return pool
     .query(
-      `INSERT INTO mubahatha_attendance(session_id, student_id, phase, marked_by)
-       SELECT s.id, st.id, $3, $4 FROM mubahatha_sessions s
-       JOIN mubahatha_groups g ON g.id=s.group_id AND g.is_active=true
-       JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
-       JOIN group_memberships m ON m.group_id=g.id AND m.student_id=$2
-       JOIN students st ON st.id=m.student_id AND st.is_active=true
-       JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=ss.id AND e.status='active'
-       JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=g.subject_id
-         AND pm.stage_season_id=ss.id AND pm.mode='mubahatha'
-       WHERE s.id=$1 AND participation_enabled(g.subject_id,g.stage_season_id) AND s.opened_at <= now() AND m.assigned_at <= s.opened_at
-         AND pm.joined_mubahatha_at <= s.opened_at
-         AND ((s.attendance_reopened_at <= now() AND s.attendance_reopen_until > now() AND $3 IN ('start','end'))
-           OR (s.attendance_reopened_at IS NULL AND (($3='start'
-               AND s.opened_at + make_interval(mins => $5::int) <= now()
-               AND s.closes_at > now())
-           OR ($3='end' AND s.end_opened_at <= now() AND s.end_closes_at > now()))))
-       ON CONFLICT (session_id, student_id, phase) DO NOTHING RETURNING *`,
-      [sessionId, studentId, phase, markedBy, START_ATTENDANCE_DELAY_MINUTES]
+      `WITH ins AS (
+         INSERT INTO mubahatha_attendance(session_id, student_id, phase, marked_by)
+         SELECT s.id, st.id, p.phase, $4 FROM mubahatha_sessions s
+         JOIN mubahatha_groups g ON g.id=s.group_id AND g.is_active=true
+         JOIN stage_seasons ss ON ss.id=g.stage_season_id AND ss.is_active=true
+         JOIN group_memberships m ON m.group_id=g.id AND m.student_id=$2
+         JOIN students st ON st.id=m.student_id AND st.is_active=true
+         JOIN enrollments e ON e.student_id=st.id AND e.stage_season_id=ss.id AND e.status='active'
+         JOIN participation_modes pm ON pm.student_id=st.id AND pm.subject_id=g.subject_id
+           AND pm.stage_season_id=ss.id AND pm.mode='mubahatha'
+         CROSS JOIN (SELECT unnest(CASE WHEN $6::boolean THEN ARRAY['start','end'] ELSE ARRAY[$3::text] END) AS phase) p
+         WHERE s.id=$1 AND participation_enabled(g.subject_id,g.stage_season_id) AND s.opened_at <= now() AND m.assigned_at <= s.opened_at
+           AND pm.joined_mubahatha_at <= s.opened_at
+           AND (
+             (s.attendance_reopened_at <= now() AND s.attendance_reopen_until > now() AND $3 IN ('start','end'))
+             OR (s.attendance_reopened_at IS NULL AND (
+                  ($6::boolean AND s.opened_at + make_interval(mins => $5::int) <= now() AND s.closes_at > now())
+               OR (NOT $6::boolean AND $3='start' AND s.opened_at + make_interval(mins => $5::int) <= now() AND s.closes_at > now())
+               OR (NOT $6::boolean AND $3='end' AND s.end_opened_at <= now() AND s.end_closes_at > now())
+             ))
+           )
+         ON CONFLICT (session_id, student_id, phase) DO NOTHING RETURNING *)
+       SELECT * FROM ins ORDER BY CASE phase WHEN 'start' THEN 0 ELSE 1 END LIMIT 1`,
+      [sessionId, studentId, single ? 'start' : phase, markedBy, START_ATTENDANCE_DELAY_MINUTES, single]
     )
     .then((r) => r.rows[0]);
+};
 
 // عند عدم إنهاء الأستاذ للمباحثة يفتح حضور النهاية تلقائيًا قبل نهاية الساعة
 // بعشر دقائق افتراضيًا. وإذا أنهى الأستاذ يدويًا بعد فتح الحضور الأول، يفتح

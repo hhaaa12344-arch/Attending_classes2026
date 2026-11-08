@@ -4082,7 +4082,8 @@ bot.action(/slot_no:(\d+):(\d{4}-\d{2}-\d{2})/, async (ctx) => {
   return ctx.editMessageText('🕓 أُوقف موعد مباحثة اليوم حتى لا تبدأ الجلسة.\nأرسل الآن سبب التأجيل برسالة نصية (مثال: ظرف طارئ)، وبعد حفظه سيصل إشعار للطلبة.');
 });
 
-bot.action(/^mub_attend:(\d+)$/, async (ctx) => {
+// حضور المباحثة مرة واحدة: يفتح الزر بعد 5 دقائق من الموعد ويبقى لنهاية وقت المباحثة.
+async function handleSingleAttendance(ctx) {
   const student = await effectiveStudent(ctx);
   if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا عبر /start');
   const sessionId = Number(ctx.match[1]);
@@ -4090,51 +4091,21 @@ bot.action(/^mub_attend:(\d+)$/, async (ctx) => {
   if (!session) return ctx.answerCbQuery('الجلسة غير موجودة.');
   if (!(await studies.isStartAttendanceOpen(sessionId))) {
     if (!session.attendance_reopened_at && !session.is_closed && new Date(session.closes_at) > new Date()) {
-      return ctx.answerCbQuery('لم يبدأ تسجيل حضور البداية بعد.');
+      return ctx.answerCbQuery(`لم يفتح تسجيل الحضور بعد؛ يفتح بعد ${studies.START_ATTENDANCE_DELAY_MINUTES} دقائق من موعد المباحثة.`);
     }
-    return ctx.answerCbQuery('انتهى وقت تسجيل حضور بداية المباحثة.');
+    return ctx.answerCbQuery('انتهى وقت تسجيل حضور هذه المباحثة.');
   }
   const member = await studies.isStudentInGroup(student.id, session.group_id);
   if (!member) return ctx.answerCbQuery('هذه المباحثة ليست لمجموعتك.');
 
   const marked = await studies.markSessionAttendance(sessionId, student.id, 'start');
-  if (!marked) return ctx.answerCbQuery('لم يُضف سجل جديد: سجّلت مسبقًا أو انتهت المهلة أو لست مؤهلًا لهذه الجلسة.');
-  await ctx.answerCbQuery('تم تسجيل حضور البداية ✅');
-  const end=(await db.pool.query("SELECT 1 FROM mubahatha_attendance WHERE session_id=$1 AND student_id=$2 AND phase='end'",[sessionId,student.id])).rows[0];
-  return ctx.editMessageText(
-    end ? '✅ اكتمل حضورك بالبداية والنهاية، بارك الله فيك.' : session.attendance_reopened_at
-      ? '✅ سُجّل حضورك في بداية المباحثة.\nيمكنك إكمال حضور النهاية الآن قبل انتهاء الفرصة الإضافية.'
-      : '✅ سُجّل حضورك في بداية المباحثة.\nلا تنسَ تسجيل حضور النهاية عند إغلاقها.',
-    !end && await studies.isEndAttendanceOpen(sessionId)
-      ? Markup.inlineKeyboard([[callbackButton('✅ حضرت نهاية المباحثة', `mub_end_attend:${sessionId}`)]])
-      : {}
-  );
-});
-
-// حضور النهاية — سجل مستقل عن البداية
-bot.action(/^mub_end_attend:(\d+)$/, async (ctx) => {
-  const student = await effectiveStudent(ctx);
-  if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا عبر /start');
-  const sessionId = Number(ctx.match[1]);
-  if (!(await studies.isEndAttendanceOpen(sessionId))) {
-    return ctx.answerCbQuery('انتهى وقت تسجيل حضور النهاية.');
-  }
-  const session = await studies.getSessionById(sessionId);
-  if (!session) return ctx.answerCbQuery('الجلسة غير موجودة.');
-  if (!(await studies.isStudentInGroup(student.id, session.group_id))) {
-    return ctx.answerCbQuery('هذه المباحثة ليست لمجموعتك.');
-  }
-  const marked = await studies.markSessionAttendance(sessionId, student.id, 'end');
-  if (!marked) return ctx.answerCbQuery('لم يُضف سجل جديد: سجّلت مسبقًا أو انتهت المهلة أو لست مؤهلًا لهذه الجلسة.');
-  await ctx.answerCbQuery('تم تسجيل حضور النهاية ✅');
-  const start=(await db.pool.query("SELECT 1 FROM mubahatha_attendance WHERE session_id=$1 AND student_id=$2 AND phase='start'",[sessionId,student.id])).rows[0];
-  return ctx.editMessageText(start
-    ? '✅ سُجّل حضور النهاية. اكتمل حضورك بالبداية والنهاية، بارك الله فيك.'
-    : 'سُجّل حضور النهاية، لكن لم تسجّل حضور البداية؛ لذلك لا يُحسب حضور هذه المباحثة مكتملًا.',
-    !start && await studies.isStartAttendanceOpen(sessionId)
-      ? Markup.inlineKeyboard([[callbackButton('✅ حضرت بداية المباحثة', `mub_attend:${sessionId}`)]])
-      : {});
-});
+  if (!marked) return ctx.answerCbQuery('لم يُضف سجل جديد: سجّلت حضورك مسبقًا أو انتهت المهلة أو لست مؤهلًا لهذه الجلسة.');
+  await ctx.answerCbQuery('تم تسجيل حضورك ✅');
+  return ctx.editMessageText('✅ سُجّل حضورك في هذه المباحثة، بارك الله فيك.\nلا يلزمك أي تسجيل آخر.');
+}
+bot.action(/^mub_attend:(\d+)$/, handleSingleAttendance);
+// أزرار «حضرت النهاية» القديمة المتبقية في المحادثات تُعامَل كتسجيل الحضور الواحد.
+bot.action(/^mub_end_attend:(\d+)$/, handleSingleAttendance);
 
 // الأستاذ ينهي المباحثة يدويًا فيفتح حضور النهاية فورًا
 bot.action(/^mub_finish:(\d+)$/, async (ctx) => {
@@ -7210,6 +7181,10 @@ async function main() {
     .catch((err) => console.error('Enrollment repair failed:', err.message));
   timers.push(setInterval(repairEnrollments, 30 * 60 * 1000));
   repairEnrollments();
+  // إشعار لمرة واحدة بعد النشر: حضور المباحثات صار مرة واحدة (لطلبة المباحثات والأساتذة).
+  require('./singleAttendanceAnnouncement').queueSingleAttendanceAnnouncement(db.pool)
+    .then((r) => { if (r.queued) console.log(`Single-attendance announcement queued: ${r.queued} (students ${r.students}, teachers ${r.teachers})`); })
+    .catch((err) => console.error('Single-attendance announcement failed:', err.message));
   // تذكير التقارير: الجمعة (آخر يوم) والسبت (انتهت المهلة) لمن لم يرسل تقرير الأسبوع.
   const weeklyReportReminders = require('./weeklyReportReminders').createWeeklyReportReminders(db.pool, {
     sendDays: studies.REPORT_SEND_DAYS, lateDays: studies.REPORT_LATE_DAYS, tz: studies.SCHEDULE_TZ,
