@@ -127,8 +127,7 @@
       return `
       <article class="list-card">
         <div class="list-card-head"><div><h4>${esc(s.subject_name)}</h4><p>${esc(s.group_title)} · بدأت ${esc(dateTime(s.opened_at))}</p></div><span class="badge live">مفتوحة</span></div>
-        ${canEnd?`<div class="card-actions"><button class="danger-button" type="button" data-end-session="${n(s.id)}">إنهاء المباحثة وفتح حضور النهاية</button></div>`:
-          (s.attendance_reopened_at?`<p class="subtle">فرصة حضور إضافية للبداية والنهاية حتى ${esc(dateTime(s.attendance_reopen_until))}.</p>`:!s.end_opened_at?`<p class="subtle">يظهر زر الإنهاء بعد فتح الحضور الأول عند ${esc(dateTime(s.start_attendance_opens_at))}.</p>`:'')}
+        ${s.attendance_reopened_at?`<p class="subtle">فرصة حضور إضافية حتى ${esc(dateTime(s.attendance_reopen_until))}.</p>`:`<p class="subtle">يفتح تسجيل الحضور للطلبة عند ${esc(dateTime(s.start_attendance_opens_at))} ويبقى حتى نهاية وقت المباحثة. الحضور مرة واحدة، ولا حاجة لإنهاء المباحثة يدويًا.</p>`}
       </article>`;
     }).join('');
     $$('[data-end-session]').forEach(b=>b.addEventListener('click',()=>endSession(n(b.dataset.endSession),b)));
@@ -240,7 +239,7 @@
       if(!rows.length){sheetBody.innerHTML=empty('لا يوجد طلبة في نمط المباحثات لهذه المادة.');return;}
       const groups=new Map();for(const row of rows){const key=String(row.group_id||0);if(!groups.has(key))groups.set(key,{title:row.group_title||'بلا مجموعة',rows:[]});groups.get(key).rows.push(row);}
       const renderStudent=(r,i)=>{const eligible=n(r.eligible_sessions),attended=n(r.attended_sessions),incomplete=n(r.incomplete_sessions),ratio=eligible?Math.round(attended/eligible*100):0,cls=ratio>=90?'good':ratio>=70?'warn':'bad';return `<div class="attendance-row numbered-record"><span class="sequence-badge">${i+1}</span><div class="numbered-record-body"><h4>${esc(r.full_name)}</h4><small>${r.mode==='report'?`${n(r.report_count)} تقرير · حضور مباحثات سابق: ${attended}/${eligible}`:`${attended} من ${eligible} مباحثة مكتملة${incomplete?` · ${incomplete} حضور بداية بلا نهاية`:''}`}</small></div>${r.mode==='report'?'':`<span class="attendance-ratio ${cls}">${attended}/${eligible}</span>`}</div>`;};
-      sheetBody.innerHTML=`<p class="form-hint">المباحثة مكتملة عند تسجيل حضور البداية والنهاية. طلبة التقارير ظاهرون في قسم مستقل لكل مجموعة.</p>`+
+      sheetBody.innerHTML=`<p class="form-hint">يُسجَّل حضور الطالب في المباحثة مرة واحدة. طلبة التقارير ظاهرون في قسم مستقل لكل مجموعة.</p>`+
         [...groups.values()].map(group=>`<section class="list-card"><h3>${esc(group.title)}</h3><h4>المباحثات (${group.rows.filter(r=>r.mode!=='report').length})</h4>${group.rows.filter(r=>r.mode!=='report').map((r,i)=>renderStudent(r,i)).join('')||empty('لا يوجد طلبة مباحثات.')}
           <h4>التقارير (${group.rows.filter(r=>r.mode==='report').length})</h4>${group.rows.filter(r=>r.mode==='report').map((r,i)=>renderStudent(r,i)).join('')||empty('لا يوجد طلبة تقارير.')}</section>`).join('');
     }catch(err){sheetBody.innerHTML=empty(err.message);}
