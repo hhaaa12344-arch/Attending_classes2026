@@ -31,7 +31,7 @@ Object.assign(actionLabels,{one_time_schedule_import_2026_09_24:'إدخال جد
 let contactQuery='',contactPage=0,contactStudent=null;
 const contactRequestKey=prefix=>prefix+':'+(globalThis.crypto?.randomUUID?.()||`${Date.now()}:${Math.random().toString(36).slice(2)}`);
 const contactStatuses={pending:'بانتظار الإرسال',sending:'قيد الإرسال',sent:'أُرسلت',failed:'تعذّر الإرسال',expired:'انتهت المهلة',archived:'سجل إرسال مؤرشف'};
-const lessonSource=value=>value==='channel_schedule_recovered'?'استرجاع منشور محفوظ؛ الترقيم بتاريخ نشره الأصلي':value==='schedule_fallback'?'فُعّل من الجدول لأن المنشور لم يُعرف؛ يرتبط تلقائيًا بأول منشور مطابق':value==='channel_schedule'?'تم تحديد المادة اعتمادًا على الجدول (دون هاشتاغ)':value==='channel_hashtag'?'تم تحديد المادة من رسالة هاشتاغ':value==='channel'?'تفعيل من القناة':value==='manual'?'تفعيل يدوي':'مصدر التحديد غير موثق';
+const lessonSource=value=>value==='manual_extra'?'درس إضافي فعّلته الإدارة':value==='channel_schedule_recovered'?'استرجاع منشور محفوظ؛ الترقيم بتاريخ نشره الأصلي':value==='schedule_fallback'?'فُعّل من الجدول لأن المنشور لم يُعرف؛ يرتبط تلقائيًا بأول منشور مطابق':value==='channel_schedule'?'تم تحديد المادة اعتمادًا على الجدول (دون هاشتاغ)':value==='channel_hashtag'?'تم تحديد المادة من رسالة هاشتاغ':value==='channel'?'تفعيل من القناة':value==='manual'?'تفعيل يدوي':'مصدر التحديد غير موثق';
 let filters={q:'',status:'active',groupId:'',mode:''};
 function notify(text,error=false){const n=$('#detail').open?$('#dialog-notice'):$('#notice');n.hidden=false;n.className=error?'error':'';n.textContent=text;}
 function clearNotice(){$('#notice').hidden=true;$('#dialog-notice').hidden=true;}
@@ -449,6 +449,7 @@ async function renderLessonSchedule(eligible){
   const stage=eligible.find(x=>String(x.id)===String(lessonScheduleStageId));if(!stage)return;
   const [data,audit]=await Promise.all([api('/lesson-schedule?stageSeasonId='+stage.stage_season_id),api('/lesson-schedule/audit?stageSeasonId='+stage.stage_season_id)]);lessonScheduleData=data;
   const checked=new Set(data.entries.map(e=>`${e.subject_id}:${e.lesson_date}`));
+  const entryCount=new Map(data.entries.map(e=>[`${e.subject_id}:${e.lesson_date}`,Number(e.lessons_count||1)]));
   const activeBlock=(iso,kind)=>(data.blocks||[]).some(b=>b.kind===kind&&iso>=b.start_date&&iso<=b.end_date);
   const blockKindLabel={holiday:'عطلة الدروس والمباحثات',discussions:'تعطيل المباحثات فقط',discussion_end:'إنهاء موسم المباحثات'};
   const blocksTable=(data.blocks||[]).length?table(['النوع','البداية','النهاية','ملاحظة','إجراء'],data.blocks.map(b=>[
@@ -464,7 +465,7 @@ async function renderLessonSchedule(eligible){
     return head+days.map(iso=>{
       const wd=weekdayIndex(iso),holiday=activeBlock(iso,'holiday'),discussionOff=activeBlock(iso,'discussions')||activeBlock(iso,'discussion_end');
       const cells=data.subjects.map(sub=>{const k=`${sub.id}:${iso}`,on=checked.has(k);
-        return `<td><button type="button" class="schedule-check ${on?'checked':''}" data-action="lesson-schedule-toggle" data-subject-id="${sub.id}" data-date="${iso}" data-checked="${on?'true':'false'}" ${holiday&&!on?'disabled title="عطلة رسمية"':''} aria-label="${esc(sub.name)} ${esc(WEEKDAY_NAMES[wd])} ${esc(isoDateLabel(iso))}">${on?'✓':'·'}</button></td>`;}).join('');
+        return `<td><button type="button" class="schedule-check ${on?'checked':''}" data-action="lesson-schedule-toggle" data-subject-id="${sub.id}" data-date="${iso}" data-checked="${on?'true':'false'}" ${holiday&&!on?'disabled title="عطلة رسمية"':''} aria-label="${esc(sub.name)} ${esc(WEEKDAY_NAMES[wd])} ${esc(isoDateLabel(iso))}">${on?'✓':'·'}</button><button type=\"button\" class=\"schedule-double ${(entryCount.get(k)||1)>1?'checked':''}\" data-action=\"lesson-schedule-count\" data-subject-id=\"${sub.id}\" data-date=\"${iso}\" data-count=\"${entryCount.get(k)||1}\" ${on?'':'hidden'} title=\"درسان من هذه المادة في هذا اليوم: يُفعَّل الثاني تلقائيًا مع الأول\">${(entryCount.get(k)||1)>1?'×'+(entryCount.get(k)||1):'+'}</button></td>`;}).join('');
       return `<tr class="day-${wd}" data-month="${key}" ${open?'':'hidden'}><td class="day-cell">${WEEKDAY_NAMES[wd]}${holiday?' · 🏖️ عطلة':discussionOff?' · مباحثات معطلة':''}</td><td class="date-cell">${esc(isoDateLabel(iso))}</td>${cells}</tr>`;
     }).join('');
   }).join('');
@@ -513,7 +514,8 @@ async function lessonManagementContent(stageId){
   const data=await api('/lesson-management?'+new URLSearchParams({stageId,page:mgtPage,...(mgtSubjectId?{subjectId:mgtSubjectId}:{}),...(currentSeasonId?{seasonId:currentSeasonId}:{})}));
   if(data.total&&mgtPage>0&&!data.rows.length){mgtPage--;return lessonManagementContent(stageId);}
   const ro=!data.season.is_active;
-  return ((!ro&&data.repairAvailable)?'<section class="card" role="status"><p><strong>'+ (data.repairApplied?'تم تطبيق تصحيح نشر 26 و27 سبتمبر وحفظ السجلات الأصلية.':'تصحيح نشر 26 و27 سبتمبر لم يُطبّق بعد.')+'</strong></p>'+(data.repairApplied?'':'<p>تحديث الملفات وحده لا يغيّر السجلات السابقة. افتح المراجعة وتحقق من روابط الدروس ثم اضغط «تطبيق التصحيح وحفظ الحضور».</p>')+button('مراجعة تصحيح نشر 26 و27 سبتمبر','lesson-publication-repair')+'</section>':'')+managementSummary(data,'درسًا')+subjectSelector(data,'lesson-mgt',mgtSubjectId)+
+  const extraForm=ro?'':`<section class="card"><h3>درس إضافي لليوم</h3><p class="subtle">لتفعيل درس آخر لمادة فيها درس اليوم (مثلًا درسان في اليوم نفسه). يُفعَّل درس مستقل بمهلة 24 ساعة وزر حضور خاص، ويصل الطلبة إشعار به.</p><form id="extra-lesson-form" class="toolbar"><label>المادة<select name="subjectId" required>${(data.subjects||[]).map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></label><button class="primary">تفعيل درس إضافي اليوم</button></form></section>`;
+  return extraForm+((!ro&&data.repairAvailable)?'<section class="card" role="status"><p><strong>'+ (data.repairApplied?'تم تطبيق تصحيح نشر 26 و27 سبتمبر وحفظ السجلات الأصلية.':'تصحيح نشر 26 و27 سبتمبر لم يُطبّق بعد.')+'</strong></p>'+(data.repairApplied?'':'<p>تحديث الملفات وحده لا يغيّر السجلات السابقة. افتح المراجعة وتحقق من روابط الدروس ثم اضغط «تطبيق التصحيح وحفظ الحضور».</p>')+button('مراجعة تصحيح نشر 26 و27 سبتمبر','lesson-publication-repair')+'</section>':'')+managementSummary(data,'درسًا')+subjectSelector(data,'lesson-mgt',mgtSubjectId)+
     table(['رقم الدرس في المادة','المادة','النشر المسجّل','نهاية التسجيل','الحضور','الإجراءات'],[...(mgtPage===0?(data.scheduledRows||[]).map(x=>['—',esc(x.subject_name),'موعد الجدول: '+esc(x.lesson_date),'بانتظار تحديد المنشور','—',ro?'':button('نشر لمدة 24 ساعة','scheduled-lesson-publish',`data-subject="${x.subject_id}" data-date="${esc(x.lesson_date)}"`)]):[]),...data.rows.map(l=>[`${l.item_number}<div class="subtle">المعرف #${l.id}</div>`,`${esc(l.subject_name)}<div class="subtle">${esc(lessonSource(l.source_type))}</div>${/^https:\/\//i.test(l.source_url||'')?`<a href="${esc(l.source_url)}" target="_blank" rel="noopener noreferrer">فتح منشور الدرس</a>`:''}`,stamp(l.activated_at),`${stamp(l.active_until)}<div>${l.is_active?'مفتوح':'انتهت المهلة'}</div>`,`${l.attended_count} / ${l.enrolled_count}`,
       button('حذف حضور طالب','lesson-attendance-remove',`data-id="${l.id}"`)+(ro?'':(l.can_reopen?button('إعادة فتح للوقت المتبقي','lesson-reopen',`data-id="${l.id}" data-subject="${esc(l.subject_name)}" data-recovered="${l.republished_at||l.attendance_opened_at?1:0}"`):'<span class="subtle">انتهت المهلة</span>')+
       (!l.is_active&&!l.republished_at?button('إعادة نشر لمدة 24 ساعة','lesson-republish',`data-id="${l.id}" data-subject="${l.subject_id}"`):'')+
@@ -891,10 +893,12 @@ document.addEventListener('click',async event=>{
         target.dataset.checked=next?'true':'false';
         target.classList.toggle('checked',next);
         target.textContent=next?'✓':'·';
+        const dbl=target.parentElement.querySelector('.schedule-double');
+        if(dbl){dbl.hidden=!next;dbl.dataset.count='1';dbl.classList.remove('checked');dbl.textContent='+';}
         const key=`${target.dataset.subjectId}:${target.dataset.date}`;
         if(next){
           if(!lessonScheduleData.entries.some(e=>`${e.subject_id}:${e.lesson_date}`===key)){
-            lessonScheduleData.entries.push({subject_id:Number(target.dataset.subjectId),lesson_date:target.dataset.date});
+            lessonScheduleData.entries.push({subject_id:Number(target.dataset.subjectId),lesson_date:target.dataset.date,lessons_count:1});
           }
         }else{
           lessonScheduleData.entries=lessonScheduleData.entries.filter(e=>`${e.subject_id}:${e.lesson_date}`!==key);
@@ -907,6 +911,16 @@ document.addEventListener('click',async event=>{
         // لا نُعيد رسم الجدول كله (يرجع إلى أعلى الصفحة ويطوي الأشهر)؛ نحدّث لوحة المطابقة وحدها.
         try{const audit=await api('/lesson-schedule/audit?stageSeasonId='+lessonScheduleData.stage_season_id);const box=document.querySelector('#lesson-audit-panel');if(box)box.innerHTML=lessonAuditPanelHtml(audit);}catch{}
         notify(next?'تمت إضافة تاريخ النشر إلى الجدول.':'أزيل تاريخ النشر من الجدول.');
+      }catch(e){notify(e.message,true);}finally{busy=false;}
+    }
+    else if(a==='lesson-schedule-count'){
+      busy=true;const cur=Number(target.dataset.count||1),next=cur>1?1:2;
+      try{
+        const r=await api('/lesson-schedule/count',{stageSeasonId:lessonScheduleData.stage_season_id,subjectId:Number(target.dataset.subjectId),lessonDate:target.dataset.date,count:next},'POST');
+        target.dataset.count=String(next);target.classList.toggle('checked',next>1);target.textContent=next>1?'×'+next:'+';
+        const e=lessonScheduleData.entries.find(x=>`${x.subject_id}:${x.lesson_date}`===`${target.dataset.subjectId}:${target.dataset.date}`);if(e)e.lessons_count=next;
+        try{const audit=await api('/lesson-schedule/audit?stageSeasonId='+lessonScheduleData.stage_season_id);const box=document.querySelector('#lesson-audit-panel');if(box)box.innerHTML=lessonAuditPanelHtml(audit);}catch{}
+        notify(next>1?('صار الموعد درسين: عند تفعيل الأول يُفعَّل الثاني معه تلقائيًا'+(r.companions_created?'، وفُعّل الثاني الآن لأن درس اليوم مفتوح':'')+'.'):'عاد الموعد إلى درس واحد. لا يُحذف أي درس سبق تفعيله.');
       }catch(e){notify(e.message,true);}finally{busy=false;}
     }
     else if(a==='student-participation'){
@@ -1043,6 +1057,12 @@ document.addEventListener('submit',async event=>{
       if(!await confirmAction('ربط هذا الدرس الموجود بموعد الجدول؟ لن يُفعَّل درس جديد ولن يتغير أي حضور.'))return;
       await api('/scheduled-lessons/link',{stageSeasonId:body.stageSeasonId,subjectId:body.subjectId,scheduleDate:body.scheduleDate,lessonId:body.lessonId},'POST');
       closeDetail();await loadLessonManagement();notify('رُبط الدرس الموجود بموعده، وزال الموعد من قائمة غير المفعّل. الحضور لم يتغير.');
+    }else if(form.id==='extra-lesson-form'){
+      if(!body.subjectId)throw Error('اختر المادة.');
+      const name=form.querySelector('select[name=subjectId]').selectedOptions[0].textContent;
+      if(!await confirmAction(`تفعيل درس إضافي اليوم لمادة «${name}»؟ يُتاح الحضور 24 ساعة من الآن ويُبلَّغ الطلبة.`))return;
+      const r=await api('/lessons/extra',{subjectId:Number(body.subjectId)},'POST');
+      await loadLessonManagement();notify(`فُعّل الدرس رقم ${r.lessonsToday} لمادة «${r.subjectName}» اليوم، وحُفظ إشعار ${r.notified} طالبًا.`);
     }else if(form.classList.contains('activate-scheduled-lesson')){
       if(!await confirmAction('تفعيل هذه المادة من الجدول بدون منشور؟ يُتاح الحضور 24 ساعة من الآن ويُبلَّغ الطلبة.'))return;
       const r=await api('/scheduled-lessons/activate',{stageSeasonId:body.stageSeasonId,subjectId:body.subjectId,scheduleDate:body.scheduleDate},'POST');
