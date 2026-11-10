@@ -21,7 +21,8 @@ function summarizeLessonScheduleAudit(stageSeasonId, summaries, lessons) {
     const row={...lesson,id:Number(lesson.id),day_order:Number(lesson.day_order),attendance_count:Number(lesson.attendance_count)};
     // Being outside the timetable and sharing a date are independent facts.
     if(!row.in_schedule)sub.outside_count++;
-    if(row.day_order>1) {
+    // يومٌ مجدول بدرسين يقبل درسين دون اعتبار الثاني «مكررًا».
+    if(row.day_order>Number(row.planned_lessons||1)) {
       row.issue='repeated_day';sub.repeated_count++;sub.exceptions.push(row);
     } else if(!row.in_schedule) {
       row.issue='outside_schedule';sub.exceptions.push(row);

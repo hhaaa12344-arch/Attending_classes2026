@@ -17,6 +17,7 @@ async function readJson(req) {
 }
 function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,origin,wakeNotifications}) {
   const overrides=require('./adminOverrides').createAdminOverrides(db.pool);
+  const extraLessons=require('./extraLessons').createExtraLessons(db,{tz:studies.SCHEDULE_TZ});
   const reportGrants=require('./reportGrants').createReportGrants(db.pool,{tz:studies.SCHEDULE_TZ,acceptDays:[...new Set([...studies.REPORT_SEND_DAYS,...studies.REPORT_LATE_DAYS])]});
   const discussionAttendance=require('./discussionAttendance').createDiscussionAttendance(db.pool);
   const lessonRecovery=require('./lessonRecovery').createLessonRecovery(db);
@@ -245,6 +246,10 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           await audit(actor.id,body.checked===true?'set_lesson_schedule':'remove_lesson_schedule','lesson_schedule',
             Number(body.subjectId),null,{stage_season_id:Number(body.stageSeasonId),lesson_date:body.lessonDate,checked:body.checked===true});
         }
+        else if(route==='/lesson-schedule/count'&&req.method==='POST'){
+          result=await db.setLessonScheduleCount(positiveInt(body.stageSeasonId),positiveInt(body.subjectId),body.lessonDate,body.count);
+          await audit(actor.id,'set_lesson_schedule_count','lesson_schedule',Number(body.subjectId),null,{stage_season_id:Number(body.stageSeasonId),lesson_date:body.lessonDate,count:Number(body.count),companions_created:result.companions_created});
+        }
         else if(route==='/schedule'&&req.method==='POST'){
           result=await studies.addScheduleSlot(positiveInt(body.groupId),{dayOfWeek:body.dayOfWeek,hour:body.hour,minute:body.minute,teacherId:positiveInt(body.teacherId)});
           await audit(actor.id,'create_slot','slot',result.slot.id,null,result.slot);
@@ -359,6 +364,10 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if((m=/^\/pending-lessons\/(\d+)\/restore$/.exec(route))&&req.method==='POST'){
           result=await lessonRecovery.restore(positiveInt(m[1]),positiveInt(body.subjectId),{actorId:actor.id,originalPublishedAt:body.originalPublishedAt,targetScheduleDate:body.scheduleDate});
           if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Lesson recovery delivery failed:',err.code||'DELIVERY_ERROR'));
+        }
+        else if(route==='/lessons/extra'&&req.method==='POST'){
+          result=await extraLessons.activate(positiveInt(body.subjectId),actor.id);
+          if(wakeNotifications)Promise.resolve().then(wakeNotifications).catch(err=>console.error('Extra lesson delivery failed:',err.code||'DELIVERY_ERROR'));
         }
         else if(route==='/scheduled-lessons/link'&&req.method==='POST')result=await scheduledFallback.linkExisting({stageSeasonId:body.stageSeasonId,subjectId:body.subjectId,scheduleDate:body.scheduleDate,lessonId:body.lessonId,actorId:actor.id});
         else if(route==='/scheduled-lessons/activate'&&req.method==='POST'){

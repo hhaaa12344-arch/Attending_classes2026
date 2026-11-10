@@ -153,6 +153,7 @@ async function initSchema() {
     ALTER TABLE students ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;
     ALTER TABLE subjects ADD COLUMN IF NOT EXISTS hashtag TEXT;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'manual';
+    ALTER TABLE lessons ADD COLUMN IF NOT EXISTS companion_of INTEGER REFERENCES lessons(id) ON DELETE SET NULL;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_url TEXT;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_chat_id BIGINT;
     ALTER TABLE lessons ADD COLUMN IF NOT EXISTS source_message_id BIGINT;
@@ -206,6 +207,8 @@ async function initSchema() {
     );
     CREATE INDEX IF NOT EXISTS idx_lesson_schedule_stage_season_date
       ON lesson_schedule_entries(stage_season_id, lesson_date);
+    -- عدد الدروس المجدولة للمادة في اليوم (1 افتراضيًا). عند 2 يُفعَّل مع الدرس الأول درس مرافق تلقائيًا.
+    ALTER TABLE lesson_schedule_entries ADD COLUMN IF NOT EXISTS lessons_count INTEGER NOT NULL DEFAULT 1;
 
     -- تقويم تعليق الدراسة، خاص بموسم مرحلة واحدة ويشمل جميع طلبتها ومجموعاتها.
     CREATE TABLE IF NOT EXISTS stage_calendar_blocks (
@@ -1830,6 +1833,33 @@ const getDeepChannelDiagnostics = async () => {
 };
 
 // ---------- الدروس ----------
+// درس مرافق: إن كان موعد الجدول لهذه المادة في هذا اليوم «درسين» (lessons_count>1) فعند تفعيل الدرس الأول
+// يُفعَّل معه تلقائيًا ما ينقص من الدروس بالمهلة نفسها (الدرس 15 ثم 16 مثلًا)، ولكل درس حضوره وترقيمه.
+// لا يُنشأ مرافق إن كان في اليوم دروس تكفي أصلًا، ولا عند تعديل منشور سبق تفعيله.
+const NO_COMPANION_SOURCES = new Set(['schedule_companion', 'manual_extra', 'channel_schedule_recovered']);
+async function createCompanionLessons(client, lesson) {
+  // كل القيم تُقرأ من صف الدرس الأصلي داخل SQL، فلا تتأثر الأوقات بمنطقة توقيت الخادم.
+  const r = await client.query(
+    `WITH day AS (SELECT p.*, COALESCE(p.schedule_date,(p.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date) AS d
+                  FROM lessons p WHERE p.id=$1),
+     planned AS (SELECT e.lessons_count FROM lesson_schedule_entries e, day
+       WHERE e.stage_season_id=day.stage_season_id AND e.subject_id=day.subject_id AND e.lesson_date=day.d AND e.lessons_count>1
+         AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=e.stage_season_id
+           AND b.kind='holiday' AND day.d BETWEEN b.start_date AND b.end_date)),
+     existing AS (SELECT COUNT(*)::int AS n FROM effective_lessons l, day
+       WHERE l.stage_season_id=day.stage_season_id AND l.subject_id=day.subject_id
+         AND COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date)=day.d)
+     INSERT INTO lessons(subject_id, stage_season_id, activated_at, active_until, source_type, source_url,
+                         attendance_opened_at, schedule_date, companion_of)
+     SELECT day.subject_id, day.stage_season_id, day.activated_at, day.active_until, 'schedule_companion',
+            day.source_url, day.attendance_opened_at, day.schedule_date, day.id
+     FROM day, generate_series(1,(SELECT lessons_count FROM planned)-(SELECT n FROM existing))
+     RETURNING *`,
+    [lesson.id]
+  );
+  return r.rows;
+}
+
 const activateLesson = async (
   subjectId,
   hours = 24,
@@ -1842,7 +1872,8 @@ const activateLesson = async (
 ) => {
   // A timetable fallback may represent a different lecture. Preserve its identity
   // and attendance; never attach a Telegram post by matching subject/day alone.
-  return (options.client || pool)
+  const executor = options.client || pool;
+  const lesson = await executor
     .query(
       `INSERT INTO lessons(
          subject_id, stage_season_id, activated_at, active_until, source_type, source_url,
@@ -1859,10 +1890,15 @@ const activateLesson = async (
        ON CONFLICT (source_chat_id, source_message_id)
          WHERE source_chat_id IS NOT NULL AND source_message_id IS NOT NULL
        DO UPDATE SET source_url=COALESCE(EXCLUDED.source_url, lessons.source_url)
-       RETURNING *`,
+       RETURNING *, (xmax = 0) AS inserted_now`,
       [subjectId, hours, sourceType, sourceUrl, sourceChatId, sourceMessageId, activatedAt, options.attendanceOpenedAt||null,options.scheduleDate||null]
     )
     .then((r) => r.rows[0]);
+  if (lesson && lesson.inserted_now && !options.skipCompanions && !NO_COMPANION_SOURCES.has(sourceType)) {
+    await createCompanionLessons(executor, lesson);
+  }
+  if (lesson) delete lesson.inserted_now;
+  return lesson;
 };
 
 const getLessonBySource = (chatId, messageId) => pool.query(`
@@ -3046,7 +3082,7 @@ async function getLessonSchedule(stageSeasonId) {
   `, [stageSeasonId])).rows[0];
   if (!ss) return null;
   const subjects = (await pool.query('SELECT id,name FROM subjects WHERE stage_id=$1 ORDER BY id', [ss.stage_id])).rows;
-  const entries = (await pool.query(`SELECT id,subject_id,lesson_date::text AS lesson_date
+  const entries = (await pool.query(`SELECT id,subject_id,lesson_date::text AS lesson_date,lessons_count
     FROM lesson_schedule_entries WHERE stage_season_id=$1 ORDER BY lesson_date,subject_id`, [stageSeasonId])).rows;
   const startDate = normalizeDateString(ss.start_date) || '';
   const blocks=(await pool.query(`SELECT id,kind,start_date::text,end_date::text,note FROM stage_calendar_blocks
@@ -3060,7 +3096,7 @@ async function getLessonScheduleAudit(stageSeasonId) {
   const season=(await pool.query(`SELECT ss.id,ss.stage_id FROM stage_seasons ss WHERE ss.id=$1`,[stageSeasonId])).rows[0];
   if(!season)return null;
   const summaries=(await pool.query(`SELECT sub.id AS subject_id,sub.name AS subject_name,
-    (SELECT COUNT(*)::int FROM lesson_schedule_entries e
+    (SELECT COALESCE(SUM(e.lessons_count),0)::int FROM lesson_schedule_entries e
      WHERE e.stage_season_id=$1 AND e.subject_id=sub.id) AS planned_count,
     (SELECT COUNT(*)::int FROM effective_lessons l
      WHERE l.stage_season_id=$1 AND l.subject_id=sub.id) AS activated_count,
@@ -3084,7 +3120,9 @@ async function getLessonScheduleAudit(stageSeasonId) {
   SELECT o.id,o.subject_id,o.activated_at,o.lesson_day::text AS lesson_date,o.source_type,o.source_url,o.day_order,
     EXISTS(SELECT 1 FROM lesson_schedule_entries e WHERE e.stage_season_id=$1
        AND e.subject_id=o.subject_id AND e.lesson_date=o.lesson_day) AS in_schedule,
-    (SELECT COUNT(*)::int FROM attendance a WHERE a.lesson_id=o.id) AS attendance_count
+    (SELECT COUNT(*)::int FROM attendance a WHERE a.lesson_id=o.id) AS attendance_count,
+    COALESCE((SELECT e.lessons_count FROM lesson_schedule_entries e WHERE e.stage_season_id=$1
+       AND e.subject_id=o.subject_id AND e.lesson_date=o.lesson_day),1) AS planned_lessons
   FROM ordered o ORDER BY o.subject_id,o.lesson_day,o.activated_at,o.id`,[stageSeasonId,season.stage_id])).rows;
   return summarizeLessonScheduleAudit(season.id,summaries,lessons);
 }
@@ -3152,8 +3190,34 @@ async function setLessonScheduleEntry(stageSeasonId,subjectId,lessonDate,checked
   return { stage_season_id: stageSeasonId, subject_id: subjectId, lesson_date: date, checked: false };
 }
 
+// عدد دروس المادة المجدولة في يوم (1 أو 2...). إن كان اليوم هو اليوم الحالي ودرسه الأصلي ما زال مفتوحًا
+// ونقص العدد فيُفعَّل المرافق فورًا بالمهلة نفسها.
+async function setLessonScheduleCount(stageSeasonId, subjectId, lessonDate, count) {
+  const date = String(lessonDate || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('تاريخ الجدول غير صالح.');
+  count = Number(count);
+  if (!Number.isInteger(count) || count < 1 || count > 4) throw new Error('عدد الدروس يجب أن يكون من 1 إلى 4.');
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const entry = (await c.query(
+      `UPDATE lesson_schedule_entries SET lessons_count=$4 WHERE stage_season_id=$1 AND subject_id=$2 AND lesson_date=$3::date RETURNING *`,
+      [stageSeasonId, subjectId, date, count])).rows[0];
+    if (!entry) throw new Error('فعّل علامة الموعد في الجدول أولًا ثم حدد عدد الدروس.');
+    // درس اليوم الأصلي المفتوح بلا مرافق كافٍ: أضف المرافق الآن.
+    const primary = (await c.query(
+      `SELECT l.* FROM effective_lessons l WHERE l.stage_season_id=$1 AND l.subject_id=$2
+         AND COALESCE(l.schedule_date,(l.activated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Baghdad')::date)=$3::date
+         AND l.active_until>now() ORDER BY l.activated_at,l.id LIMIT 1`, [stageSeasonId, subjectId, date])).rows[0];
+    const created = primary && count > 1 ? await createCompanionLessons(c, primary) : [];
+    await c.query('COMMIT');
+    return { stage_season_id: stageSeasonId, subject_id: subjectId, lesson_date: date, lessons_count: count, companions_created: created.length };
+  } catch (err) { await c.query('ROLLBACK'); throw err; } finally { c.release(); }
+}
+
 module.exports = {
   pool,
+  setLessonScheduleCount,
   initSchema,
   isStudentRegistrationOpen,
   setStudentRegistrationOpen,
