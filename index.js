@@ -78,7 +78,12 @@ bot.use(async(ctx,next)=>{
 // طابور إرسال عام ينظّم معدّل الرسائل ويعالج 429؛ يُستعمل للبث الجماعي.
 const { createTelegramQueue, PRIORITY } = require('./telegramQueue');
 const tgQueue = createTelegramQueue(bot.telegram);
-const outboxWorker = require('./outbox').createOutboxWorker(db.pool,tgQueue,bot.telegram.deleteMessage.bind(bot.telegram));
+const weeklyReportReminders = require('./weeklyReportReminders').createWeeklyReportReminders(db.pool, {
+  sendDays: studies.REPORT_SEND_DAYS, lateDays: studies.REPORT_LATE_DAYS, tz: studies.SCHEDULE_TZ,
+  dayNames: { 1: 'الاثنين', 2: 'الثلاثاء', 3: 'الأربعاء', 4: 'الخميس', 5: 'الجمعة', 6: 'السبت', 7: 'الأحد' },
+});
+const outboxWorker = require('./outbox').createOutboxWorker(db.pool,tgQueue,bot.telegram.deleteMessage.bind(bot.telegram),
+  {prepareNotification:weeklyReportReminders.prepareNotification});
 const broadcasts = require('./broadcasts').createBroadcasts(db.pool);
 const accountLinks = require('./accountLinks').createAccountLinks(db.pool);
 // Both background sends and replies share the same rate limiter.
@@ -7186,10 +7191,6 @@ async function main() {
     .then((r) => { if (r.queued) console.log(`Single-attendance announcement queued: ${r.queued} (students ${r.students}, teachers ${r.teachers})`); })
     .catch((err) => console.error('Single-attendance announcement failed:', err.message));
   // تذكير التقارير: الجمعة (آخر يوم) والسبت (انتهت المهلة) لمن لم يرسل تقرير الأسبوع.
-  const weeklyReportReminders = require('./weeklyReportReminders').createWeeklyReportReminders(db.pool, {
-    sendDays: studies.REPORT_SEND_DAYS, lateDays: studies.REPORT_LATE_DAYS, tz: studies.SCHEDULE_TZ,
-    dayNames: { 1: 'الاثنين', 2: 'الثلاثاء', 3: 'الأربعاء', 4: 'الخميس', 5: 'الجمعة', 6: 'السبت', 7: 'الأحد' },
-  });
   const sweepWeeklyReports = () => weeklyReportReminders.sweep()
     .then((r) => { if (r.queued) console.log(`Weekly report reminders (${r.kind}): queued ${r.queued}`); })
     .catch((err) => console.error('Weekly report reminders failed:', err.message));

@@ -20,13 +20,13 @@ function createTelegramQueue(telegram, { rate = DEFAULT_RATE, maxPending = 2000,
   let pausedUntil = 0; // يُضبط عند 429 لاحترام retry_after
   let stopped = false;
 
-  function enqueue(method, args, { priority = PRIORITY.normal } = {}) {
+  function enqueue(method, args, { priority = PRIORITY.normal, beforeSend = null } = {}) {
     return new Promise((resolve, reject) => {
       if (stopped || queue.length >= maxPending) {
         return reject(Object.assign(new Error('Telegram queue is busy'), { code: stopped ? 'QUEUE_STOPPED' : 'QUEUE_FULL' }));
       }
       // seq يحفظ ترتيب الوصول ضمن الأولوية الواحدة (FIFO)
-      queue.push({ method, args, priority, seq: seq++, resolve, reject, attempts: 0 });
+      queue.push({ method, args, priority, seq: seq++, resolve, reject, attempts: 0, beforeSend });
       queue.sort((a, b) => a.priority - b.priority || a.seq - b.seq);
       drain();
     });
@@ -43,7 +43,10 @@ function createTelegramQueue(telegram, { rate = DEFAULT_RATE, maxPending = 2000,
       }
       const job = queue.shift();
       try {
-        const result = await send[job.method](...job.args);
+        // Resolve mutable notices only when they reach Telegram, not while waiting.
+        const args = job.beforeSend ? await job.beforeSend(job.args) : job.args;
+        if (args === null) { job.resolve({ notificationSkipped: true }); continue; }
+        const result = await send[job.method](...args);
         job.resolve(result);
       } catch (err) {
         const code = err && err.response && err.response.error_code;

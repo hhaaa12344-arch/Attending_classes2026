@@ -7,7 +7,7 @@ async function enqueueNotification(client, { key, chatId, text, extra = {}, meth
   [key, chatId, method, JSON.stringify([text, extra]), priority, expiresAt,JSON.stringify(mark)]);
 }
 
-function createOutboxWorker(pool, queue, deleteMessage = null) {
+function createOutboxWorker(pool, queue, deleteMessage = null, { prepareNotification = null } = {}) {
   let running = false;
   let stopped = false;
   let nextPoll = 0;
@@ -55,7 +55,18 @@ function createOutboxWorker(pool, queue, deleteMessage = null) {
         const job = rows[0];
         if (!job) {nextPoll=Date.now()+5000;break;}
         try {
-          const sent=await queue[job.method](Number(job.chat_id), ...job.payload, { priority: job.priority });
+          const beforeSend = prepareNotification && job.dedupe_key.startsWith('weekly-report:') ? async () => {
+            const payload = await prepareNotification(job);
+            if (payload === null) return null;
+            job.payload = payload;
+            await pool.query('UPDATE notification_outbox SET payload=$2::jsonb WHERE id=$1', [job.id, JSON.stringify(payload)]);
+            return [Number(job.chat_id), ...payload];
+          } : null;
+          const sent=await queue[job.method](Number(job.chat_id), ...job.payload, { priority: job.priority, beforeSend });
+          if (sent?.notificationSkipped) {
+            await pool.query("UPDATE notification_outbox SET status='expired',lease_until=NULL,last_error=NULL WHERE id=$1", [job.id]);
+            continue;
+          }
           const c=await pool.connect();
           try{
             await c.query('BEGIN');

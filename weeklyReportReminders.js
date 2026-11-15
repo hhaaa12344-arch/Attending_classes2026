@@ -20,18 +20,12 @@ function createWeeklyReportReminders(pool, { sendDays, tz, dayNames, lateDays = 
   const nextDay = (lastDay % 7) + 1;
   const daysLabel = sendDays.map((d) => dayNames[d]).join(' والـ');
 
-  async function sweep({ at = null } = {}) {
-    const now = (await pool.query(
-      `SELECT EXTRACT(ISODOW FROM (t.at AT TIME ZONE $1))::int AS dow,
-              EXTRACT(HOUR FROM (t.at AT TIME ZONE $1))::int AS hour,
-              to_char(t.at AT TIME ZONE $1,'YYYY-MM-DD') AS day
-       FROM (SELECT COALESCE($2::timestamptz, now()) AS at) t`, [tz, at])).rows[0];
-    let kind = null;
-    if (now.dow === lastDay && now.hour >= fridayHour) kind = 'last-day';
-    else if (now.dow === nextDay && now.hour >= saturdayHour) kind = 'missed';
-    if (!kind) return { kind: null, queued: 0 };
+  const acceptDays = [...new Set([...sendDays, ...lateDays])];
+  const textFor = (kind, subjects) => kind === 'last-day'
+    ? lastDayText(subjects) : missedText(subjects, daysLabel, lateDays.includes(nextDay));
 
-    const rows = (await pool.query(
+  async function missingReports(at = null, studentId = null) {
+    return (await pool.query(
       `WITH t AS (SELECT COALESCE($2::timestamptz, now()) AS at),
        active AS (
          SELECT DISTINCT ON (e.student_id) e.student_id,e.stage_season_id,ss.stage_id
@@ -45,6 +39,7 @@ function createWeeklyReportReminders(pool, { sendDays, tz, dayNames, lateDays = 
        JOIN participation_modes pm ON pm.student_id=st.id AND pm.stage_season_id=a.stage_season_id AND pm.mode='report'
        JOIN subjects sub ON sub.id=pm.subject_id AND sub.stage_id=a.stage_id
        WHERE st.is_active=true AND st.telegram_id IS NOT NULL
+         AND ($4::int IS NULL OR st.id=$4)
          AND participation_enabled(pm.subject_id,pm.stage_season_id)
          AND NOT EXISTS(SELECT 1 FROM stage_calendar_blocks b WHERE b.stage_season_id=a.stage_season_id
            AND b.kind='discussion_end' AND (((SELECT at FROM t) AT TIME ZONE $1)::date)>=b.start_date)
@@ -56,14 +51,42 @@ function createWeeklyReportReminders(pool, { sendDays, tz, dayNames, lateDays = 
              AND (r.counted_week IS NOT NULL OR EXTRACT(ISODOW FROM ((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $1))::int = ANY($3::int[]))
              AND COALESCE(r.counted_week,(date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $1)+interval '1 day')-interval '1 day')::date)
                = (date_trunc('week',(((SELECT at FROM t)) AT TIME ZONE $1)+interval '1 day')-interval '1 day')::date)
-       GROUP BY st.id,st.telegram_id ORDER BY st.id`, [tz, at, sendDays])).rows;
+       GROUP BY st.id,st.telegram_id ORDER BY st.id`, [tz, at, acceptDays, studentId])).rows;
+
+  }
+
+  // Recheck at actual delivery (and every retry), including jobs queued before this fix.
+  async function prepareNotification(job, { at = null } = {}) {
+    if (!job.dedupe_key.startsWith('weekly-report:')) return job.payload;
+    const match = /^weekly-report:(last-day|missed):(\d{4}-\d{2}-\d{2}):(\d+)$/.exec(job.dedupe_key);
+    if (!match) return null;
+    const today = (await pool.query(
+      `SELECT to_char(COALESCE($2::timestamptz,now()) AT TIME ZONE $1,'YYYY-MM-DD') AS day`, [tz, at])).rows[0].day;
+    if (today !== match[2]) return null;
+    const [row] = await missingReports(at, Number(match[3]));
+    if (!row || String(row.telegram_id) !== String(job.chat_id)) return null;
+    return [textFor(match[1], row.subjects), job.payload[1] || {}];
+  }
+
+  async function sweep({ at = null } = {}) {
+    const now = (await pool.query(
+      `SELECT EXTRACT(ISODOW FROM (t.at AT TIME ZONE $1))::int AS dow,
+              EXTRACT(HOUR FROM (t.at AT TIME ZONE $1))::int AS hour,
+              to_char(t.at AT TIME ZONE $1,'YYYY-MM-DD') AS day
+       FROM (SELECT COALESCE($2::timestamptz, now()) AS at) t`, [tz, at])).rows[0];
+    let kind = null;
+    if (now.dow === lastDay && now.hour >= fridayHour) kind = 'last-day';
+    else if (now.dow === nextDay && now.hour >= saturdayHour) kind = 'missed';
+    if (!kind) return { kind: null, queued: 0 };
+
+    const rows = await missingReports(at);
 
     // ينتهي صلاحية التذكير بنهاية يوم المعهد الحالي
     const expires = (await pool.query(
       `SELECT ((((COALESCE($2::timestamptz,now())) AT TIME ZONE $1)::date+1)::timestamp AT TIME ZONE $1) AS e`, [tz, at])).rows[0].e;
     let queued = 0;
     for (const row of rows) {
-      const text = kind === 'last-day' ? lastDayText(row.subjects) : missedText(row.subjects, daysLabel, lateDays.includes(nextDay));
+      const text = textFor(kind, row.subjects);
       const r = await pool.query(
         `INSERT INTO notification_outbox(dedupe_key,chat_id,payload,priority,expires_at)
          VALUES($1,$2,$3::jsonb,5,$4) ON CONFLICT(dedupe_key) DO NOTHING RETURNING id`,
@@ -72,7 +95,7 @@ function createWeeklyReportReminders(pool, { sendDays, tz, dayNames, lateDays = 
     }
     return { kind, eligible: rows.length, queued };
   }
-  return { sweep };
+  return { sweep, prepareNotification };
 }
 
 module.exports = { createWeeklyReportReminders, lastDayText, missedText };
