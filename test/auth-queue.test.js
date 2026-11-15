@@ -52,3 +52,11 @@ test('update gate serializes one user and permits independent users, including a
   await assert.rejects(()=>gate({from:{id:1}},async()=>{throw Error('test');}));let resumed=false;await gate({from:{id:1}},async()=>{resumed=true;});assert.ok(resumed);
 });
 module.exports={signed,fakeToken};
+
+test('mutable notifications are revalidated on Telegram retry and can be cancelled',async()=>{
+  let attempts=0,checks=0;
+  const send=async()=>{attempts++;throw {response:{error_code:429,parameters:{retry_after:1}}};};
+  const queue=createTelegramQueue({sendMessage:send,sendPhoto:send,sendVideo:send,sendDocument:send},{sleep:async()=>{}});
+  const result=await queue.sendMessage(1,'old',{}, {beforeSend:async args=>++checks===1?args:null});
+  assert.deepEqual(result,{notificationSkipped:true});assert.equal(attempts,1);assert.equal(checks,2);queue.stop();
+});
