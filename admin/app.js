@@ -97,6 +97,8 @@ function closeDetail(){
   $('#detail').close();
 }
 const empty=(title,text='')=>`<div class="empty"><h2>${esc(title)}</h2><p>${esc(text)}</p></div>`;
+const RATING_AR={good:'جيد',acceptable:'مقبول',weak:'ضعيف'};
+const ratingLabel=r=>RATING_AR[r.rating]||(r.score==null?'لم يُقيّم':'تقييم سابق '+r.score);
 const button=(title,action,extra='',className='')=>`<button type="button" class="${className}" data-action="${action}" ${extra}>${esc(title)}</button>`;
 const table=(headers,rows)=>rows.length?`<div class="table-wrap"><table><thead><tr>${headers.map(h=>`<th scope="col">${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${row.map(cell=>`<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`:empty('لا توجد سجلات مطابقة','يمكن تغيير المرشّحات أو العودة إلى المرحلة.');
 const pager=(total,size=25)=>`<div class="pagination"><span>${esc(total)} سجلًا · الصفحة ${page+1}</span><div>${page>0?button('السابق','prev'):''} ${((page+1)*size<total)?button('التالي','next'):''}</div></div>`;
@@ -228,7 +230,7 @@ async function renderStage(){
   else if(tab==='reports'){
     const data=await api('/reports?'+new URLSearchParams({seasonId:s.stage_season_id,page,...(filters.groupId?{groupId:filters.groupId}:{})}));
     body=`<form id="report-filter" class="toolbar"><label>المجموعة<select name="groupId">${groupOptions(s.groups,filters.groupId)}</select></label><button>عرض</button></form>`+
-      table(['الطالب والمادة','المجموعة وقت الإرسال','التاريخ','الدرجة / 15','المراجعة'],data.rows.map(r=>[`${esc(r.full_name)}<div class="subtle">${esc(r.subject_name)}</div>`,esc(r.group_title_snapshot||'قديم: بلا مجموعة موثقة'),stamp(r.submitted_at),r.score==null?'لم يُقيّم':esc(r.score),button(ro?'عرض':'عرض وتقييم','report',`data-id="${r.id}"`)]))+pager(data.total);
+      table(['الطالب والمادة','المجموعة وقت الإرسال','التاريخ','مستوى التقييم','المراجعة'],data.rows.map(r=>[`${esc(r.full_name)}<div class="subtle">${esc(r.subject_name)}</div>`,esc(r.group_title_snapshot||'قديم: بلا مجموعة موثقة'),stamp(r.submitted_at),esc(ratingLabel(r)),button(ro?'عرض':'عرض وتقييم','report',`data-id="${r.id}"`)]))+pager(data.total);
     if(n===sequence)window.currentReports=data.rows;
   }else if(tab==='schedule'){
     const [slots,management]=await Promise.all([api('/schedule?seasonId='+s.stage_season_id),sessionManagementContent(s,ro)]);
@@ -806,8 +808,14 @@ document.addEventListener('click',async event=>{
       if(!await confirmAction('إنهاء هذه المباحثة وفتح الحضور الثاني؟'))return;busy=true;const result=await api('/sessions/'+target.dataset.id+'/end',{},'POST');await refresh();notify(result.status==='already_open'?'حضور النهاية مفتوح بالفعل؛ لم تتغير مهلته.':'فُتح الحضور الثاني وحُفظت إشعارات الطلبة للإرسال.');
     }else if(a==='report'){
       const r=window.currentReports.find(x=>String(x.id)===target.dataset.id);if(!r)return;
-      dialog('مراجعة التقرير',`<h3>${esc(r.full_name)} — ${esc(r.subject_name)}</h3><p>${esc(r.group_title_snapshot||'سجل قديم بلا مجموعة موثقة')} · ${stamp(r.submitted_at)}</p><div class="report-note">${esc(r.note||'التقرير مرفق كملف.')}</div>${button('إرسال المرفق إلى حسابي في البوت','report-send',`data-id="${r.id}"`)}${button('التواصل مع الطالب','contact-student',`data-id="${r.student_id}"`)}<form id="grade-report" data-id="${r.id}" class="detail-section"><label>درجة التقرير من 15<input name="score" type="number" min="0" max="15" step="0.01" value="${esc(r.score??'')}" required></label><div class="form-actions"><button class="primary">حفظ التقييم</button></div></form>`);
+      dialog('مراجعة التقرير',`<h3>${esc(r.full_name)} — ${esc(r.subject_name)}</h3><p>${esc(r.group_title_snapshot||'سجل قديم بلا مجموعة موثقة')} · ${stamp(r.submitted_at)}</p><div class="report-note">${esc(r.note||'التقرير مرفق كملف.')}</div>${button('إرسال المرفق إلى حسابي في البوت','report-send',`data-id="${r.id}"`)}${button('التواصل مع الطالب','contact-student',`data-id="${r.student_id}"`)}<div class="detail-section"><strong>مستوى التقرير</strong><div class="form-actions">${['good','acceptable','weak'].map(k=>button(RATING_AR[k],'report-rate',`data-id="${r.id}" data-rating="${k}"`,r.rating===k?'primary':'')).join('')}</div>${button('حذف التقرير (خاطئ أو مكرر)','report-delete',`data-id="${r.id}"`,'danger')}</div>`);
     }else if(a==='report-send'){busy=true;await api('/reports/'+target.dataset.id+'/send',{},'POST');notify('أُدرج التقرير للإرسال إلى حسابك في البوت.');}
+    else if(a==='report-rate'){busy=true;await api('/reports/'+target.dataset.id+'/score',{rating:target.dataset.rating},'POST');closeDetail();await refresh();notify('حُفظ مستوى التقرير.');}
+    else if(a==='report-delete'){
+      if(!await confirmAction('حذف هذا التقرير نهائيًا؟ سيُفتح للطالب إرسال تقرير بديل لأسبوعه في أي يوم، وسيصله إشعار.'))return;
+      busy=true;const res=await api('/reports/'+target.dataset.id+'/delete',{},'POST');closeDetail();await refresh();
+      notify(res.wasGraded?'حُذف التقرير وكان مُقيَّمًا؛ أعد اعتماد درجة التقارير للطالب.':'حُذف التقرير وفُتح للطالب إرسال بديل.');
+    }
     else if(a==='attendance-export'){
       busy=true;const query=new URLSearchParams({stageId:target.dataset.stage,...attendanceFilters,...(currentSeasonId?{seasonId:currentSeasonId}:{})});
       const blob=await api('/lesson-attendance.md?'+query,undefined,'GET','blob');
@@ -1163,7 +1171,6 @@ document.addEventListener('submit',async event=>{
       const result=await api('/exams/'+currentExam.id+'/reopen-missing',{opensAt,closesAt,note:body.note},'POST');
       await showExam(currentExam.id);notify(`أُعيد فتح الامتحان لـ ${result.studentCount} طالبًا، وحُفظ ${result.notified} إشعارًا للإرسال.`);
     }
-    else if(form.id==='grade-report'){await api('/reports/'+form.dataset.id+'/score',body,'POST');closeDetail();await refresh();notify('حُفظ تقييم التقرير.');}
     else if(form.id==='edit-subject'){await api('/subjects/'+form.dataset.id,body,'PATCH');closeDetail();await refresh();notify('حُفظ اسم المادة.');}
     else if(form.id==='edit-teacher'){await api('/teachers/'+form.dataset.id,body,'PATCH');closeDetail();await loadTeachers();notify('حُفظ اسم الأستاذ.');}
     else if(form.id==='edit-group'){await api('/groups/'+form.dataset.id,{capacity:body.capacity,inviteLink:body.inviteLink||null},'PATCH');closeDetail();await refresh();notify('حُفظت بيانات المجموعة.');}
