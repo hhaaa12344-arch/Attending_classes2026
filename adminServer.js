@@ -331,8 +331,16 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
         else if((m=/^\/reports\/(\d+)\/score$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]);const before=(await db.pool.query(`SELECT r.* FROM student_reports r JOIN stage_seasons ss ON ss.id=r.stage_season_id AND ss.is_active=true WHERE r.id=$1`,[id])).rows[0];
           if(!before)throw appError('التقرير غير موجود أو موسمه مؤرشف.');
-          result=await studies.setReportItemScore(id,validScore(body.score,15),actor.id);
+          result=await studies.setReportItemRating(id,String(body.rating||''),actor.id);
           await audit(actor.id,'grade_report','report',id,before,result);
+        }
+        else if((m=/^\/reports\/(\d+)\/delete$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]);
+          const deleted=await studies.deleteReport(id,actor.id);
+          await audit(actor.id,'delete_report','report',id,{student_id:deleted.student_id,subject_id:deleted.subject_id,rating:deleted.rating,score:deleted.score,submitted_at:deleted.submitted_at,note:deleted.note},null);
+          if(deleted.telegram_id)await enqueueNotification(db.pool,{key:`report-deleted:${id}:${Date.now()}`,chatId:deleted.telegram_id,
+            text:`🗑️ حذفت إدارة المعهد تقريرك في مادة «${deleted.subject_name}» لتتمكن من إرسال التقرير الصحيح.\n\nافتح «🗂️ المباحثات والتقارير» ثم «📄 إرسال تقرير»، واختر المادة وأرسل تقريرك في أي يوم؛ سيُحتسب لأسبوع التقرير المحذوف.`});
+          result={deleted:true,wasGraded:!!deleted.was_graded};
         }
         else if((m=/^\/reports\/(\d+)\/send$/.exec(route))&&req.method==='POST'){
           const r=(await db.pool.query('SELECT * FROM student_reports WHERE id=$1',[positiveInt(m[1])])).rows[0];

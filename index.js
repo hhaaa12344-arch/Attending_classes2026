@@ -1319,11 +1319,29 @@ bot.on('message', async (ctx, next) => {
 // ---------------------------------------------------------------------------
 // يُرسل التقرير فور استلامه إلى حساب أستاذ المادة الشخصي على تليجرام،
 // فلا ينتظر الأستاذ نهاية الموسم ليطّلع عليه.
+// حفظ تقرير الطالب: تقرير جديد، أو استبدال تقريره الأخير غير المُقيَّم (تصحيح خطأ).
+async function saveStudentReport(student, state, data) {
+  if (state.replaceReportId) {
+    try {
+      return { report: await studies.replaceReport(student.id, state.subjectId, state.ssId, state.replaceReportId, data), replaced: true };
+    } catch (err) {
+      if (err && err.code && err.status) return { error: err.message };
+      throw err;
+    }
+  }
+  const assignment = await studies.assignStudentToGroup(student.id, state.subjectId, state.ssId);
+  if (!assignment.group) return { error: assignment.message + ' ثم أعد إرسال التقرير.', keepState: true };
+  return { report: await studies.submitReport(student.id, state.subjectId, state.ssId, data), replaced: false };
+}
+const reportSavedText = (saved, subjectName, sent) =>
+  (saved.replaced ? `✅ استُبدل تقريرك في مادة «${subjectName}» بالتقرير الجديد.` : `✅ استُلم تقرير مادة «${subjectName}».`) +
+  (sent.delivered > 0 ? '\nوصل إلى الأستاذ.' : '\nمحفوظ في النظام وسيطّلع عليه الأستاذ.');
+
 async function deliverReportToTeachers(student, subjectId, subjectName, payload) {
   const teachers = await db.listSubjectTeachers(subjectId);
   const recipients = teachers.filter((t) => t.telegram_id);
   const caption =
-    `📄 تقرير جديد\n` +
+    `${payload.replaced ? '🔁 تقرير مُستبدَل: صحّحه الطالب قبل التقييم، وهذا هو المعتمد وما أُرسل قبله ملغى' : '📄 تقرير جديد'}\n` +
     `الطالب: ${student.full_name}\n` +
     `المادة: ${subjectName}\n` +
     `المجموعة: ${payload.groupTitle || 'غير محددة في السجل القديم'}\n` +
@@ -1416,29 +1434,21 @@ bot.on(['document', 'photo'], async (ctx, next) => {
     : msg.photo[msg.photo.length - 1].file_id; // أعلى دقة متاحة
   const kind = msg.document ? 'document' : 'photo';
   if (!(await reportTargetStillValid(student, state))) { userState.delete(ctx.from.id); return ctx.reply(STALE_REPORT_TARGET, studentMainMenu(student)); }
-  const blockedUpload = await studies.getReportSubmissionBlock(student.id, state.subjectId, state.ssId);
+  const blockedUpload = state.replaceReportId ? null : await studies.getReportSubmissionBlock(student.id, state.subjectId, state.ssId);
   if (blockedUpload) { userState.delete(ctx.from.id); return ctx.reply(blockedUpload.message); }
-  const assignment=await studies.assignStudentToGroup(student.id,state.subjectId,state.ssId);
-  if(!assignment.group)return ctx.reply(assignment.message+' ثم أعد إرسال التقرير.');
-  const report=await studies.submitReport(student.id, state.subjectId, state.ssId, {
-    fileId,
-    kind,
-    note: msg.caption || null,
-    sourceMessageId:msg.message_id,
-  });
-  if(!report)return ctx.reply('لم يُضف تقرير جديد: إما أنه محفوظ مسبقًا أو تغيّر موسمك أو نمط مشاركتك.');
+  const saved = await saveStudentReport(student, state, { fileId, kind, note: msg.caption || null, sourceMessageId: msg.message_id });
+  if (saved.error) { if (!saved.keepState) userState.delete(ctx.from.id); return ctx.reply(saved.error); }
+  const report = saved.report;
+  if(!report)return ctx.reply(saved.replaced ? 'لم يُستبدل التقرير: وصلت الرسالة نفسها مسبقًا.' : 'لم يُضف تقرير جديد: إما أنه محفوظ مسبقًا أو تغيّر موسمك أو نمط مشاركتك.');
   const sent = await deliverReportToTeachers(student, state.subjectId, state.subjectName, {
     kind,
     fileId,
     note: msg.caption || null,
     groupTitle:report.group_title_snapshot,
+    replaced: saved.replaced,
   });
   userState.delete(ctx.from.id);
-  return ctx.reply(
-    `✅ استُلم تقرير مادة «${state.subjectName}».` +
-      (sent.delivered > 0 ? '\nوصل إلى الأستاذ.' : '\nمحفوظ في النظام وسيطّلع عليه الأستاذ.'),
-    studentMainMenu(await effectiveStudent(ctx))
-  );
+  return ctx.reply(reportSavedText(saved, state.subjectName, sent), studentMainMenu(await effectiveStudent(ctx)));
 });
 
 instituteLinks.install({ bot, Markup, userState, isAdmin, isInPreview, getPreview,
@@ -1938,27 +1948,22 @@ bot.on('text', async (ctx, next) => {
       return ctx.reply('التقرير النصي قصير جدًا. أرسل نصًا أوفى أو أرسل ملفًا.');
     }
     if (!(await reportTargetStillValid(student, state))) { userState.delete(ctx.from.id); return ctx.reply(STALE_REPORT_TARGET, studentMainMenu(student)); }
-    const blockedText = await studies.getReportSubmissionBlock(student.id, state.subjectId, state.ssId);
+    const blockedText = state.replaceReportId ? null : await studies.getReportSubmissionBlock(student.id, state.subjectId, state.ssId);
     if (blockedText) { userState.delete(ctx.from.id); return ctx.reply(blockedText.message); }
-    const assignment=await studies.assignStudentToGroup(student.id,state.subjectId,state.ssId);
-    if(!assignment.group)return ctx.reply(assignment.message+' ثم أعد إرسال التقرير.');
-    const report=await studies.submitReport(student.id, state.subjectId, state.ssId, {
-      fileId: null,
-      kind: 'text',
-      note: text,
-      sourceMessageId:ctx.message.message_id,
-    });
-    if(!report)return ctx.reply('لم يُضف تقرير جديد: إما أنه محفوظ مسبقًا أو تغيّر موسمك أو نمط مشاركتك.');
+    const saved = await saveStudentReport(student, state, { fileId: null, kind: 'text', note: text, sourceMessageId: ctx.message.message_id });
+    if (saved.error) { if (!saved.keepState) userState.delete(ctx.from.id); return ctx.reply(saved.error); }
+    const report = saved.report;
+    if(!report)return ctx.reply(saved.replaced ? 'لم يُستبدل التقرير: وصلت الرسالة نفسها مسبقًا.' : 'لم يُضف تقرير جديد: إما أنه محفوظ مسبقًا أو تغيّر موسمك أو نمط مشاركتك.');
     const sent = await deliverReportToTeachers(student, state.subjectId, state.subjectName, {
       kind: 'text',
       fileId: null,
       note: text,
       groupTitle:report.group_title_snapshot,
+      replaced: saved.replaced,
     });
     userState.delete(ctx.from.id);
     return ctx.reply(
-      `✅ استُلم تقرير مادة «${state.subjectName}».` +
-        (sent.delivered > 0 ? '\nوصل إلى الأستاذ.' : '\nمحفوظ في النظام وسيطّلع عليه الأستاذ.'),
+      reportSavedText(saved, state.subjectName, sent),
       studentMainMenu(await effectiveStudent(ctx))
     );
   }
@@ -1968,26 +1973,10 @@ bot.on('text', async (ctx, next) => {
     userState.delete(ctx.from.id);return ctx.reply('درجة حضور الدروس غير معتمدة ضمن نظام الدرجات الحالي.');
   }
 
-  // -------- درجة تقرير مفرد (تقييم جزئي) --------
+  // تقييم التقرير بدرجة رقمية أُلغي: المستوى (جيد/مقبول/ضعيف) هو التقييم الوحيد. نُنهي أي حالة قديمة عالقة.
   if (state.action === 'report_item_score') {
-    const score = Number(ctx.message.text.trim());
-    const max = studies.GRADE_WEIGHTS.participationTotal;
-    if (Number.isNaN(score) || score < 0 || score > max) {
-      return ctx.reply(`أرسل درجة بين 0 و${max}.`);
-    }
-    if (!(await teacherOwnsSubject(ctx, state.subjectId, state.ssId))) {
-      userState.delete(ctx.from.id);
-      return ctx.reply('غير مصرح.');
-    }
-    await studies.setReportItemScore(state.reportId, score, ctx.from.id);
-    const summary = await studies.getReportGradingSummary(state.studentId, state.subjectId, state.ssId);
     userState.delete(ctx.from.id);
-    return ctx.reply(
-      `✅ حُفظ تقييم هذا التقرير: ${score} من ${max}.\n` +
-        `التقارير المُقيَّمة: ${Number(summary.graded)} من ${Number(summary.total)} | متوسط التقييمات: ${Number(summary.average)} من ${max}\n` +
-        'لحفظ هذا المتوسط في سجل درجات الطالب، افتح قائمة تقييم تقاريره واضغط «حفظ متوسط التقييمات كدرجة التقارير». تقييم التقرير وحده لا يحدّث درجة التقارير المعتمدة.',
-      isAdmin(ctx) ? adminMainMenu() : teacherMainMenu()
-    );
+    return ctx.reply('تقييم التقرير بدرجة رقمية أُلغي. اختر مستوى التقرير: جيد أو مقبول أو ضعيف من قائمة تقييم التقارير.');
   }
 
   // -------- تحرير درجة طالب من الأستاذ أو الأدمن --------
@@ -5426,7 +5415,7 @@ async function showStudentGrades(ctx, page = 0) {
     let text = `📘 ${limitButtonText(g.subject_name,65)}\n${limitButtonText(g.stage_name,65)} — ${limitButtonText(g.season_name,65)}`;
     if (Number(g.report_count) || g.mode === 'report' || Number(g.report_score) > 0) {
       text += `\n📄 التقارير المُقيَّمة: ${Number(g.graded_count)} من ${Number(g.report_count)}`;
-      text += `\nمتوسط تقييمات التقارير: ${g.report_average === null ? 'لم تُقيَّم بعد' : `${Number(g.report_average)} من ${max}`}`;
+      text += `\nمستويات التقييم: جيد ${Number(g.good_count)} · مقبول ${Number(g.acceptable_count)} · ضعيف ${Number(g.weak_count)}`;
       text += `\nدرجة التقارير المحفوظة: ${g.report_score === null ? 'لم تُحفظ بعد' : `${Number(g.report_score)} من ${max}`}`;
       if (Number(g.report_count)) buttons.push([callbackButton(
         limitButtonText(`📄 تقييمات تقاريري — ${g.subject_name} — ${g.season_name}`,60),
@@ -5447,7 +5436,7 @@ async function showStudentGrades(ctx, page = 0) {
   if ((page+1)*5 < Number(grades[0]?.total_count || 0)) nav.push(callbackButton('التالي',`student_grades:${page+1}`));
   if (nav.length) buttons.push(nav);
   const text = `🎯 درجات المباحثات والتقارير — الصفحة ${page+1}\n\n` +
-    (parts.length ? parts.join('\n\n') + '\n\nمتوسط التقييمات يتغيّر مع تقييم التقارير؛ درجة التقارير المحفوظة يحدّثها الأستاذ بصورة مستقلة.' : 'لا توجد سجلات في هذه الصفحة بعد.');
+    (parts.length ? parts.join('\n\n') + '\n\nدرجة التقارير المحفوظة يعتمدها الأستاذ بصورة مستقلة عن تقييم كل تقرير.' : 'لا توجد سجلات في هذه الصفحة بعد.');
   return renderStudentGrades(ctx,student,text,buttons);
 }
 
@@ -5476,7 +5465,7 @@ bot.action(/^student_report_marks:(\d+):(\d+):(\d{1,5}):(\d{1,5})$/,async ctx=>{
   const max = studies.GRADE_WEIGHTS.participationTotal;
   const lines = reports.map((r,i)=>{
     const stamp = new Date(r.submitted_at).toLocaleString('en-GB',{timeZone:ATTENDANCE_TIME_ZONE});
-    return `${page*10+i+1}. ${stamp}\n${r.score === null ? '⏳ بانتظار تقييم الأستاذ' : `✅ التقييم: ${Number(r.score)} من ${max}`}`;
+    return `${page*10+i+1}. ${stamp}\n${r.rating && studies.REPORT_RATINGS[r.rating] ? `✅ التقييم: ${studies.REPORT_RATINGS[r.rating].label}` : r.score === null ? '⏳ بانتظار تقييم الأستاذ' : `✅ تقييم سابق: ${Number(r.score)} من ${max}`}`;
   });
   const nav = [], buttons = [];
   if (page) nav.push(callbackButton('السابق',`student_report_marks:${subjectId}:${stageSeasonId}:${page-1}:${returnPage}`));
@@ -5487,7 +5476,7 @@ bot.action(/^student_report_marks:(\d+):(\d+):(\d{1,5}):(\d{1,5})$/,async ctx=>{
     `📄 تقييمات تقاريري — ${limitButtonText(overview.subject_name,65)}\n${limitButtonText(overview.stage_name,65)} — ${limitButtonText(overview.season_name,65)}\n` +
     `الصفحة ${page+1} | أوقات التسليم: ${ATTENDANCE_TIME_ZONE}\n\n` +
     (lines.join('\n\n') || 'لا توجد تقارير في هذه الصفحة.') +
-    `\n\nمتوسط التقييمات: ${overview.report_average === null ? 'لم تُقيَّم بعد' : `${Number(overview.report_average)} من ${max}`}\n` +
+    `\n\nمستويات التقييم: جيد ${Number(overview.good_count)} · مقبول ${Number(overview.acceptable_count)} · ضعيف ${Number(overview.weak_count)}\n` +
     `درجة التقارير المحفوظة: ${overview.report_score === null ? 'لم تُحفظ بعد' : `${Number(overview.report_score)} من ${max}`}`,buttons);
 });
 
@@ -5911,7 +5900,21 @@ bot.action(/rep_send:(\d+):(\d+)/, async (ctx) => {
     return ctx.answerCbQuery('لست في نظام التقارير في هذه المادة.', { show_alert: true });
   }
   const blocked = await studies.getReportSubmissionBlock(student.id, subjectId, ssId);
-  if (blocked) return ctx.answerCbQuery(blocked.message, { show_alert: true });
+  if (blocked) {
+    // أرسل هذا الأسبوع ولم يُقيَّم تقريره بعد: يُعرض عليه استبداله إن أخطأ.
+    if (blocked.code === 'WEEK_USED') {
+      const prev = await studies.getReplaceableReport(student.id, subjectId, ssId);
+      if (prev && Number(prev.replace_count || 0) < studies.REPORT_REPLACE_LIMIT) {
+        await ctx.answerCbQuery();
+        return ctx.reply(
+          `أرسلت تقرير مادة «${row.subject_name}» هذا الأسبوع ولم يقيّمه الأستاذ بعد.\n` +
+            'إن أخطأت فيه فاضغط «استبدال تقريري» وأرسل التقرير الصحيح؛ يحل محل السابق ولا يُحتسب إلا تقرير واحد.',
+          Markup.inlineKeyboard([[callbackButton('🔁 استبدال تقريري', `rep_replace:${subjectId}:${ssId}`)]])
+        );
+      }
+    }
+    return ctx.answerCbQuery(blocked.message, { show_alert: true });
+  }
   userState.set(ctx.from.id, {
     action: 'student_report_upload',
     subjectId,
@@ -5922,6 +5925,34 @@ bot.action(/rep_send:(\d+):(\d+)/, async (ctx) => {
   return replyStudentScreen(
     ctx, student, withStudentName(student, `📄 أرسل الآن تقرير مادة «${row.subject_name}»:\n` +
       `يمكنك إرسال ملف (PDF أو Word) أو صورة أو نص مكتوب.\n\n${REPORT_WEEKLY_REMINDER}\nللإلغاء أرسل /start.`)
+  );
+});
+
+bot.action(/^rep_replace:(\d+):(\d+)$/, async (ctx) => {
+  const student = await effectiveStudent(ctx);
+  if (!student) return ctx.answerCbQuery('الرجاء التسجيل أولًا.');
+  const subjectId = Number(ctx.match[1]);
+  const ssId = Number(ctx.match[2]);
+  const subjects = await studies.listStudentSubjects(student.id);
+  const row = subjects.find((s) => s.subject_id === subjectId && s.stage_season_id === ssId);
+  if (!row) return ctx.answerCbQuery('هذه المادة ليست ضمن موادك.');
+  if (row.mode !== 'report') return ctx.answerCbQuery('لست في نظام التقارير في هذه المادة.', { show_alert: true });
+  // يُعاد التحقق من قاعدة البيانات: لا استبدال بعد تقييم الأستاذ أو بعد انتهاء الأسبوع.
+  const prev = await studies.getReplaceableReport(student.id, subjectId, ssId);
+  if (!prev) return ctx.answerCbQuery('لا يمكن استبدال التقرير: قيّمه الأستاذ أو انتهى أسبوعه. تواصل مع الإدارة.', { show_alert: true });
+  if (Number(prev.replace_count || 0) >= studies.REPORT_REPLACE_LIMIT)
+    return ctx.answerCbQuery(`استبدلت تقريرك ${studies.REPORT_REPLACE_LIMIT} مرات ولا يمكن أكثر. تواصل مع الإدارة.`, { show_alert: true });
+  userState.set(ctx.from.id, {
+    action: 'student_report_upload',
+    subjectId,
+    ssId,
+    subjectName: row.subject_name,
+    replaceReportId: prev.id,
+  });
+  await ctx.answerCbQuery();
+  return replyStudentScreen(
+    ctx, student, withStudentName(student, `🔁 أرسل الآن التقرير الصحيح لمادة «${row.subject_name}»:\n` +
+      'يمكنك إرسال ملف أو صورة أو نص مكتوب، وسيحل محل تقريرك السابق.\nللإلغاء أرسل /start.')
   );
 });
 

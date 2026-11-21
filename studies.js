@@ -249,6 +249,9 @@ async function initStudiesSchema() {
     ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS rating TEXT;
     -- ترحيل لمرة واحدة: كل تقرير قُيّم سابقًا بدرجة فوق الصفر يصبح «جيد»، وتُحفظ درجته القديمة للرجوع إليها.
     ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS legacy_score NUMERIC;
+    -- استبدال الطالب لتقريره قبل التقييم (تصحيح الخطأ).
+    ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS replaced_at TIMESTAMP;
+    ALTER TABLE student_reports ADD COLUMN IF NOT EXISTS replace_count INTEGER NOT NULL DEFAULT 0;
     UPDATE student_reports SET legacy_score=score, rating='good', score=1 WHERE rating IS NULL AND score>0;
     ALTER TABLE student_reports DROP CONSTRAINT IF EXISTS student_reports_rating_check;
     ALTER TABLE student_reports ADD CONSTRAINT student_reports_rating_check CHECK (rating IS NULL OR rating IN ('good','acceptable','weak'));
@@ -1855,15 +1858,89 @@ async function getReportSubmissionBlock(studentId, subjectId, stageSeasonId, { a
   return null;
 }
 
-// تقييم تقرير واحد بعينه (من 15)، فيمكن للأستاذ تقييمها تباعًا كلما وصلته.
-const setReportItemScore = (reportId, score, gradedBy) =>
-  pool
-    .query(
-      `UPDATE student_reports SET score=$2, graded_at=now(), graded_by=$3
-       WHERE id=$1 RETURNING *`,
-      [reportId, validScore(score, GRADE_WEIGHTS.participationTotal), gradedBy]
-    )
-    .then((r) => r.rows[0]);
+
+// ---------------------------------------------------------------------------
+// تصحيح التقرير الخاطئ
+// ---------------------------------------------------------------------------
+// الطالب يستبدل تقريره الأخير ما دام الأستاذ لم يقيّمه، وفي أسبوع إرساله نفسه فقط، وبحد أقصى 3 مرات.
+// بعد التقييم يصبح التقرير نهائيًا عند الطالب، وتصحيحه يمرّ عبر الإدارة (deleteReport).
+const REPORT_REPLACE_LIMIT = 3;
+const replaceableReportSql = (forUpdate) => `
+  SELECT r.* FROM student_reports r
+  JOIN stage_seasons ss ON ss.id=r.stage_season_id AND ss.is_active=true
+  WHERE r.student_id=$1 AND r.subject_id=$2 AND r.stage_season_id=$3
+    AND r.score IS NULL AND r.rating IS NULL
+    AND COALESCE(r.counted_week,(date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $4)+interval '1 day')-interval '1 day')::date)
+      = (date_trunc('week',(now() AT TIME ZONE $4)+interval '1 day')-interval '1 day')::date
+    AND (r.counted_week IS NOT NULL
+         OR EXTRACT(ISODOW FROM ((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $4))::int = ANY($5::int[]))
+  ORDER BY r.submitted_at DESC, r.id DESC LIMIT 1${forUpdate ? ' FOR UPDATE OF r' : ''}`;
+
+const getReplaceableReport = (studentId, subjectId, stageSeasonId) =>
+  pool.query(replaceableReportSql(false), [studentId, subjectId, stageSeasonId, SCHEDULE_TZ, REPORT_ACCEPT_DAYS])
+    .then((r) => r.rows[0] || null);
+
+async function replaceReport(studentId, subjectId, stageSeasonId, reportId, { fileId, kind, note, sourceMessageId = null }) {
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const cur = (await c.query(replaceableReportSql(true), [studentId, subjectId, stageSeasonId, SCHEDULE_TZ, REPORT_ACCEPT_DAYS])).rows[0];
+    if (!cur || Number(cur.id) !== Number(reportId))
+      throw appError('لا يمكن استبدال هذا التقرير: إما قيّمه الأستاذ أو انتهى أسبوعه.', 'CONFLICT', 409);
+    if (Number(cur.replace_count || 0) >= REPORT_REPLACE_LIMIT)
+      throw appError(`استبدلت هذا التقرير ${REPORT_REPLACE_LIMIT} مرات، ولا يمكن استبداله أكثر. تواصل مع الإدارة.`, 'CONFLICT', 409);
+    let row;
+    try {
+      row = (await c.query(
+        `UPDATE student_reports SET telegram_file_id=$2, file_kind=$3, note=$4, source_message_id=$5,
+                replaced_at=now(), replace_count=COALESCE(replace_count,0)+1
+         WHERE id=$1 AND score IS NULL AND rating IS NULL RETURNING *`,
+        [cur.id, fileId, kind, note, sourceMessageId])).rows[0];
+    } catch (err) {
+      if (err.code === '23505') { await c.query('ROLLBACK'); return null; } // الرسالة نفسها وصلت مرتين
+      throw err;
+    }
+    await c.query('COMMIT');
+    return row;
+  } catch (err) {
+    await c.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    c.release();
+  }
+}
+
+// حذف إداري لتقرير (خاطئ/مكرر). يُفتح للطالب استثناء للأسبوع نفسه ليرسل التقرير الصحيح في أي يوم.
+async function deleteReport(reportId, actorId) {
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const row = (await c.query(
+      `SELECT r.*, st.telegram_id, st.full_name, sub.name AS subject_name,
+              COALESCE(r.counted_week,(date_trunc('week',((r.submitted_at AT TIME ZONE 'UTC') AT TIME ZONE $2)+interval '1 day')-interval '1 day')::date) AS week_start,
+              (r.score IS NOT NULL) AS was_graded
+       FROM student_reports r
+       JOIN students st ON st.id=r.student_id
+       JOIN subjects sub ON sub.id=r.subject_id
+       JOIN stage_seasons ss ON ss.id=r.stage_season_id AND ss.is_active=true
+       WHERE r.id=$1 FOR UPDATE OF r`, [reportId, SCHEDULE_TZ])).rows[0];
+    if (!row) throw appError('التقرير غير موجود أو موسمه مؤرشف.', 'NOT_FOUND', 404);
+    await c.query('DELETE FROM student_reports WHERE id=$1', [row.id]);
+    await c.query(
+      `INSERT INTO report_week_grants(student_id,subject_id,stage_season_id,week_start,granted_by,note)
+       VALUES($1,$2,$3,$4,$5,'فُتح بعد حذف تقرير')
+       ON CONFLICT(student_id,subject_id,stage_season_id,week_start) DO UPDATE
+         SET used_at=NULL,report_id=NULL,cancelled_at=NULL,granted_by=EXCLUDED.granted_by,note=EXCLUDED.note,created_at=now()`,
+      [row.student_id, row.subject_id, row.stage_season_id, row.week_start, actorId]);
+    await c.query('COMMIT');
+    return row;
+  } catch (err) {
+    await c.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    c.release();
+  }
+}
 
 // تقييم تقرير بمستوى (جيد/مقبول/ضعيف). يُحفظ الوزن في score ليبقى «بلا تقييم» = score فارغ في كل الشاشات.
 const setReportItemRating = async (reportId, rating, gradedBy) => {
@@ -2296,6 +2373,9 @@ const listStudentGradeOverview = (studentId, {page=0,size=5,subjectId=null,stage
       UNION SELECT subject_id,stage_season_id FROM final_grades WHERE student_id=$1
     ), reports AS (
       SELECT subject_id,stage_season_id,COUNT(*) AS report_count,COUNT(score) AS graded_count,
+        COUNT(*) FILTER (WHERE rating='good') AS good_count,
+        COUNT(*) FILTER (WHERE rating='acceptable') AS acceptable_count,
+        COUNT(*) FILTER (WHERE rating='weak') AS weak_count,
         ROUND(AVG(score)::numeric,2) AS report_average
       FROM student_reports WHERE student_id=$1 GROUP BY subject_id,stage_season_id
     )
@@ -2304,7 +2384,8 @@ const listStudentGradeOverview = (studentId, {page=0,size=5,subjectId=null,stage
       pm.mode,fg.report_score,fg.mubahatha_score,fg.participation_score,fg.exams_score,
       fg.total_score,fg.finalized_at,fg.edited_at,
       COALESCE(rep.report_count,0) AS report_count,COALESCE(rep.graded_count,0) AS graded_count,
-      rep.report_average,COUNT(*) OVER() AS total_count
+      rep.report_average,COALESCE(rep.good_count,0) AS good_count,COALESCE(rep.acceptable_count,0) AS acceptable_count,
+      COALESCE(rep.weak_count,0) AS weak_count,COUNT(*) OVER() AS total_count
     FROM records r JOIN subjects sub ON sub.id=r.subject_id
     JOIN stage_seasons ss ON ss.id=r.stage_season_id JOIN seasons se ON se.id=ss.season_id
     JOIN stages st ON st.id=ss.stage_id
@@ -2579,7 +2660,10 @@ module.exports = {
   reportSendDaysLabel,
   REPORT_RATINGS,
   correctExamQuestion,
-  setReportItemScore,
+  getReplaceableReport,
+  replaceReport,
+  deleteReport,
+  REPORT_REPLACE_LIMIT,
   getReportGradingSummary,
   applyReportAverage,
   getStudentFinalGrades,

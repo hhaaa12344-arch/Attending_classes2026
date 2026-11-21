@@ -196,7 +196,8 @@ function createTeacherWeb({db,studies,scheduler,botToken,origin,readJson}) {
           JOIN stage_seasons ss ON ss.id=r.stage_season_id AND ss.is_active=true
           WHERE r.id=$1 AND ta.teacher_id=$2`,[reportId,actor.teacherId])).rows[0];
         if(!report)throw appError('التقرير غير موجود أو ليس ضمن موادك.','FORBIDDEN',403);
-        result=typeof body.rating==='string'?await studies.setReportItemRating(reportId,body.rating,actor.id):await studies.setReportItemScore(reportId,validScore(body.score,15),actor.id);
+        if(typeof body.rating!=='string')throw appError('اختر مستوى التقرير: جيد أو مقبول أو ضعيف.');
+        result=await studies.setReportItemRating(reportId,body.rating,actor.id);
       }
       else if(route==='/reports/average'){
         const studentId=positiveInt(body.studentId);
