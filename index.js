@@ -78,12 +78,15 @@ bot.use(async(ctx,next)=>{
 // طابور إرسال عام ينظّم معدّل الرسائل ويعالج 429؛ يُستعمل للبث الجماعي.
 const { createTelegramQueue, PRIORITY } = require('./telegramQueue');
 const tgQueue = createTelegramQueue(bot.telegram);
+const REPORT_REMINDERS_ENABLED = process.env.WEEKLY_REPORT_REMINDERS === 'on';
 const weeklyReportReminders = require('./weeklyReportReminders').createWeeklyReportReminders(db.pool, {
   sendDays: studies.REPORT_SEND_DAYS, lateDays: studies.REPORT_LATE_DAYS, tz: studies.SCHEDULE_TZ,
   dayNames: { 1: 'الاثنين', 2: 'الثلاثاء', 3: 'الأربعاء', 4: 'الخميس', 5: 'الجمعة', 6: 'السبت', 7: 'الأحد' },
 });
 const outboxWorker = require('./outbox').createOutboxWorker(db.pool,tgQueue,bot.telegram.deleteMessage.bind(bot.telegram),
-  {prepareNotification:weeklyReportReminders.prepareNotification});
+  // تنبيهات «لم ترسل تقرير هذا الأسبوع» متوقفة افتراضيًا (أزعجت الطلبة). لإعادتها: WEEKLY_REPORT_REMINDERS=on
+  // وأي تنبيه منها عالق في الطابور يُسقَط دون إرسال.
+  {prepareNotification:REPORT_REMINDERS_ENABLED?weeklyReportReminders.prepareNotification:async()=>null});
 const broadcasts = require('./broadcasts').createBroadcasts(db.pool);
 const accountLinks = require('./accountLinks').createAccountLinks(db.pool);
 // Both background sends and replies share the same rate limiter.
@@ -7222,11 +7225,19 @@ async function main() {
     .then((r) => { if (r.queued) console.log(`Single-attendance announcement queued: ${r.queued} (students ${r.students}, teachers ${r.teachers})`); })
     .catch((err) => console.error('Single-attendance announcement failed:', err.message));
   // تذكير التقارير: الجمعة (آخر يوم) والسبت (انتهت المهلة) لمن لم يرسل تقرير الأسبوع.
-  const sweepWeeklyReports = () => weeklyReportReminders.sweep()
-    .then((r) => { if (r.queued) console.log(`Weekly report reminders (${r.kind}): queued ${r.queued}`); })
-    .catch((err) => console.error('Weekly report reminders failed:', err.message));
-  timers.push(setInterval(sweepWeeklyReports, 60 * 1000));
-  sweepWeeklyReports();
+  // متوقفة افتراضيًا: لا جدولة، ويُلغى أي تنبيه منها ما زال منتظرًا في الطابور.
+  if (REPORT_REMINDERS_ENABLED) {
+    const sweepWeeklyReports = () => weeklyReportReminders.sweep()
+      .then((r) => { if (r.queued) console.log(`Weekly report reminders (${r.kind}): queued ${r.queued}`); })
+      .catch((err) => console.error('Weekly report reminders failed:', err.message));
+    timers.push(setInterval(sweepWeeklyReports, 60 * 1000));
+    sweepWeeklyReports();
+  } else {
+    db.pool.query(`UPDATE notification_outbox SET status='expired',lease_until=NULL
+                   WHERE dedupe_key LIKE 'weekly-report:%' AND status IN ('pending','sending')`)
+      .then((r) => { if (r.rowCount) console.log(`Weekly report reminders disabled: cancelled ${r.rowCount} pending`); })
+      .catch((err) => console.error('Cancel weekly report reminders failed:', err.message));
+  }
   // تنظيف الذاكرة كل خمس دقائق: حالات إدخال منتهية، وسجلات مجموعات قديمة
   timers.push(setInterval(cleanupMemory, 5 * 60 * 1000));
   const tick=()=>runScheduleTick().catch(err=>console.error('Schedule failed:',err.message));
