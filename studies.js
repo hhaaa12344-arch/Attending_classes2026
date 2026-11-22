@@ -1910,6 +1910,36 @@ async function replaceReport(studentId, subjectId, stageSeasonId, reportId, { fi
   }
 }
 
+// استبدال إداري لنص التقرير (تصحيح من الإدارة). يُمسح تقييمه السابق ليُعاد تقييمه على المحتوى الجديد.
+async function adminReplaceReport(reportId, note) {
+  const text = String(note || '').trim();
+  if (text.length < 10) throw appError('النص قصير جدًا (10 أحرف على الأقل).');
+  if (text.length > 4000) throw appError('النص طويل جدًا (الحد 4000 حرف).');
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const before = (await c.query(
+      `SELECT r.*, st.telegram_id, st.full_name, sub.name AS subject_name
+       FROM student_reports r
+       JOIN students st ON st.id=r.student_id
+       JOIN subjects sub ON sub.id=r.subject_id
+       JOIN stage_seasons ss ON ss.id=r.stage_season_id AND ss.is_active=true
+       WHERE r.id=$1 FOR UPDATE OF r`, [reportId])).rows[0];
+    if (!before) throw appError('التقرير غير موجود أو موسمه مؤرشف.', 'NOT_FOUND', 404);
+    const after = (await c.query(
+      `UPDATE student_reports SET file_kind='text', telegram_file_id=NULL, note=$2, source_message_id=NULL,
+           score=NULL, rating=NULL, graded_at=NULL, graded_by=NULL, replaced_at=now()
+       WHERE id=$1 RETURNING *`, [reportId, text])).rows[0];
+    await c.query('COMMIT');
+    return { before, after, wasGraded: before.score !== null };
+  } catch (err) {
+    await c.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    c.release();
+  }
+}
+
 // حذف إداري لتقرير (خاطئ/مكرر). يُفتح للطالب استثناء للأسبوع نفسه ليرسل التقرير الصحيح في أي يوم.
 async function deleteReport(reportId, actorId) {
   const c = await pool.connect();
@@ -2663,6 +2693,7 @@ module.exports = {
   getReplaceableReport,
   replaceReport,
   deleteReport,
+  adminReplaceReport,
   REPORT_REPLACE_LIMIT,
   getReportGradingSummary,
   applyReportAverage,

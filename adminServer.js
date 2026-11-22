@@ -334,6 +334,18 @@ function createAdminServer({db,studies,adminData,scheduler,botToken,adminIds,ori
           result=await studies.setReportItemRating(id,String(body.rating||''),actor.id);
           await audit(actor.id,'grade_report','report',id,before,result);
         }
+        else if((m=/^\/reports\/(\d+)\/replace$/.exec(route))&&req.method==='POST'){
+          const id=positiveInt(m[1]);
+          const {before,after,wasGraded}=await studies.adminReplaceReport(id,body.note);
+          await audit(actor.id,'replace_report','report',id,{kind:before.file_kind,note:before.note,rating:before.rating,score:before.score},{kind:after.file_kind,note:after.note});
+          const stamp=Date.now();
+          if(before.telegram_id)await enqueueNotification(db.pool,{key:`report-replaced:${id}:${stamp}`,chatId:before.telegram_id,
+            text:`✏️ صحّحت إدارة المعهد نص تقريرك في مادة «${before.subject_name}». يمكنك مراجعته من «تقييمات تقاريري».`});
+          for(const t of (await db.listSubjectTeachers(before.subject_id)).filter(t=>t.telegram_id))
+            await enqueueNotification(db.pool,{key:`report-replaced:${id}:${stamp}:t${t.teacher_id}`,chatId:t.telegram_id,
+              text:`✏️ عدّلت الإدارة تقرير الطالب ${before.full_name} في مادة «${before.subject_name}»${wasGraded?' وأُلغي تقييمه السابق؛ يرجى إعادة تقييمه':''}.`});
+          result={replaced:true,wasGraded};
+        }
         else if((m=/^\/reports\/(\d+)\/delete$/.exec(route))&&req.method==='POST'){
           const id=positiveInt(m[1]);
           const deleted=await studies.deleteReport(id,actor.id);
