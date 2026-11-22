@@ -808,7 +808,7 @@ document.addEventListener('click',async event=>{
       if(!await confirmAction('إنهاء هذه المباحثة وفتح الحضور الثاني؟'))return;busy=true;const result=await api('/sessions/'+target.dataset.id+'/end',{},'POST');await refresh();notify(result.status==='already_open'?'حضور النهاية مفتوح بالفعل؛ لم تتغير مهلته.':'فُتح الحضور الثاني وحُفظت إشعارات الطلبة للإرسال.');
     }else if(a==='report'){
       const r=window.currentReports.find(x=>String(x.id)===target.dataset.id);if(!r)return;
-      dialog('مراجعة التقرير',`<h3>${esc(r.full_name)} — ${esc(r.subject_name)}</h3><p>${esc(r.group_title_snapshot||'سجل قديم بلا مجموعة موثقة')} · ${stamp(r.submitted_at)}</p><div class="report-note">${esc(r.note||'التقرير مرفق كملف.')}</div>${button('إرسال المرفق إلى حسابي في البوت','report-send',`data-id="${r.id}"`)}${button('التواصل مع الطالب','contact-student',`data-id="${r.student_id}"`)}<div class="detail-section"><strong>مستوى التقرير</strong><div class="form-actions">${['good','acceptable','weak'].map(k=>button(RATING_AR[k],'report-rate',`data-id="${r.id}" data-rating="${k}"`,r.rating===k?'primary':'')).join('')}</div>${button('حذف التقرير (خاطئ أو مكرر)','report-delete',`data-id="${r.id}"`,'danger')}</div>`);
+      dialog('مراجعة التقرير',`<h3>${esc(r.full_name)} — ${esc(r.subject_name)}</h3><p>${esc(r.group_title_snapshot||'سجل قديم بلا مجموعة موثقة')} · ${stamp(r.submitted_at)}</p><div class="report-note">${esc(r.note||'التقرير مرفق كملف.')}</div>${button('إرسال المرفق إلى حسابي في البوت','report-send',`data-id="${r.id}"`)}${button('التواصل مع الطالب','contact-student',`data-id="${r.student_id}"`)}<div class="detail-section"><strong>مستوى التقرير</strong><div class="form-actions">${['good','acceptable','weak'].map(k=>button(RATING_AR[k],'report-rate',`data-id="${r.id}" data-rating="${k}"`,r.rating===k?'primary':'')).join('')}</div><form id="replace-report" data-id="${r.id}" class="detail-section"><label>استبدال نص التقرير (تصحيح من الإدارة، يُمسح تقييمه السابق)<textarea name="note" rows="6" minlength="10" maxlength="4000" required>${esc(r.file_kind==='text'?(r.note||''):'')}</textarea></label><div class="form-actions"><button class="primary">استبدال النص</button></div></form>${button('حذف التقرير (خاطئ أو مكرر)','report-delete',`data-id="${r.id}"`,'danger')}</div>`);
     }else if(a==='report-send'){busy=true;await api('/reports/'+target.dataset.id+'/send',{},'POST');notify('أُدرج التقرير للإرسال إلى حسابك في البوت.');}
     else if(a==='report-rate'){busy=true;await api('/reports/'+target.dataset.id+'/score',{rating:target.dataset.rating},'POST');closeDetail();await refresh();notify('حُفظ مستوى التقرير.');}
     else if(a==='report-delete'){
@@ -1170,6 +1170,11 @@ document.addEventListener('submit',async event=>{
       if(!await confirmAction(`إعادة فتح الامتحان لجميع الطلبة المؤهلين الذين لم يسلّموه من ${stamp(opensAt)} إلى ${stamp(closesAt)}، وإرسال إشعار لهم؟`))return;
       const result=await api('/exams/'+currentExam.id+'/reopen-missing',{opensAt,closesAt,note:body.note},'POST');
       await showExam(currentExam.id);notify(`أُعيد فتح الامتحان لـ ${result.studentCount} طالبًا، وحُفظ ${result.notified} إشعارًا للإرسال.`);
+    }
+    else if(form.id==='replace-report'){
+      if(!await confirmAction('استبدال نص هذا التقرير؟ سيُمسح تقييمه السابق ويُبلَّغ الطالب والأستاذ.'))return;
+      const res=await api('/reports/'+form.dataset.id+'/replace',body,'POST');closeDetail();await refresh();
+      notify(res.wasGraded?'استُبدل النص ومُسح التقييم السابق ليُعاد تقييمه.':'استُبدل نص التقرير.');
     }
     else if(form.id==='edit-subject'){await api('/subjects/'+form.dataset.id,body,'PATCH');closeDetail();await refresh();notify('حُفظ اسم المادة.');}
     else if(form.id==='edit-teacher'){await api('/teachers/'+form.dataset.id,body,'PATCH');closeDetail();await loadTeachers();notify('حُفظ اسم الأستاذ.');}
