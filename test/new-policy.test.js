@@ -36,7 +36,7 @@ test('approved transfers are counted independently per subject and season',async
  const counts=await studies.listParticipationChangeCounts(st.id);assert.equal(counts.find(x=>x.stage_season_id===ss).count,2);assert.equal(counts.find(x=>x.stage_season_id===ss2).count,1);
  }finally{await db.pool.end();}
 });
-test('notification cleanup removes old finished lesson notices but keeps active and important records',async()=>{
+test('notification cleanup removes old finished notices but keeps active, failed-for-diagnosis and important records',async()=>{
  const {db}=await testDatabase();try{
  await db.pool.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,status,created_at,sent_at,expires_at) VALUES
  ('daily:old:sent',1,'[]','sent',now()-interval '120 days',now()-interval '100 days',now()-interval '95 days'),
@@ -49,7 +49,7 @@ test('notification cleanup removes old finished lesson notices but keeps active 
  await db.pool.query("INSERT INTO notification_outbox(dedupe_key,chat_id,payload,status,created_at,sent_at,expires_at,telegram_message_id) VALUES ('daily:undeleted',1,'[]','sent',now()-interval '120 days',now()-interval '100 days',now()-interval '100 days',99)");
  const worker=require('../outbox').createOutboxWorker(db.pool,{sendMessage:async()=>{throw Error('temporary');}});await worker.tick();worker.stop();
  const keys=(await db.pool.query("SELECT dedupe_key FROM notification_outbox ORDER BY dedupe_key")).rows.map(x=>x.dedupe_key);
- assert.ok(!keys.includes('daily:old:sent'));assert.ok(!keys.includes('daily:old:failed'));assert.ok(keys.includes('daily:recent:failed'));assert.ok(keys.includes('daily:future:sent'));assert.ok(keys.includes('important:failed'));assert.ok(keys.includes('other:sent'));assert.ok(keys.includes('daily:undeleted'));assert.ok(keys.includes('daily:pending'));assert.equal((await db.pool.query("SELECT status FROM notification_outbox WHERE dedupe_key='daily:pending'")).rows[0].status,'pending');
+ assert.ok(!keys.includes('daily:old:sent'));assert.ok(!keys.includes('daily:old:failed'));assert.ok(keys.includes('daily:recent:failed'));assert.ok(keys.includes('daily:future:sent'));assert.ok(keys.includes('important:failed'));assert.ok(!keys.includes('other:sent'),'الإشعار المرسل غير اليومي يُحذف بعد 30 يومًا (OUTBOX_RETENTION_OTHER_DAYS)');assert.ok(keys.includes('daily:undeleted'));assert.ok(keys.includes('daily:pending'));assert.equal((await db.pool.query("SELECT status FROM notification_outbox WHERE dedupe_key='daily:pending'")).rows[0].status,'pending');
  }finally{await db.pool.end();}
 });
 test('daily deduplication remains while a delivery is active',async()=>{
