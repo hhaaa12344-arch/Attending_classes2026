@@ -7202,8 +7202,10 @@ async function main() {
   timers.push(setInterval(checkConsecutiveAbsence, 10 * 60 * 1000));
   timers.push(setInterval(()=>runScheduleTick().catch(err=>console.error('Schedule failed:',err.message)), 30 * 1000));
   // إعادة فحص الملفات التي وصلت قبل إدخال جدول اليوم.
-  timers.push(setInterval(()=>recoverPendingChannelLessonsToday(), 15 * 1000));
-  timers.push(setInterval(()=>scheduledPublication.recoverAudioDaysToday().catch(err=>console.error('Audio day recovery failed:',err.message)), 15 * 1000));
+  // كل دقيقة بدل 15 ثانية لتقليل استهلاك المعالج وقاعدة البيانات (التكلفة)؛ هذا مسار استرداد استثنائي،
+  // أما نشر الدرس العادي فيُعالَج لحظة وصوله ولا يمر بهذا المؤقت.
+  timers.push(setInterval(()=>recoverPendingChannelLessonsToday(), 60 * 1000));
+  timers.push(setInterval(()=>scheduledPublication.recoverAudioDaysToday().catch(err=>console.error('Audio day recovery failed:',err.message)), 60 * 1000));
   // مواد اليوم المجدولة التي لم يُعرف منشورها تُفتح تلقائيًا بعد مهلة قصيرة من أول درس معروف.
   const scheduledFallback = require('./scheduledFallback').createScheduledFallback(db);
   if (scheduledFallback.graceMinutes !== null) {

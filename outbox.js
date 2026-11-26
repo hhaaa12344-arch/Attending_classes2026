@@ -17,18 +17,27 @@ function createOutboxWorker(pool, queue, deleteMessage = null, { prepareNotifica
     running = true;
     try {
       if(Date.now()-lastPrune>86400000){
-        // Daily lesson notices alone: keep other outbox records for diagnostics,
-        // delivery history, retries, and administrative workflows.
-        await pool.query(`DELETE FROM notification_outbox WHERE dedupe_key LIKE 'daily:%' AND (
-          (status='sent' AND sent_at<now()-interval '30 days'
-            AND (expires_at IS NULL OR expires_at<now()-interval '30 days')
-            AND (telegram_message_id IS NULL OR deleted_at IS NOT NULL))
-          OR (status='expired' AND expires_at<now()-interval '30 days')
-          OR (status='failed' AND expires_at<now()-interval '90 days'))`);
+        // تنظيف الإشعارات المنتهية لتبقى قاعدة البيانات صغيرة (تكلفة الذاكرة والقرص).
+        // لا يُمَس أي إشعار منتظر أو قيد الإرسال، ولا رسالة تلغرام ما زال البوت سيحذفها عند انتهاء صلاحيتها.
+        //   قصيرة (OUTBOX_RETENTION_DAYS، الافتراضي 3 أيام): إشعارات الدروس اليومية والتذكيرات والجلسات والمواعيد.
+        //   أخرى (OUTBOX_RETENTION_OTHER_DAYS، الافتراضي 30 يومًا).
+        //   محفوظة أطول (OUTBOX_RETENTION_KEEP_DAYS، الافتراضي 90 يومًا): البث والامتحانات لأن تعديل البث وتأجيل الامتحان يعتمدان عليها،
+        //   والإشعارات الفاشلة (للتشخيص): تُحذف فقط إن كانت من النوع القصير وبعد المدة نفسها، وغير ذلك تبقى.
+        const days=(name,def,min,max)=>{const v=Number(process.env[name]??def);return Number.isInteger(v)&&v>=min&&v<=max?v:def;};
+        const shortDays=days('OUTBOX_RETENTION_DAYS',3,2,90),otherDays=days('OUTBOX_RETENTION_OTHER_DAYS',30,2,365),keepDays=days('OUTBOX_RETENTION_KEEP_DAYS',90,2,365);
+        await pool.query(`DELETE FROM notification_outbox n
+          WHERE n.status IN ('sent','expired','failed')
+            AND (n.telegram_message_id IS NULL OR n.deleted_at IS NOT NULL
+                 OR NOT (n.dedupe_key LIKE 'daily:%' OR n.dedupe_key LIKE 'lesson-reminder:%'))
+            AND GREATEST(COALESCE(n.sent_at,n.created_at),COALESCE(n.expires_at,n.created_at))
+                < now() - (CASE WHEN n.status='failed' THEN (CASE WHEN n.dedupe_key ~ '^(daily|lesson-reminder|lesson-recovered|lesson-republished|session|slot|missed-slot):' THEN $3::int ELSE 36500 END)
+                                WHEN n.dedupe_key ~ '^(daily|lesson-reminder|lesson-recovered|lesson-republished|session|slot|missed-slot):' THEN $1::int
+                                WHEN n.dedupe_key ~ '^(broadcast|exam|exam-postpone):' THEN $3::int
+                                ELSE $2::int END) * interval '1 day'`,[shortDays,otherDays,keepDays]);
         await pool.query(`DELETE FROM student_daily_lesson_notifications d
-          WHERE d.notification_date<CURRENT_DATE-30 AND NOT EXISTS(
+          WHERE d.notification_date<CURRENT_DATE-$1::int AND NOT EXISTS(
             SELECT 1 FROM notification_outbox n WHERE n.dedupe_key='daily:'||d.stage_id||':'||d.notification_date||':'||d.student_id
-              AND (n.status IN ('pending','sending') OR n.expires_at>now()))`);
+              AND (n.status IN ('pending','sending') OR n.expires_at>now()))`,[shortDays]);
         lastPrune=Date.now();
       }
       await pool.query(`UPDATE notification_outbox SET status='expired'
@@ -53,7 +62,7 @@ function createOutboxWorker(pool, queue, deleteMessage = null, { prepareNotifica
               AND (expires_at IS NULL OR expires_at > now())
             ORDER BY priority,id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *`);
         const job = rows[0];
-        if (!job) {nextPoll=Date.now()+5000;break;}
+        if (!job) {nextPoll=Date.now()+10000;break;} // استطلاع خامل كل 10 ث بدل 5 لتقليل استعلامات قاعدة البيانات؛ الإرسال الفوري يوقظه force
         try {
           const beforeSend = prepareNotification && job.dedupe_key.startsWith('weekly-report:') ? async () => {
             const payload = await prepareNotification(job);
