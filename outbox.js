@@ -7,13 +7,39 @@ async function enqueueNotification(client, { key, chatId, text, extra = {}, meth
   [key, chatId, method, JSON.stringify([text, extra]), priority, expiresAt,JSON.stringify(mark)]);
 }
 
+// محادثة محظورة تُجرَّب مرة واحدة كل 14 يومًا فقط (تشفي الحالات الخاطئة)، وتُرفع الحماية فور تفاعلها مع البوت.
+const BLOCKED_PROBE_MS = 14 * 24 * 3600 * 1000;
+
 function createOutboxWorker(pool, queue, deleteMessage = null, { prepareNotification = null } = {}) {
+  // chat_id -> وقت الحظر. null حتى أول تحميل.
+  let blocked = null;
+  async function loadBlocked() {
+    try {
+      blocked = new Map((await pool.query('SELECT chat_id,blocked_at FROM blocked_chats')).rows
+        .map((r) => [Number(r.chat_id), new Date(r.blocked_at).getTime()]));
+    } catch (err) { blocked = new Map(); console.warn('Blocked chats load failed:', err.code || err.message); }
+  }
+  function block(chatId, reason = '403') {
+    chatId = Number(chatId);
+    (blocked ||= new Map()).set(chatId, Date.now());
+    return pool.query(`INSERT INTO blocked_chats(chat_id,reason) VALUES($1,$2)
+      ON CONFLICT(chat_id) DO UPDATE SET reason=EXCLUDED.reason,blocked_at=now()`, [chatId, String(reason).slice(0, 100)])
+      .catch((err) => console.warn('Block chat failed:', err.code || err.message));
+  }
+  function unblock(chatId) {
+    chatId = Number(chatId);
+    if (blocked && !blocked.has(chatId)) return Promise.resolve();
+    blocked?.delete(chatId);
+    return pool.query('DELETE FROM blocked_chats WHERE chat_id=$1', [chatId])
+      .catch((err) => console.warn('Unblock chat failed:', err.code || err.message));
+  }
   let running = false;
   let stopped = false;
   let nextPoll = 0;
   let lastPrune = 0;
   async function tick({force=false}={}) {
     if (running || stopped || (!force && Date.now()<nextPoll)) return;
+    if (!blocked) await loadBlocked();
     running = true;
     try {
       if(Date.now()-lastPrune>86400000){
@@ -23,6 +49,8 @@ function createOutboxWorker(pool, queue, deleteMessage = null, { prepareNotifica
         //   أخرى (OUTBOX_RETENTION_OTHER_DAYS، الافتراضي 30 يومًا).
         //   محفوظة أطول (OUTBOX_RETENTION_KEEP_DAYS، الافتراضي 90 يومًا): البث والامتحانات لأن تعديل البث وتأجيل الامتحان يعتمدان عليها،
         //   والإشعارات الفاشلة (للتشخيص): تُحذف فقط إن كانت من النوع القصير وبعد المدة نفسها، وغير ذلك تبقى.
+        //   الفاشلة بخطأ 403 (الطالب حظر البوت أو لم يبدأ محادثته) لا قيمة تشخيصية لها: تُحذف بعد 7 أيام.
+        const SHORT_KINDS='^(daily|lesson-reminder|lesson-recovered|lesson-republished|session|slot|missed-slot|schedule-fallback|exam-start|exam-reminder|exam-cancel):';
         const days=(name,def,min,max)=>{const v=Number(process.env[name]??def);return Number.isInteger(v)&&v>=min&&v<=max?v:def;};
         const shortDays=days('OUTBOX_RETENTION_DAYS',3,2,90),otherDays=days('OUTBOX_RETENTION_OTHER_DAYS',30,2,365),keepDays=days('OUTBOX_RETENTION_KEEP_DAYS',90,2,365);
         await pool.query(`DELETE FROM notification_outbox n
@@ -30,10 +58,11 @@ function createOutboxWorker(pool, queue, deleteMessage = null, { prepareNotifica
             AND (n.telegram_message_id IS NULL OR n.deleted_at IS NOT NULL
                  OR NOT (n.dedupe_key LIKE 'daily:%' OR n.dedupe_key LIKE 'lesson-reminder:%'))
             AND GREATEST(COALESCE(n.sent_at,n.created_at),COALESCE(n.expires_at,n.created_at))
-                < now() - (CASE WHEN n.status='failed' THEN (CASE WHEN n.dedupe_key ~ '^(daily|lesson-reminder|lesson-recovered|lesson-republished|session|slot|missed-slot):' THEN $3::int ELSE 36500 END)
-                                WHEN n.dedupe_key ~ '^(daily|lesson-reminder|lesson-recovered|lesson-republished|session|slot|missed-slot):' THEN $1::int
+                < now() - (CASE WHEN n.status='failed' AND n.last_error LIKE '403%' THEN 7
+                                WHEN n.status='failed' THEN (CASE WHEN n.dedupe_key ~ $4::text THEN $3::int ELSE 36500 END)
+                                WHEN n.dedupe_key ~ $4::text THEN $1::int
                                 WHEN n.dedupe_key ~ '^(broadcast|exam|exam-postpone):' THEN $3::int
-                                ELSE $2::int END) * interval '1 day'`,[shortDays,otherDays,keepDays]);
+                                ELSE $2::int END) * interval '1 day'`,[shortDays,otherDays,keepDays,SHORT_KINDS]);
         await pool.query(`DELETE FROM student_daily_lesson_notifications d
           WHERE d.notification_date<CURRENT_DATE-$1::int AND NOT EXISTS(
             SELECT 1 FROM notification_outbox n WHERE n.dedupe_key='daily:'||d.stage_id||':'||d.notification_date||':'||d.student_id
@@ -63,6 +92,12 @@ function createOutboxWorker(pool, queue, deleteMessage = null, { prepareNotifica
             ORDER BY priority,id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *`);
         const job = rows[0];
         if (!job) {nextPoll=Date.now()+10000;break;} // استطلاع خامل كل 10 ث بدل 5 لتقليل استعلامات قاعدة البيانات؛ الإرسال الفوري يوقظه force
+        // محادثة محظورة: لا نستهلك طلبًا من تلغرام ولا محاولات؛ يُسجَّل الفشل كما لو أعاد تلغرام 403.
+        const blockedAt = blocked.get(Number(job.chat_id));
+        if (blockedAt !== undefined && Date.now() - blockedAt < BLOCKED_PROBE_MS) {
+          await pool.query("UPDATE notification_outbox SET status='failed',lease_until=NULL,last_error='403' WHERE id=$1", [job.id]);
+          continue;
+        }
         try {
           const beforeSend = prepareNotification && job.dedupe_key.startsWith('weekly-report:') ? async () => {
             const payload = await prepareNotification(job);
@@ -76,6 +111,7 @@ function createOutboxWorker(pool, queue, deleteMessage = null, { prepareNotifica
             await pool.query("UPDATE notification_outbox SET status='expired',lease_until=NULL,last_error=NULL WHERE id=$1", [job.id]);
             continue;
           }
+          if (blocked.has(Number(job.chat_id))) await unblock(job.chat_id); // نجحت التجربة: المحادثة عادت
           const c=await pool.connect();
           try{
             await c.query('BEGIN');
@@ -88,6 +124,7 @@ function createOutboxWorker(pool, queue, deleteMessage = null, { prepareNotifica
           }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
         } catch (err) {
           const code = err.response?.error_code;
+          if (code === 403) await block(job.chat_id, '403');
           const permanent = code === 400 || code === 403 || job.attempts >= 8;
           const delay = Math.max(Number(err.response?.parameters?.retry_after || 0), Math.min(300, 2 ** job.attempts));
           await pool.query(`UPDATE notification_outbox SET status=$2,lease_until=NULL,
@@ -97,6 +134,6 @@ function createOutboxWorker(pool, queue, deleteMessage = null, { prepareNotifica
       }
     } finally { running = false; }
   }
-  return { tick, stop: () => { stopped = true; }, isRunning: () => running };
+  return { tick, stop: () => { stopped = true; }, isRunning: () => running, block, unblock, blockedCount: () => blocked?.size || 0 };
 }
 module.exports = { enqueueNotification, createOutboxWorker };

@@ -95,6 +95,21 @@ bot.use((ctx,next)=>{
   for(const method of ['sendMessage','sendDocument','sendPhoto','sendVideo']) ctx.telegram[method]=(chatId,content,extra)=>tgQueue[method](chatId,content,extra,{priority:PRIORITY.high});
   return next();
 });
+// ذكاء الإشعارات: محادثة حظرت البوت يتوقف الإرسال إليها، ويُستأنف فور رجوعها (رسالة/ضغطة زر/إلغاء الحظر).
+bot.use((ctx, next) => {
+  try {
+    const mcm = ctx.update.my_chat_member;
+    if (mcm) {
+      const status = mcm.new_chat_member?.status;
+      if (['kicked', 'left'].includes(status)) outboxWorker.block(mcm.chat.id, 'my_chat_member');
+      else if (['member', 'administrator'].includes(status)) outboxWorker.unblock(mcm.chat.id);
+    } else {
+      if (ctx.chat?.id) outboxWorker.unblock(ctx.chat.id);
+      if (ctx.from?.id) outboxWorker.unblock(ctx.from.id);
+    }
+  } catch (err) { console.warn('Blocked-chat tracking failed:', err.message); }
+  return next();
+});
 // أفضل جهد: يُحدَّث يوزر تيليجرام المخزَّن للطالب كلما تفاعل، بلا انتظار ودون كسر الرد لو فشل.
 bot.use((ctx,next)=>{
   if(ctx.from?.id)db.syncStudentUsername(ctx.from.id,ctx.from.username||null);

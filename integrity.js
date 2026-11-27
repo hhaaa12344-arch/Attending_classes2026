@@ -61,6 +61,19 @@ async function initIntegritySchema(pool) {
       lease_until TIMESTAMPTZ, expires_at TIMESTAMPTZ,
       last_error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), sent_at TIMESTAMPTZ
     );
+    -- محادثات رفضت تلغرام الإرسال إليها (403: حظر البوت/حذف المجموعة...). يتوقف الإرسال إليها حتى تعود.
+    -- عند إنشاء الجدول أول مرة يُملأ من آخر نتيجة إرسال لكل محادثة.
+    DO $blk$ BEGIN
+      IF to_regclass('blocked_chats') IS NULL THEN
+        CREATE TABLE blocked_chats (
+          chat_id BIGINT PRIMARY KEY, reason TEXT, blocked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        INSERT INTO blocked_chats(chat_id,reason,blocked_at)
+          SELECT chat_id,'403',created_at FROM (
+            SELECT DISTINCT ON (chat_id) chat_id,status,last_error,created_at FROM notification_outbox ORDER BY chat_id,id DESC
+          ) x WHERE status='failed' AND last_error='403';
+      END IF;
+    END $blk$;
     CREATE TABLE IF NOT EXISTS message_broadcasts (
       id BIGSERIAL PRIMARY KEY,
       request_key TEXT NOT NULL UNIQUE,
