@@ -27,3 +27,15 @@ test('finished notifications are pruned by kind; pending, undeleted-telegram and
   const keys=(await db.pool.query('SELECT dedupe_key FROM notification_outbox ORDER BY dedupe_key')).rows.map(r=>r.dedupe_key);
   assert.deepEqual(keys.sort(),['absence:student:1','broadcast:1:1','daily:1:2026-01-01:2','daily:1:2026-01-01:3','lesson-reminder:1:1'].sort());
 });
+
+test('failed notices blocked by the student (403) are pruned after 7 days; other failures are kept for diagnosis',async()=>{
+  await db.pool.query(`INSERT INTO notification_outbox(dedupe_key,chat_id,payload,status,last_error,created_at,expires_at)
+    VALUES('lesson-reminder:5:1',1,'[]','failed','403',now()-interval '9 days',now()-interval '9 days'),
+          ('lesson-reminder:5:2',1,'[]','failed','403',now()-interval '2 days',now()-interval '2 days'),
+          ('schedule-fallback:5:3',1,'[]','failed','500',now()-interval '9 days',now()-interval '9 days'),
+          ('schedule-fallback:5:4',1,'[]','sent',NULL,now()-interval '5 days',now()-interval '5 days')`);
+  const worker=createOutboxWorker(db.pool,{sendMessage:async()=>({message_id:1})});
+  await worker.tick({force:true});
+  const keys=(await db.pool.query("SELECT dedupe_key FROM notification_outbox WHERE dedupe_key IN ('lesson-reminder:5:1','lesson-reminder:5:2','schedule-fallback:5:3','schedule-fallback:5:4')")).rows.map(r=>r.dedupe_key).sort();
+  assert.deepEqual(keys,['lesson-reminder:5:2','schedule-fallback:5:3']);
+});
